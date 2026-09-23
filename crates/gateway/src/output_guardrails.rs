@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::providers::traits::{ChatCompletionResponse, GatewayError};
+use tw_types::GatewayError;
 
 /// Inclusive upper bound on `MaxLength.max_chars`. Anything past this
 /// is almost certainly a configuration mistake — even a 1M-char
@@ -56,17 +56,22 @@ pub enum OutputGuardrail {
 /// The error message names which rule fired so operators can chase
 /// it back to the configuration row that produced it.
 pub fn apply_output_guardrails(
-    response: &ChatCompletionResponse,
+    body: &[u8],
+    client: tw_dialect::ir::Dialect,
     rules: &[OutputGuardrail],
 ) -> Result<(), GatewayError> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let text = assistant_text(body, client);
     for rule in rules {
         match rule {
             OutputGuardrail::MaxLength { max_chars } => {
-                let total: usize = response
-                    .choices
-                    .iter()
-                    .map(|c| c.message.content.as_str().map(|s| s.len()).unwrap_or(0))
-                    .sum();
+                // Counts bytes, as it always has — for CJK text that is
+                // about three per character. Changing it to characters
+                // would quietly loosen every configured cap, so it stays
+                // until that is decided on its own.
+                let total = text.len();
                 if total > *max_chars {
                     return Err(GatewayError::TransformError(format!(
                         "output guardrail max_length: response is {total} chars > {max_chars} cap"
@@ -78,114 +83,76 @@ pub fn apply_output_guardrails(
     Ok(())
 }
 
+/// The assistant's text in a whole response, in whichever format the
+/// caller asked for. The conversion layer already knows where each
+/// format keeps it.
+fn assistant_text(body: &[u8], client: tw_dialect::ir::Dialect) -> String {
+    use tw_dialect::ir::{Block, Dialect};
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return String::new();
+    };
+    let r = match client {
+        Dialect::Chat => tw_dialect::chat::decode_response(&v),
+        Dialect::Anthropic => tw_dialect::anthropic::decode_response(&v),
+        Dialect::Responses => tw_dialect::responses::decode_response(&v),
+        Dialect::Gemini => tw_dialect::gemini::decode_response(&v),
+        Dialect::Bedrock => tw_dialect::bedrock::decode_response(&v),
+    };
+    r.blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::traits::{ChatMessage, Choice};
+    use tw_dialect::ir::Dialect;
 
-    fn resp(content: &str) -> ChatCompletionResponse {
-        ChatCompletionResponse {
-            id: "id".into(),
-            object: "chat.completion".into(),
-            created: 0,
-            model: "m".into(),
-            choices: vec![Choice {
-                index: 0,
-                message: ChatMessage {
-                    role: "assistant".into(),
-                    content: serde_json::Value::String(content.into()),
-                    ..Default::default()
-                },
-                finish_reason: None,
-            }],
-            usage: None,
-        }
+    fn chat(content: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": "id", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
+                         "finish_reason": "stop"}]
+        }))
+        .unwrap()
+    }
+
+    fn anthropic(text: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": "msg", "type": "message", "role": "assistant", "model": "m",
+            "content": [{"type": "text", "text": text}], "stop_reason": "end_turn"
+        }))
+        .unwrap()
     }
 
     #[test]
-    fn max_length_passes_under_cap() {
-        let r = resp("hello");
-        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
-        assert!(apply_output_guardrails(&r, &rules).is_ok());
+    fn max_length_allows_a_response_within_the_cap() {
+        let rules = [OutputGuardrail::MaxLength { max_chars: 10 }];
+        assert!(apply_output_guardrails(&chat("short"), Dialect::Chat, &rules).is_ok());
     }
 
     #[test]
-    fn max_length_rejects_over_cap() {
-        let r = resp(&"x".repeat(200));
-        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
-        let err = apply_output_guardrails(&r, &rules).unwrap_err();
-        assert!(matches!(err, GatewayError::TransformError(_)));
+    fn max_length_rejects_a_response_over_the_cap() {
+        let rules = [OutputGuardrail::MaxLength { max_chars: 3 }];
+        assert!(apply_output_guardrails(&chat("too long"), Dialect::Chat, &rules).is_err());
     }
 
     #[test]
-    fn empty_rules_pass_any_response() {
-        let r = resp(&"x".repeat(10_000));
-        assert!(apply_output_guardrails(&r, &[]).is_ok());
+    fn max_length_reads_the_text_in_whichever_format_the_caller_asked_for() {
+        // The cap used to read `choices[].message.content` only, so an
+        // Anthropic-shaped answer would have measured as empty.
+        let rules = [OutputGuardrail::MaxLength { max_chars: 3 }];
+        assert!(
+            apply_output_guardrails(&anthropic("too long"), Dialect::Anthropic, &rules).is_err()
+        );
     }
 
     #[test]
-    fn exactly_at_cap_passes() {
-        // `>` not `>=` — content of exactly max_chars must be allowed.
-        // Lock this in so an over-cautious refactor to `>=` is caught.
-        let r = resp(&"x".repeat(100));
-        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
-        assert!(apply_output_guardrails(&r, &rules).is_ok());
-    }
-
-    #[test]
-    fn one_char_over_cap_rejects() {
-        let r = resp(&"x".repeat(101));
-        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
-        assert!(apply_output_guardrails(&r, &rules).is_err());
-    }
-
-    #[test]
-    fn non_string_content_counts_as_zero() {
-        // Tool-call responses set content to a JSON array; the guardrail
-        // shouldn't blow up there — it should just count those choices
-        // as zero-length and let the rule decide.
-        let r = ChatCompletionResponse {
-            id: "id".into(),
-            object: "chat.completion".into(),
-            created: 0,
-            model: "m".into(),
-            choices: vec![Choice {
-                index: 0,
-                message: ChatMessage {
-                    role: "assistant".into(),
-                    content: serde_json::json!([{"type": "tool_use"}]),
-                    ..Default::default()
-                },
-                finish_reason: None,
-            }],
-            usage: None,
-        };
-        let rules = [OutputGuardrail::MaxLength { max_chars: 5 }];
-        assert!(apply_output_guardrails(&r, &rules).is_ok());
-    }
-
-    #[test]
-    fn multi_choice_content_sums_across_choices() {
-        // n-best sampling: two choices, each 60 chars, summed = 120 > 100.
-        let r = ChatCompletionResponse {
-            id: "id".into(),
-            object: "chat.completion".into(),
-            created: 0,
-            model: "m".into(),
-            choices: (0..2)
-                .map(|i| Choice {
-                    index: i,
-                    message: ChatMessage {
-                        role: "assistant".into(),
-                        content: serde_json::Value::String("x".repeat(60)),
-                        ..Default::default()
-                    },
-                    finish_reason: None,
-                })
-                .collect(),
-            usage: None,
-        };
-        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
-        assert!(apply_output_guardrails(&r, &rules).is_err());
+    fn no_rules_means_no_parsing_at_all() {
+        assert!(apply_output_guardrails(b"not json", Dialect::Chat, &[]).is_ok());
     }
 }

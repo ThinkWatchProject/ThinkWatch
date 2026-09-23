@@ -2,9 +2,9 @@
 //!
 //! Lives in `common` (not `gateway`) so the mcp-gateway crate can
 //! use it without inverting the dep graph. The gateway crate's
-//! `pii_redactor::PiiRedactor` keeps its message-level redaction
-//! API (which needs gateway types like `ChatMessage` to walk the
-//! request shape) and delegates blob redaction to this module's
+//! `pii_redactor::PiiRedactor` keeps its request-level redaction
+//! API (which walks the decoded request from `tw-dialect`) and
+//! delegates blob redaction to this module's
 //! [`BlobRedactor`].
 //!
 //! ## Why blob vs message redaction is split

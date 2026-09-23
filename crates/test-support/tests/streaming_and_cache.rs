@@ -9,7 +9,7 @@
 //!     call gets `X-Cache: HIT` and an identical body without
 //!     touching the upstream
 //!   - streaming cache hit: the proxy assembles the upstream's SSE
-//!     into a `ChatCompletionResponse`, caches it, and on a follow-up
+//!     into a whole chat completion, caches it, and on a follow-up
 //!     `stream=true` request re-emits it as a single-chunk SSE with
 //!     the same `X-Cache: HIT` marker — no second upstream call
 //!   - non-deterministic requests (`temperature > 0`) are NOT cached;
@@ -152,7 +152,7 @@ async fn temperature_nonzero_request_is_not_cached() {
 async fn streaming_cache_hit_replays_assembled_sse() {
     // The streaming MISS path consumes upstream chunks, lets the
     // client see them, and the on_done callback assembles them into
-    // a `ChatCompletionResponse` it stashes in the cache. A follow-up
+    // a whole chat completion it stashes in the cache. A follow-up
     // streaming request with the SAME body then gets re-emitted as
     // `data: <json>\n\ndata: [DONE]\n\n` — a single-chunk SSE — and
     // the upstream is NOT contacted.
@@ -195,7 +195,7 @@ async fn streaming_cache_hit_replays_assembled_sse() {
             );
             assert!(
                 txt.contains("\"object\":\"chat.completion\""),
-                "HIT replay should serialize the assembled ChatCompletionResponse: {txt}"
+                "HIT replay should carry the assembled chat completion: {txt}"
             );
             // Upstream got exactly ONE call across all client requests.
             // (The MockProvider wraps the SSE upstream — count its hits.)

@@ -1,4 +1,3 @@
-use crate::providers::traits::{ChatCompletionResponse, ChatMessage};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -31,24 +30,28 @@ pub struct RedactionContext {
     pub replacements: HashMap<String, String>,
 }
 
-/// 在 JSON 里装 base64 的键。替换不进这些值 —— 一段数字恰好出现在
-/// 图片编码里的概率很小，但一旦出现，改掉的是图片，不是 PII。
+/// Keys that carry base64 in a request. Replacement never enters them: a
+/// digit run landing inside an encoded image is unlikely, but where it
+/// happens the thing changed is the image, not the PII.
 const BASE64_CARRIERS: &[&str] = &["data", "bytes"];
 
 impl RedactionContext {
-    /// 把找到的 PII 替换套到一份**原始**请求上。
+    /// Carry the found PII onto a **raw** request.
     ///
-    /// 直通的请求没有经过中间表示 —— 同方言时它原样发出去，才保得住
-    /// `cache_control` 这些中间表示不认识的东西。可 PII 是在中间表示上
-    /// 找的（那边结构确定），所以要把「值 → 占位符」回套到原始 JSON 上。
+    /// A request forwarded in its own format never goes through the
+    /// decoded form — that is how `cache_control` and everything else
+    /// the decoded form does not model survive. But PII is found on the
+    /// decoded form, where the structure is known, so the
+    /// value → placeholder mapping has to be carried back onto the raw
+    /// JSON.
     ///
-    /// **在解析后的 `Value` 上做，不在字节上做**:客户端可能把字符
-    /// 转义成 `\u0040`，字节里就找不到原值了。
+    /// **On the parsed `Value`, not the bytes**: a client may send `@` as
+    /// `\u0040`, and the bytes would not contain the value at all.
     ///
-    /// 长的原值先替，免得 `a@x.com` 先把 `aa@x.com` 里的那一截吃掉。
+    /// Longer values first, so `a@x.com` does not eat part of `aa@x.com`.
     ///
-    /// 同一个值若也出现在系统提示里，那里也会被替换 —— 只在它同时是
-    /// 用户写下的 PII 时才会发生。
+    /// A value that also appears in the system prompt is replaced there
+    /// too — which only happens when the caller also wrote it.
     pub fn apply_to(&self, value: &mut serde_json::Value) {
         if self.replacements.is_empty() {
             return;
@@ -68,12 +71,13 @@ impl RedactionContext {
         });
     }
 
-    /// 在一整份响应的字节上把占位符换回原值。
+    /// Paint the original values back into a whole response's bytes.
     ///
-    /// 整包响应里占位符是完整的，所以可以直接在字节上换。原值要按 JSON
-    /// 字符串的规则转义 —— 一个带引号的原值直接塞回去会把 JSON 弄坏。
-    /// 流式不能这么做：占位符会被切在两帧里，而两帧之间隔着帧结构，
-    /// 在字节流上不连续（见 [`PiiStreamRestorer`]）。
+    /// A whole response has its placeholders intact, so this works on the
+    /// bytes. Each original is JSON-escaped first — one containing a quote,
+    /// put back as-is, would break the document. A stream cannot be done
+    /// this way: a placeholder split across two frames is not contiguous in
+    /// the byte stream (see [`PiiStreamRestorer`]).
     pub fn restore_bytes(&self, body: &[u8]) -> Vec<u8> {
         if self.replacements.is_empty() {
             return body.to_vec();
@@ -82,7 +86,7 @@ impl RedactionContext {
         for (ph, orig) in &self.replacements {
             if text.contains(ph.as_str()) {
                 let escaped = serde_json::to_string(orig).unwrap_or_default();
-                // 去掉 to_string 加的那对引号，留下转义好的内容
+                // Drop the quotes `to_string` added; keep the escaping.
                 let inner = &escaped[1..escaped.len().saturating_sub(1)];
                 text = text.replace(ph.as_str(), inner);
             }
@@ -209,113 +213,30 @@ impl PiiRedactor {
         Self { patterns }
     }
 
-    /// Redact PII from user messages, returning modified messages and a context
-    /// that can be used to restore original values in the response.
-    ///
-    /// Only `user` role messages are redacted; `system` and `assistant` messages
-    /// are left unchanged.
-    ///
-    /// Uses a single-pass approach: build a combined regex from all patterns,
-    /// find all matches with positions, sort by position (descending), and
-    /// replace in reverse order to avoid invalidating offsets.
-    pub fn redact_messages(
-        &self,
-        messages: &[ChatMessage],
-    ) -> (Vec<ChatMessage>, RedactionContext) {
-        let mut counters: HashMap<String, u32> = HashMap::new();
-        let mut replacements: HashMap<String, String> = HashMap::new();
-
-        // Placeholders are stable per request — `{{EMAIL_1}}`,
-        // `{{PHONE_2}}`, … — *not* randomised with a per-request
-        // salt. Earlier this carried a 64-bit salt to "prevent
-        // prediction", but the salt also made cache keys unique
-        // per request (cache stores keyed on redacted bytes), so
-        // every PII-bearing prompt was a guaranteed cache miss
-        // (see DESIGN-001 in proxy.rs). The salt protected against
-        // nothing real: cross-caller cache leak requires identical
-        // pre-redaction text — but two callers sharing identical
-        // pre-redaction text MUST also share identical redaction
-        // contexts (the PII values come from the text itself), so
-        // restoration is symmetric on either side of the cache.
-
-        let redacted = messages
-            .iter()
-            .map(|msg| {
-                if msg.role != "user" {
-                    return msg.clone();
-                }
-
-                let new_content = match &msg.content {
-                    // OpenAI / Anthropic single-string form
-                    serde_json::Value::String(s) => {
-                        let redacted =
-                            self.redact_text(s, &mut counters, &mut replacements, "user message");
-                        serde_json::Value::String(redacted)
-                    }
-                    // Multimodal form: `[{"type":"text","text":"..."}, {"type":"image_url",...}]`
-                    // Each text part is redacted in place; non-text parts (images,
-                    // tool_use blocks) pass through unchanged. Without this the
-                    // redactor silently bypassed every vision-style request that
-                    // contained PII in a text segment.
-                    serde_json::Value::Array(parts) => {
-                        let new_parts: Vec<serde_json::Value> = parts
-                            .iter()
-                            .map(|part| match part {
-                                serde_json::Value::Object(map) => {
-                                    if let Some(serde_json::Value::String(t)) = map.get("text") {
-                                        let red = self.redact_text(
-                                            t,
-                                            &mut counters,
-                                            &mut replacements,
-                                            "user message (multimodal)",
-                                        );
-                                        let mut new_map = map.clone();
-                                        new_map
-                                            .insert("text".into(), serde_json::Value::String(red));
-                                        serde_json::Value::Object(new_map)
-                                    } else {
-                                        part.clone()
-                                    }
-                                }
-                                _ => part.clone(),
-                            })
-                            .collect();
-                        serde_json::Value::Array(new_parts)
-                    }
-                    other => other.clone(),
-                };
-
-                // Preserve `extra` — it carries `name` (OpenAI multi-user
-                // chat labels) on user messages, plus any vendor
-                // annotations. Replacing only `content` was the bug:
-                // `..Default::default()` zeroed the flatten bucket so
-                // a name-tagged user prompt got stripped on the way
-                // through the redactor.
-                ChatMessage {
-                    role: msg.role.clone(),
-                    content: new_content,
-                    extra: msg.extra.clone(),
-                }
-            })
-            .collect();
-
-        (redacted, RedactionContext { replacements })
+    /// Redact one piece of text. For the admin "try these patterns"
+    /// endpoint, and anything else that holds plain text rather than a
+    /// request.
+    pub fn redact_str(&self, text: &str) -> (String, RedactionContext) {
+        let mut counters = HashMap::new();
+        let mut replacements = HashMap::new();
+        let out = self.redact_text(text, &mut counters, &mut replacements, "text");
+        (out, RedactionContext { replacements })
     }
 
-    /// 在中间表示上脱敏。结构是确定的，不用猜。
+    /// Redact the caller's text in a decoded request.
     ///
-    /// 和 [`Self::redact_messages`] 判的是同一件事，区别只在**文本从哪来**：
-    /// 那边要在一个 `serde_json::Value` 上猜哪个字段是文本，猜漏了 Anthropic
-    /// 的 `tool_result` 块里嵌套的内容、数组形式的 `system`、Responses 里字段
-    /// 名不叫 `text` 的文本部件。这边走 [`tw_dialect::ir`]，结构由类型保证，
-    /// 不存在「猜错字段名」这类漏洞。
+    /// The decoded form's structure is known, which the earlier version —
+    /// guessing at a `serde_json::Value` for a string or a `text` field —
+    /// never had: it missed text nested in Anthropic `tool_result` blocks,
+    /// the array form of `system`, and Responses parts whose text field is
+    /// not called `text`.
     ///
-    /// 只脱用户侧的内容，和 `redact_messages` 一致：只处理
-    /// `Message.role == Role::User`，assistant 消息原样放过。
+    /// Only user messages are redacted; assistant turns pass through.
     ///
-    /// `Request.system` 不脱——系统提示是运营方写进配置的，不是调用方输入的；
-    /// 脱了系统提示里的邮箱、IP 之类，会把运营方写的指令改样，且这些值本身
-    /// 也不是需要保护的用户 PII。
+    /// `Request.system` is not redacted. The system prompt is written by
+    /// the operator, not typed by the caller; redacting an address or IP
+    /// in it rewrites the operator's instructions, and such values there
+    /// are configuration, not user PII.
     pub fn redact_request(&self, request: &mut tw_dialect::ir::Request) -> RedactionContext {
         use tw_dialect::ir::Role;
 
@@ -377,9 +298,10 @@ impl PiiRedactor {
         for (start, end, pattern_idx) in filtered {
             let pattern = &self.patterns[pattern_idx];
             let matched_value = redacted_content[start..end].to_string();
-            // 同一个值只给一个占位符。两个理由:模型看到 `{{EMAIL_1}}` 和
-            // `{{EMAIL_2}}` 会当成两个人;而且直通请求要把「值 → 占位符」
-            // 套到原始 JSON 上,那必须是个函数,一个值对两个占位符就无从套
+            // One placeholder per value. A model shown `{{EMAIL_1}}` and
+            // `{{EMAIL_2}}` treats them as two people; and a forwarded
+            // request needs value → placeholder to be a function to carry
+            // it onto the raw JSON.
             let prefix = format!("{{{{{}_", pattern.placeholder_prefix);
             let existing = replacements
                 .iter()
@@ -412,17 +334,17 @@ impl PiiRedactor {
         redacted_content
     }
 
-    /// [`Self::redact_request`] 的递归部分：就地脱敏一组 IR 部件。
+    /// The recursive part of [`Self::redact_request`]: redact a list of
+    /// parts in place.
     ///
-    /// `Part::ToolResult` 要递归进它自己的 `content`——工具结果里常带着
-    /// 模型帮用户查出来的原始数据（读邮件、查订单之类），旧的
-    /// `serde_json::Value` 实现没有「工具结果」这个概念，只会漏过去。
+    /// `Part::ToolResult` is recursed into. Tool results often carry data
+    /// a tool fetched on the user's behalf — a mailbox, an order — and the
+    /// earlier `Value`-based redactor had no notion of a tool result at
+    /// all.
     ///
-    /// `Image` / `File` / `Thinking` / `ToolCall` 不动：
-    /// 图片和文件是二进制媒体，不是可脱敏的文本；`Thinking` 是模型自己的
-    /// 推理过程，不是调用方输入；`ToolCall.input` 是模型生成的调用参数，
-    /// 改动它会破坏工具调用本身（而且它不是 `redact_messages` 原本处理的
-    /// 范围，保持行为一致）。
+    /// `Image` / `File` / `Thinking` / `ToolCall` are left alone: media is
+    /// not redactable text, thinking is the model's own reasoning, and
+    /// changing `ToolCall.input` would break the call itself.
     fn redact_parts(
         &self,
         parts: &mut [tw_dialect::ir::Part],
@@ -446,23 +368,6 @@ impl PiiRedactor {
                     );
                 }
                 Part::Image(_) | Part::File { .. } | Part::Thinking(_) | Part::ToolCall(_) => {}
-            }
-        }
-    }
-
-    /// Restore placeholders in the response content back to original PII values.
-    pub fn restore_response(&self, response: &mut ChatCompletionResponse, ctx: &RedactionContext) {
-        if ctx.replacements.is_empty() {
-            return;
-        }
-
-        for choice in &mut response.choices {
-            if let Some(content_str) = choice.message.content.as_str() {
-                let mut restored = content_str.to_string();
-                for (placeholder, original) in &ctx.replacements {
-                    restored = restored.replace(placeholder, original);
-                }
-                choice.message.content = serde_json::Value::String(restored);
             }
         }
     }
@@ -648,48 +553,28 @@ impl PiiStreamRestorer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::traits::{ChatCompletionResponse, ChatMessage, Choice, Usage};
-
-    fn user_msg(content: &str) -> ChatMessage {
-        ChatMessage {
-            role: "user".to_string(),
-            content: serde_json::Value::String(content.to_string()),
-            ..Default::default()
-        }
-    }
-
-    fn system_msg(content: &str) -> ChatMessage {
-        ChatMessage {
-            role: "system".to_string(),
-            content: serde_json::Value::String(content.to_string()),
-            ..Default::default()
-        }
-    }
-
-    fn make_response(content: &str) -> ChatCompletionResponse {
-        ChatCompletionResponse {
-            id: "test".to_string(),
-            object: "chat.completion".to_string(),
-            created: 0,
-            model: "test".to_string(),
-            choices: vec![Choice {
-                index: 0,
-                message: ChatMessage {
-                    role: "assistant".to_string(),
-                    content: serde_json::Value::String(content.to_string()),
-                    ..Default::default()
-                },
-                finish_reason: Some("stop".to_string()),
-            }],
-            usage: Some(Usage {
-                prompt_tokens: 10,
-                completion_tokens: 10,
-                total_tokens: 20,
-            }),
-        }
-    }
 
     /// Find the placeholder replacement that maps to the given original value.
+    #[test]
+    fn applying_to_a_raw_request_touches_nothing_but_the_redacted_text() {
+        // A request forwarded as sent must reach the upstream whole —
+        // `name`, `cache_control`, everything — apart from the PII.
+        let ctx = RedactionContext {
+            replacements: [("{{EMAIL_1}}".to_string(), "alice@example.com".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let mut v = serde_json::json!({
+            "role": "user", "name": "alice",
+            "content": [{"type": "text", "text": "mail alice@example.com",
+                         "cache_control": {"type": "ephemeral"}}]
+        });
+        ctx.apply_to(&mut v);
+        assert_eq!(v["name"], "alice");
+        assert_eq!(v["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(v["content"][0]["text"], "mail {{EMAIL_1}}");
+    }
+
     fn find_placeholder(ctx: &RedactionContext, original: &str) -> String {
         ctx.replacements
             .iter()
@@ -701,10 +586,9 @@ mod tests {
     #[test]
     fn redact_email() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("Contact me at alice@example.com please")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("Contact me at alice@example.com please");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("EMAIL"), "got: {content}");
         assert!(!content.contains("alice@example.com"));
         let ph = find_placeholder(&ctx, "alice@example.com");
@@ -714,10 +598,9 @@ mod tests {
     #[test]
     fn redact_china_phone() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("Call me at 13812345678")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("Call me at 13812345678");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("PHONE"), "got: {content}");
         assert!(!content.contains("13812345678"));
         let ph = find_placeholder(&ctx, "13812345678");
@@ -728,10 +611,9 @@ mod tests {
     fn redact_us_phone() {
         let redactor = PiiRedactor::new();
         // Simplified US phone regex matches 10-digit patterns like 555-123-4567
-        let messages = vec![user_msg("Call 555-123-4567")];
-        let (redacted, _ctx) = redactor.redact_messages(&messages);
+        let (redacted, _ctx) = redactor.redact_str("Call 555-123-4567");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(
             content.contains("PHONE"),
             "phone should be redacted, got: {content}"
@@ -742,10 +624,9 @@ mod tests {
     #[test]
     fn redact_credit_card() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("My card is 4111-1111-1111-1111")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("My card is 4111-1111-1111-1111");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("CARD"), "got: {content}");
         assert!(!content.contains("4111"));
         let ph = find_placeholder(&ctx, "4111-1111-1111-1111");
@@ -755,10 +636,9 @@ mod tests {
     #[test]
     fn redact_china_id_card() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("ID: 110101199001011234")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("ID: 110101199001011234");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("ID"), "got: {content}");
         assert!(!content.contains("110101199001011234"));
         let ph = find_placeholder(&ctx, "110101199001011234");
@@ -768,10 +648,9 @@ mod tests {
     #[test]
     fn redact_ipv4() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("Server is at 192.168.1.100")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("Server is at 192.168.1.100");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("IP"), "got: {content}");
         assert!(!content.contains("192.168.1.100"));
         let ph = find_placeholder(&ctx, "192.168.1.100");
@@ -779,27 +658,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_redact_system_messages() {
-        let redactor = PiiRedactor::new();
-        let messages = vec![system_msg("Contact admin@example.com for help")];
-        let (redacted, _ctx) = redactor.redact_messages(&messages);
-
-        let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("admin@example.com"));
-    }
-
-    #[test]
     fn restore_response_replaces_placeholders() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("Email alice@example.com and bob@test.org")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("Email alice@example.com and bob@test.org");
 
         // Simulate the LLM echoing back the redacted content
-        let redacted_content = redacted[0].content.as_str().unwrap();
-        let mut response = make_response(redacted_content);
-        redactor.restore_response(&mut response, &ctx);
-
-        let content = response.choices[0].message.content.as_str().unwrap();
+        let redacted_content = redacted.as_str();
+        let content = String::from_utf8(ctx.restore_bytes(redacted_content.as_bytes())).unwrap();
         assert!(content.contains("alice@example.com"), "got: {content}");
         assert!(content.contains("bob@test.org"), "got: {content}");
         assert!(!content.contains("{{EMAIL_"));
@@ -815,8 +680,7 @@ mod tests {
         // must also have identical contexts (PII values come from
         // the text itself), so the symmetry is safe.
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("Reach me at alice@example.com")];
-        let (_redacted, ctx) = redactor.redact_messages(&messages);
+        let (_redacted, ctx) = redactor.redact_str("Reach me at alice@example.com");
         let placeholder = find_placeholder(&ctx, "alice@example.com");
         assert_eq!(
             placeholder, "{{EMAIL_1}}",
@@ -826,14 +690,12 @@ mod tests {
 
     #[test]
     fn placeholders_are_identical_across_two_calls_with_same_input() {
-        // The cache layer keys on pre-redaction content but stores
-        // the redacted-form response; for that to work, redaction
-        // must be deterministic on the input. This test pins that
-        // contract.
+        // The cache keys on the redacted request and stores the
+        // placeholder-form response; two callers sharing a slot only
+        // works if redaction is deterministic on the input.
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg("alice@example.com")];
-        let (_, ctx_a) = redactor.redact_messages(&messages);
-        let (_, ctx_b) = redactor.redact_messages(&messages);
+        let (_, ctx_a) = redactor.redact_str("alice@example.com");
+        let (_, ctx_b) = redactor.redact_str("alice@example.com");
         let ph_a = find_placeholder(&ctx_a, "alice@example.com");
         let ph_b = find_placeholder(&ctx_b, "alice@example.com");
         assert_eq!(
@@ -845,12 +707,10 @@ mod tests {
     #[test]
     fn multiple_pii_types() {
         let redactor = PiiRedactor::new();
-        let messages = vec![user_msg(
-            "Email alice@example.com, IP 10.0.0.1, card 4111 1111 1111 1111",
-        )];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) =
+            redactor.redact_str("Email alice@example.com, IP 10.0.0.1, card 4111 1111 1111 1111");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("EMAIL"), "got: {content}");
         assert!(content.contains("IP"), "got: {content}");
         assert!(content.contains("CARD"), "got: {content}");
@@ -858,9 +718,7 @@ mod tests {
         assert!(!content.contains("10.0.0.1"));
 
         // Verify restore round-trip
-        let mut response = make_response(content);
-        redactor.restore_response(&mut response, &ctx);
-        let restored = response.choices[0].message.content.as_str().unwrap();
+        let restored = String::from_utf8(ctx.restore_bytes(content.as_bytes())).unwrap();
         assert!(restored.contains("alice@example.com"), "got: {restored}");
         assert!(restored.contains("10.0.0.1"), "got: {restored}");
     }
@@ -874,10 +732,9 @@ mod tests {
         }];
         let redactor = PiiRedactor::from_config(&configs);
 
-        let messages = vec![user_msg("Contact test@example.com for info")];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_str("Contact test@example.com for info");
 
-        let content = redacted[0].content.as_str().unwrap();
+        let content = redacted.as_str();
         assert!(content.contains("CUSTOM_EMAIL"), "got: {content}");
         assert!(!content.contains("test@example.com"));
         let ph = find_placeholder(&ctx, "test@example.com");
@@ -905,9 +762,8 @@ mod tests {
         let redactor = PiiRedactor::from_config(&configs);
 
         // The valid pattern should still work
-        let messages = vec![user_msg("Contact me at alice@test.org")];
-        let (redacted, _ctx) = redactor.redact_messages(&messages);
-        let content = redacted[0].content.as_str().unwrap();
+        let (redacted, _ctx) = redactor.redact_str("Contact me at alice@test.org");
+        let content = redacted.as_str();
         assert!(content.contains("EMAIL"), "got: {content}");
         assert!(!content.contains("alice@test.org"));
     }
@@ -1024,62 +880,7 @@ mod tests {
         assert_eq!(out, "a alice@example.com b 13812345678 c");
     }
 
-    /// Multimodal user messages (OpenAI vision / Anthropic images)
-    /// carry content as an array of typed parts. Without explicit
-    /// support, every text segment in such a message bypassed the
-    /// redactor — the bug this test pins.
-    #[test]
-    fn redact_multimodal_text_part() {
-        let redactor = PiiRedactor::new();
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: serde_json::json!([
-                { "type": "text", "text": "Email me at alice@example.com" },
-                { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } },
-            ]),
-            ..Default::default()
-        }];
-        let (redacted, ctx) = redactor.redact_messages(&messages);
-
-        let parts = redacted[0].content.as_array().expect("array preserved");
-        assert_eq!(parts.len(), 2);
-        let text = parts[0]["text"].as_str().unwrap();
-        assert!(text.contains("EMAIL"), "got: {text}");
-        assert!(!text.contains("alice@example.com"));
-        // Non-text parts pass through unchanged.
-        assert_eq!(parts[1]["type"], "image_url");
-        // Placeholder is recorded so the response restorer can reverse it.
-        let ph = find_placeholder(&ctx, "alice@example.com");
-        assert!(ph.starts_with("{{EMAIL_"));
-    }
-
-    /// `ChatMessage::extra` is a flatten bucket that carries OpenAI
-    /// fields the gateway doesn't model explicitly — `name`,
-    /// `tool_call_id`, `tool_calls`, vendor annotations. The redactor
-    /// rebuilds user messages, and an earlier `..Default::default()`
-    /// silently zeroed this bucket, stripping `name` from named user
-    /// turns on the way through. Pin the round-trip so the regression
-    /// is impossible to reintroduce without breaking this test.
-    #[test]
-    fn preserves_extra_fields_on_user_messages() {
-        let redactor = PiiRedactor::new();
-        let mut msg = user_msg("Contact me at alice@example.com");
-        msg.extra = serde_json::json!({ "name": "alice" });
-        let (redacted, _) = redactor.redact_messages(&[msg]);
-
-        assert_eq!(
-            redacted[0].extra.get("name").and_then(|v| v.as_str()),
-            Some("alice"),
-            "redactor must preserve the OpenAI `name` field on user turns"
-        );
-        // Content is still redacted — preserving extra didn't disable the body pass.
-        let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("EMAIL"), "body got: {content}");
-        assert!(!content.contains("alice@example.com"));
-    }
-
-    // ── redact_request（IR 上的脱敏） ──────────────────────────────────
-
+    // ── redact_request: redaction on the decoded request ──────────────
     use tw_dialect::ir::{Message, Part, Request, Role, ToolResult};
 
     fn ir_user_message(parts: Vec<Part>) -> Message {
@@ -1122,10 +923,11 @@ mod tests {
         assert!(ph.starts_with("{{EMAIL_"));
     }
 
-    /// 钉住旧实现漏掉的洞：`redact_messages` 在 `serde_json::Value` 上猜
-    /// 结构，没有「工具结果」这个概念，工具结果里嵌套的内容会原样放过。
-    /// 工具结果里恰恰常带用户数据——模型调用一个读邮件、查订单之类的工具，
-    /// 结果里原样带着 PII，又被喂回同一次对话。
+    /// Pins the hole in the earlier version, which guessed at a
+    /// `serde_json::Value` and had no notion of a tool result, so text
+    /// nested in one went through unredacted.
+    /// Tool results are exactly where user data sits — a mailbox, an
+    /// order — fed back into the same conversation.
     #[test]
     fn redact_request_redacts_pii_nested_inside_a_tool_result() {
         let redactor = PiiRedactor::new();
@@ -1167,8 +969,8 @@ mod tests {
         assert!(ctx.replacements.is_empty());
     }
 
-    /// 系统提示是运营方写进配置的，不是调用方输入的：脱了会破坏指令本身，
-    /// 而且提示里出现的邮箱、IP 之类通常是有意的配置，不是要保护的用户 PII。
+    /// The system prompt is the operator's, not the caller's: redacting
+    /// it rewrites the instructions, and values there are configuration.
     #[test]
     fn redact_request_does_not_redact_the_system_prompt() {
         let redactor = PiiRedactor::new();
@@ -1187,12 +989,12 @@ mod tests {
         );
     }
 
-    /// 同一个值不管出现在普通文本部件里还是嵌套在工具结果里，都必须拿到
-    /// 同一个占位符——还原逻辑靠的就是这份映射，编号一旦分岔就还原不回去。
+    /// A value gets the same placeholder whether it sits in plain text or
+    /// inside a tool result — restoration depends on that mapping.
     #[test]
     fn a_value_repeated_across_a_tool_result_restores_everywhere() {
-        // 同一个值出现两次拿同一个占位符，而且两处都得原样还原 ——
-        // 包括藏在工具结果里的那一处
+        // The same value twice gets one placeholder, and both places restore
+        // — including the one inside the tool result.
         let redactor = PiiRedactor::new();
         let mut request = ir_request(vec![ir_user_message(vec![
             Part::Text("Contact alice@example.com".into()),
@@ -1220,7 +1022,7 @@ mod tests {
         assert_eq!(
             first.strip_prefix("Contact "),
             second.strip_prefix("Confirmed: "),
-            "同一个值该是同一个占位符"
+            "the same value should get the same placeholder"
         );
 
         let restore = |s: &str| {
@@ -1233,8 +1035,8 @@ mod tests {
     }
     #[test]
     fn the_same_value_gets_the_same_placeholder() {
-        // 模型看到两个不同的占位符会当成两个人；直通请求也要求
-        // 「值 → 占位符」是个函数
+        // Two placeholders read as two people to a model, and a forwarded
+        // request needs value → placeholder to be a function.
         let redactor = PiiRedactor::new();
         let mut request = ir_request(vec![ir_user_message(vec![Part::Text(
             "to a@example.com, cc a@example.com, bcc b@example.com".into(),
@@ -1245,8 +1047,8 @@ mod tests {
 
     #[test]
     fn applying_to_a_raw_request_reaches_text_the_client_escaped() {
-        // 客户端可能发 `\u0040`，字节里就没有 `@` 了。在解析后的 Value
-        // 上做，看到的是解开的字符串
+        // A client may send `\u0040`, and then the bytes hold no `@`.
+        // On the parsed Value the string is already unescaped.
         let redactor = PiiRedactor::new();
         let mut ir = ir_request(vec![ir_user_message(vec![Part::Text(
             "mail a@example.com".into(),
@@ -1278,7 +1080,7 @@ mod tests {
         assert_eq!(v["content"][0]["text"], "call {{PHONE_1}}");
         assert_eq!(
             v["content"][1]["source"]["data"], "AB13800138000CD",
-            "改掉的会是图片，不是 PII"
+            "that would change the image, not the PII"
         );
     }
 
@@ -1299,7 +1101,7 @@ mod tests {
 
     #[test]
     fn restoring_bytes_escapes_the_original_so_the_json_survives() {
-        // 原值带引号时，原样塞回去会把 JSON 弄坏
+        // An original containing a quote, put back as-is, breaks the JSON.
         let ctx = RedactionContext {
             replacements: [("{{NAME_1}}".to_string(), r#"O"Brien"#.to_string())]
                 .into_iter()

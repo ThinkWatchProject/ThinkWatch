@@ -4122,7 +4122,6 @@ dependencies = [
  "tracing",
  "tw-dialect",
  "tw-protocol",
- "tw-provider",
  "tw-resil",
  "tw-types",
  "tw-upstream",
@@ -4200,6 +4199,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tw-dialect",
+ "tw-types",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -4688,32 +4689,6 @@ dependencies = [
  "reqwest 0.13.2",
  "serde_json",
  "tracing",
-]
-
-[[package]]
-name = "tw-provider"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
-dependencies = [
- "async-stream",
- "aws-credential-types",
- "aws-sigv4",
- "aws-smithy-eventstream",
- "bytes",
- "chrono",
- "futures",
- "hex",
- "hmac 0.13.0",
- "http 1.4.0",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tracing",
- "tw-protocol",
- "tw-types",
- "urlencoding",
- "uuid",
 ]
 
 [[package]]

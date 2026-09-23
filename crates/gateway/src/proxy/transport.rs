@@ -13,7 +13,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tw_types::{CallCtx, GatewayError};
-use tw_upstream::sigv4::Signer;
+pub use tw_upstream::sigv4::Signer;
+
+/// Sent to an Anthropic upstream when neither the caller nor the provider
+/// row names a version. Without one the API refuses the request.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// The HTTP client every upstream call goes through.
 ///
@@ -76,6 +80,32 @@ impl Upstream {
         }
     }
 
+    /// Is this the vendor's own endpoint rather than a relay?
+    ///
+    /// The conversion layer needs to know: official endpoints are
+    /// stricter about parameters (Anthropic's no longer accepts sampling
+    /// knobs beyond `temperature`, OpenAI's reasoning models only take
+    /// `max_completion_tokens`), while relays are usually lenient.
+    pub fn is_official(&self) -> bool {
+        match &self.shape {
+            Shape::Bedrock { .. } | Shape::Azure { .. } => true,
+            Shape::Standard => {
+                let host = self
+                    .base_url
+                    .split("://")
+                    .nth(1)
+                    .unwrap_or(&self.base_url)
+                    .split(['/', ':'])
+                    .next()
+                    .unwrap_or_default();
+                matches!(
+                    host,
+                    "api.openai.com" | "api.anthropic.com" | "generativelanguage.googleapis.com"
+                )
+            }
+        }
+    }
+
     /// Send `body` to `path`, and turn a non-2xx answer into an error.
     ///
     /// Signing happens last, over the exact bytes being sent.
@@ -84,6 +114,8 @@ impl Upstream {
         body: Vec<u8>,
         path: &str,
         query: Option<&str>,
+        dialect: tw_dialect::ir::Dialect,
+        extra: &[(String, String)],
         ctx: &CallCtx,
     ) -> Result<reqwest::Response, GatewayError> {
         let url = self.url(&body, path, query);
@@ -94,6 +126,19 @@ impl Upstream {
             .header("content-type", "application/json");
         for (k, v) in &self.headers {
             req = req.header(k, tw_types::substitute_template(v, &ctx.attrs));
+        }
+        for (k, v) in extra {
+            req = req.header(k, v);
+        }
+        // Anthropic refuses a request without a version header.
+        if dialect == tw_dialect::ir::Dialect::Anthropic
+            && !self
+                .headers
+                .iter()
+                .chain(extra)
+                .any(|(k, _)| k.eq_ignore_ascii_case("anthropic-version"))
+        {
+            req = req.header("anthropic-version", ANTHROPIC_VERSION);
         }
         if let Some(trace) = &ctx.trace_id {
             req = req.header("x-trace-id", trace.as_str());
@@ -236,7 +281,7 @@ mod tests {
 
     #[test]
     fn bedrock_builds_its_host_from_the_region() {
-        // 企业版把 region 存在 base_url 里 —— 主机名由它拼出来
+        // The provider row keeps the region in base_url; the host is built from it.
         let u = up(
             "us-east-1",
             Shape::Bedrock {

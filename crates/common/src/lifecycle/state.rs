@@ -27,7 +27,7 @@ use super::streaming::StreamOutcome;
 /// Initial state. Identity has been resolved by HTTP middleware;
 /// nothing else has happened yet.
 ///
-/// Note: the typed request body (`ChatCompletionRequest`,
+/// Note: the request body (the AI gateway's raw JSON,
 /// `JsonRpcRequest`, …) is NOT carried through the lifecycle
 /// state — surface handlers keep it as a local variable instead.
 /// Stages haven't needed to inspect bodies in any of the four
@@ -145,8 +145,9 @@ pub enum CapturedView<S: Surface> {
     /// Upstream produced a complete response in one shot.
     Buffered(S::Response),
     /// Upstream streamed. `captured` is the surface-defined shape
-    /// the pump accumulated (`Vec<ChatCompletionChunk>` for the AI
-    /// gateway, `Vec<serde_json::Value>` for MCP). `outcome`
+    /// the pump accumulated (token counts, cost and the assembled
+    /// response bytes for the AI gateway, `Vec<serde_json::Value>`
+    /// for MCP). `outcome`
     /// carries why the stream ended.
     Streaming {
         outcome: StreamOutcome,

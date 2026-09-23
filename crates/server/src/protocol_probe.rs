@@ -25,11 +25,11 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
-use think_watch_gateway::providers::protocol::UpstreamProtocol;
-use think_watch_gateway::providers::traits::{ChatCompletionRequest, ChatMessage, GatewayError};
+use think_watch_gateway::protocol::UpstreamProtocol;
+use tw_types::{CallCtx, GatewayError};
 use uuid::Uuid;
 
-use crate::gateway_adapters::{ProviderMaterials, build_adapter};
+use crate::gateway_adapters::{ProviderMaterials, build_upstream};
 
 /// How many models we probe at once. The upstream is someone else's
 /// service — this is deliberately modest, and it still resolves a
@@ -144,21 +144,33 @@ pub(crate) async fn clear_for_provider(db: &sqlx::PgPool, provider_id: Uuid) -> 
         .unwrap_or_default()
 }
 
-/// The smallest completion that still exercises the real code path:
-/// one token out, one word in.
-fn probe_request(upstream_model: &str) -> ChatCompletionRequest {
-    ChatCompletionRequest {
-        model: upstream_model.to_string(),
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content: serde_json::Value::String("hi".to_string()),
+/// The smallest completion that still exercises the real code path: one
+/// token out, one word in — encoded for `protocol` by the same layer that
+/// converts live traffic. A hand-written probe body drifts from what
+/// forwarding actually sends, and then "the probe passed, forwarding
+/// fails" has nothing to go on.
+fn probe_request(
+    upstream_model: &str,
+    protocol: UpstreamProtocol,
+    official: bool,
+) -> tw_dialect::convert::Prepared {
+    use tw_dialect::ir::{Message, Part, Request, Role, Target};
+    tw_dialect::convert::encode(
+        &Request {
+            model: upstream_model.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                parts: vec![Part::Text("hi".to_string())],
+            }],
+            max_tokens: Some(1),
             ..Default::default()
-        }],
-        temperature: None,
-        max_tokens: Some(1),
-        stream: None,
-        extra: serde_json::Value::Null,
-    }
+        },
+        &Target {
+            dialect: protocol.dialect(),
+            official,
+            default_max_tokens: 1,
+        },
+    )
 }
 
 /// Does this failure tell us anything about the model, or only about
@@ -194,24 +206,33 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
     // dialect-specific failure is different from the fix for "this
     // upstream won't serve you this model at all".
     let mut refusals: Vec<String> = Vec::new();
+    let upstream = build_upstream(materials);
 
     for candidate in candidates {
-        let adapter = build_adapter(candidate, materials);
+        let probe = probe_request(upstream_model, candidate, upstream.is_official());
         let attempt = tokio::time::timeout(
             PROBE_TIMEOUT,
             // The probe has no caller: it runs from the admin import path,
             // not from a user request. An empty CallCtx is the honest
             // representation — header templates resolve to blanks and no
             // trace id is forwarded, because there is no trace to join.
-            adapter.chat_completion_boxed(
-                probe_request(upstream_model),
-                think_watch_gateway::providers::CallCtx::default(),
+            upstream.send(
+                probe.body,
+                &probe.path,
+                probe.query.as_deref(),
+                candidate.dialect(),
+                &[],
+                &CallCtx::default(),
             ),
         )
         .await;
 
         match attempt {
-            Ok(Ok(_)) => return Verdict::Ok(candidate),
+            Ok(Ok(resp)) => {
+                // Drain it so the connection goes back to the pool.
+                let _ = resp.bytes().await;
+                return Verdict::Ok(candidate);
+            }
             Ok(Err(e)) if is_inconclusive(&e) => {
                 tracing::warn!(
                     provider = %materials.name,

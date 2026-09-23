@@ -287,7 +287,8 @@ mod tests {
 
     #[test]
     fn a_placeholder_split_across_two_frames_is_restored() {
-        // 这正是不能在字节上还原的原因：两段之间隔着帧结构
+        // Exactly why this cannot be done on bytes: frame structure sits
+        // between the two halves.
         let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
         let mut out = s.process(chat_chunk("mail {{EMA").as_bytes());
         out.extend(s.process(chat_chunk("IL_1}} now").as_bytes()));
@@ -323,8 +324,8 @@ mod tests {
 
     #[test]
     fn a_held_back_tail_is_released_before_the_block_closes() {
-        // 文本以一个没闭合的 `{{` 结尾：它不是占位符，得原样交出去，
-        // 而且要落在它所属的那个块里，不能跑到块结束之后
+        // Text ending in an unclosed `{{` is not a placeholder: it goes out
+        // verbatim, inside the block it belongs to, not after the block ends.
         let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
         let ev = |name: &str, d: Value| format!("event: {name}\ndata: {d}\n\n");
         let mut out = s.process(
@@ -351,7 +352,8 @@ mod tests {
 
     #[test]
     fn a_frame_carrying_the_whole_text_again_is_restored_too() {
-        // Responses 的 output_text.done 和 response.completed 会把全文再带一遍
+        // Responses repeats the whole text in output_text.done and
+        // response.completed.
         let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
         let out = s.process(
             format!(

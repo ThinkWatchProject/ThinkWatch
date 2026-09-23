@@ -30,7 +30,7 @@ use think_watch_mcp_gateway::proxy::McpProxy;
 use think_watch_mcp_gateway::session::SessionManager;
 use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
 
-use crate::gateway_adapters::{ProviderMaterials, build_adapter};
+use crate::gateway_adapters::{ProviderMaterials, build_upstream};
 use crate::handlers;
 
 /// SSRF guard for URLs the server is about to fetch. Boxed so tests
@@ -1350,13 +1350,11 @@ pub(crate) async fn load_providers_into_router(
     let mut providers_with_routes: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
 
-    // One adapter per (provider, protocol) — a provider serving 55
-    // models over two dialects builds two adapters, not 55.
-    use think_watch_gateway::providers::protocol::UpstreamProtocol;
-    let mut adapter_cache: HashMap<
-        (uuid::Uuid, UpstreamProtocol),
-        Arc<dyn think_watch_gateway::providers::DynAiProvider>,
-    > = HashMap::new();
+    // One upstream per provider: the host and credentials are the same
+    // whatever format a route speaks to it in.
+    use think_watch_gateway::protocol::UpstreamProtocol;
+    let mut upstreams: HashMap<uuid::Uuid, Arc<think_watch_gateway::proxy::transport::Upstream>> =
+        HashMap::new();
 
     for row in &route_rows {
         if let Some(materials) = provider_map.get(&row.provider_id) {
@@ -1371,30 +1369,22 @@ pub(crate) async fn load_providers_into_router(
                 .unwrap_or_else(|| {
                     UpstreamProtocol::default_for_provider_type(&materials.provider_type)
                 });
-            let mut adapter_for = |p: UpstreamProtocol| {
-                adapter_cache
-                    .entry((row.provider_id, p))
-                    .or_insert_with(|| build_adapter(p, materials))
-                    .clone()
-            };
-            let dyn_provider = adapter_for(protocol);
-            // Pre-build the dialects this route could fall back to, so
-            // the gateway can recover from an upstream rejecting the
-            // configured one without reaching back into this crate for
-            // credential decryption. Cheap: adapters are shared per
-            // (provider, protocol), so this is a map lookup after the
-            // first route.
-            let alternates: Vec<(UpstreamProtocol, Arc<_>)> =
+            let upstream = upstreams
+                .entry(row.provider_id)
+                .or_insert_with(|| build_upstream(materials))
+                .clone();
+            // The dialects this route can fall back to when the upstream
+            // rejects the configured one.
+            let alternates: Vec<UpstreamProtocol> =
                 UpstreamProtocol::candidates_for(&materials.provider_type, &row.upstream_model)
                     .into_iter()
                     .filter(|p| *p != protocol)
-                    .map(|p| (p, adapter_for(p)))
                     .collect();
             let provider_name = &materials.name;
             router.register_route(
                 &row.model_id,
                 RouteEntry {
-                    provider: Arc::clone(&dyn_provider),
+                    upstream,
                     provider_id: row.provider_id,
                     route_id: row.id,
                     provider_name: provider_name.clone(),
@@ -1424,16 +1414,16 @@ pub(crate) async fn load_providers_into_router(
             let provider_type = &materials.provider_type;
             let provider_name = &materials.name;
             let protocol = UpstreamProtocol::default_for_provider_type(provider_type);
-            let dyn_provider = adapter_cache
-                .entry((*provider_id, protocol))
-                .or_insert_with(|| build_adapter(protocol, materials))
+            let upstream = upstreams
+                .entry(*provider_id)
+                .or_insert_with(|| build_upstream(materials))
                 .clone();
             let prefixes = default_model_prefixes(provider_type);
             for prefix in &prefixes {
                 router.register_route(
                     prefix,
                     RouteEntry {
-                        provider: Arc::clone(&dyn_provider),
+                        upstream: Arc::clone(&upstream),
                         provider_id: *provider_id,
                         // Synthetic route — derive a stable id from
                         // the provider so health entries cluster

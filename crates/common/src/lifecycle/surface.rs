@@ -47,8 +47,8 @@ pub trait Surface: Sized + Send + Sync + 'static {
     type AuditDetail: Send + Sync + 'static;
 
     /// Per-surface accumulator the streaming pump fills as chunks
-    /// flow through. For the AI gateway this is the
-    /// `Vec<ChatCompletionChunk>` + `Option<Usage>` pair; for MCP
+    /// flow through. For the AI gateway this is the token counts,
+    /// cost and the response assembled from the stream; for MCP
     /// it's the JSON-RPC event timeline (`Vec<serde_json::Value>`).
     /// Post-invoke stages access it via
     /// [`super::state::CapturedView::Streaming`].

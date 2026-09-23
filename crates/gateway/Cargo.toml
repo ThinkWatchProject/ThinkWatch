@@ -8,7 +8,6 @@ edition.workspace = true
 # 流向企业版，反过来不行 —— 任何进 core 的代码从此刻起就是 MIT。
 tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
 tw-protocol = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
-tw-provider = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
 tw-resil = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
 tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
 tw-upstream = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0", features = ["sigv4"] }

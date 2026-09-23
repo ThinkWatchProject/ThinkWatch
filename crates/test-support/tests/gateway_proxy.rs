@@ -362,6 +362,52 @@ async fn anthropic_to_anthropic_forwards_the_request_as_sent() {
     assert_eq!(sent["metadata"]["user_id"], "u-1");
 }
 
+/// A request forwarded in its own format carries the caller's
+/// `anthropic-beta`: its body can use a beta feature, and without the
+/// header that turns it on the upstream refuses it.
+///
+/// And every Anthropic-bound request carries `anthropic-version`, which
+/// the API requires. The mock does not check for it, so nothing else in
+/// this suite would notice it missing — a real upstream would refuse
+/// every request.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn anthropic_bound_requests_carry_the_headers_the_api_needs() {
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::anthropic_messages_ok("claude-3-haiku-test").await;
+    let api_key = seed_provider_and_key(
+        &app,
+        &upstream.uri(),
+        "anthropic",
+        "claude-3-haiku-test",
+        None,
+    )
+    .await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    gw.set_header("anthropic-beta", "context-management-2025-06-27");
+    gw.post(
+        "/v1/messages",
+        json!({"model": "claude-3-haiku-test", "max_tokens": 16,
+               "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let sent = upstream.received_requests().await;
+    let h = &sent.last().unwrap().headers;
+    assert_eq!(
+        h.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+        Some("context-management-2025-06-27")
+    );
+    assert!(
+        h.get("anthropic-version").is_some(),
+        "the API refuses a request without a version header"
+    );
+}
+
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn list_models_endpoint_returns_registered_models() {

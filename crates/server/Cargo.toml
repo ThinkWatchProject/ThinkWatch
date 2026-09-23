@@ -15,6 +15,10 @@ think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
+# The probe encodes its request with the same layer that converts live
+# traffic, so it cannot drift from what forwarding actually sends.
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
+tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.32.0" }
 axum = { workspace = true }
 futures = { workspace = true }
 tower = { workspace = true }
