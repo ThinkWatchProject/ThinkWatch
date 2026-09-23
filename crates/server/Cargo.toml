@@ -18,6 +18,7 @@ think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
 tw-dialect = { workspace = true }
 tw-types = { workspace = true }
+tw-guard = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }
 tower = { workspace = true }

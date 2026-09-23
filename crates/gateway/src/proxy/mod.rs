@@ -159,6 +159,7 @@ impl IntoResponse for GatewayErrorResponse {
                 "rate_limited"
             }
             GatewayError::UpstreamAuthError => "auth_error",
+            GatewayError::PolicyBlocked(_) => "policy_blocked",
         };
 
         let retry_after = self.0.retry_after_secs();
@@ -221,6 +222,7 @@ mod helper_tests {
             ),
             (GatewayError::LocalRateLimited("rule".into()), 429),
             (GatewayError::UpstreamAuthError, 401),
+            (GatewayError::PolicyBlocked("rule".into()), 403),
         ] {
             assert_eq!(
                 gateway_error_status(&err),
