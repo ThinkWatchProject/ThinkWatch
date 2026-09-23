@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 tw-types = { workspace = true }
-tw-resil = { workspace = true }
 tw-dialect = { workspace = true }
 tw-upstream = { workspace = true, features = ["bedrock"] }
 tw-wire = { workspace = true }

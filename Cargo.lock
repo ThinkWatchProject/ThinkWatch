@@ -4121,7 +4121,6 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tw-dialect",
- "tw-resil",
  "tw-types",
  "tw-upstream",
  "tw-wire",
@@ -4155,7 +4154,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tw-crypto",
- "tw-resil",
  "uuid",
  "xxhash-rust",
 ]
@@ -4202,7 +4200,6 @@ dependencies = [
  "tracing-subscriber",
  "tw-crypto",
  "tw-dialect",
- "tw-resil",
  "tw-types",
  "url",
  "utoipa",
@@ -4680,19 +4677,6 @@ source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "tw-resil"
-version = "0.35.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
-dependencies = [
- "futures",
- "metrics",
- "rand 0.10.0",
- "tokio",
- "tracing",
- "tw-types",
 ]
 
 [[package]]

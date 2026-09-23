@@ -203,7 +203,7 @@ async fn build_oidc(config: &AppConfig, dc: &DynamicConfig) -> Option<OidcManage
 /// instances must NOT call it (the inner registry is a `OnceLock`).
 pub fn install_cb_listener(state: &AppState) {
     let audit_for_cb = state.audit.clone();
-    tw_resil::cb_registry::set_open_listener(move |key, kind| {
+    think_watch_common::cb_registry::set_open_listener(move |key, kind| {
         use think_watch_common::audit::{AuditActor, SystemActor};
         audit_for_cb.log(
             SystemActor
