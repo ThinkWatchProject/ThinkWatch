@@ -195,7 +195,11 @@ pub async fn proxy_chat_completion(
     //    real call across an unbounded quota window — i.e. quota
     //    enforcement becomes optional. Debit the cached
     //    `usage.total_tokens` so monthly caps still bind.
-    if let Some(mut cached) = state.cache.get(&cache_fingerprint).await {
+    let cached = match &cache_fingerprint {
+        Some(fp) => state.cache.get(fp).await,
+        None => None,
+    };
+    if let Some(mut cached) = cached {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, stream = is_stream, "Cache HIT");
 

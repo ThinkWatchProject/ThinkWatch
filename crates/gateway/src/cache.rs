@@ -103,19 +103,28 @@ impl ResponseCache {
         format!("llm_cache:{hash:032x}")
     }
 
-    /// The bytes that identify a request.
+    /// The bytes that identify a request, or `None` when it must not be
+    /// cached at all.
+    ///
+    /// **Cacheability is decided here, not at the lookup.** A request
+    /// sampled at a nonzero temperature asks for a fresh draw; serving it
+    /// someone else's answer defeats the point of asking. That check used
+    /// to live inside `get` and `set`, where it was one refactor away from
+    /// being dropped — and it was, once. With no fingerprint there is no
+    /// key, so there is nothing to look up or store.
     ///
     /// The whole request, not a chosen subset — `extra` is flattened, so
     /// `tools`, `tool_choice` and every other field the caller sent are
-    /// in here by construction. That is the point: the previous key was
-    /// three hand-picked fields, and a field nobody remembered to add
-    /// was a silent collision.
-    pub fn fingerprint(request: &ChatCompletionRequest) -> Vec<u8> {
+    /// in here by construction.
+    pub fn fingerprint(request: &ChatCompletionRequest) -> Option<Vec<u8>> {
+        if !Self::is_cacheable(request) {
+            return None;
+        }
         let mut r = request.clone();
         // Streaming changes the framing, not the answer, so a streaming
         // request should hit what a buffered one stored.
         r.stream = None;
-        serde_json::to_vec(&r).unwrap_or_default()
+        Some(serde_json::to_vec(&r).unwrap_or_default())
     }
 
     /// Look up a cached response.
@@ -224,7 +233,7 @@ mod tests {
     }
 
     fn key(r: &ChatCompletionRequest) -> String {
-        ResponseCache::cache_key_for(&ResponseCache::fingerprint(r))
+        ResponseCache::cache_key_for(&ResponseCache::fingerprint(r).expect("cacheable"))
     }
 
     #[test]
@@ -290,6 +299,15 @@ mod tests {
         let mut a = req("gpt-4o", "x");
         a.stream = Some(true);
         assert_eq!(key(&a), key(&req("gpt-4o", "x")));
+    }
+
+    #[test]
+    fn a_nonzero_temperature_has_no_fingerprint_so_it_can_never_be_looked_up() {
+        // 这道闸曾经住在 get/set 里，重构时被一起删掉过一次 ——
+        // 高温度的请求要的是新的一次采样，拿别人的回答等于没问
+        let mut r = req("gpt-4o", "x");
+        r.temperature = Some(0.7);
+        assert!(ResponseCache::fingerprint(&r).is_none());
     }
 
     #[test]

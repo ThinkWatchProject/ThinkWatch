@@ -130,7 +130,7 @@ pub(crate) struct ChatRequestSnapshot {
     ///
     /// **是字节不是结构** —— 旧的写法带着整个请求,而算 key 时只挑了
     /// 其中三个字段,漏掉的(比如 tools)就成了撞槽的来源
-    pub cache_fingerprint: Vec<u8>,
+    pub cache_fingerprint: Option<Vec<u8>>,
     pub request_started_at: std::time::Instant,
 }
 
@@ -424,11 +424,8 @@ impl Surface for ChatCompletionSurface {
             CapturedView::Streaming { captured, .. } => captured.assembled.as_ref(),
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => None,
         };
-        if let Some(response) = response {
-            deps.state
-                .cache
-                .set(&deps.request.cache_fingerprint, response, None)
-                .await;
+        if let (Some(response), Some(fp)) = (response, &deps.request.cache_fingerprint) {
+            deps.state.cache.set(fp, response, None).await;
         }
     }
 
