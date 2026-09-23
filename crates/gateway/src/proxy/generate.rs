@@ -408,7 +408,7 @@ async fn generate(
     let pii_redactor = state.pii_redactor.load_full();
     let redaction = pii_redactor.redact_request(&mut decoded.request);
     let mut redacted = raw;
-    redaction.apply_to(&mut redacted);
+    crate::pii_redactor::apply_to(&redaction, &mut redacted);
     let request_for_audit = body.to_vec();
 
     // 6. Quota, keyed on the model the caller named — that is what their
@@ -475,7 +475,7 @@ async fn generate(
             capture,
         );
 
-        let restored = redaction.restore_bytes(&cached.body);
+        let restored = crate::pii_redactor::restore_body(&redaction, &cached.body);
         let mut response = if is_stream {
             // The stored answer is whole; replay it as one event so the
             // client gets the framing it asked for.
@@ -571,7 +571,7 @@ async fn generate(
         };
 
         let deps = snapshot(entry, sel_record);
-        let shaper = StreamShaper::new(mapped_model.clone(), &redaction);
+        let shaper = StreamShaper::new(mapped_model.clone(), &redaction, surface.dialect);
         return Ok(launch_stream_pump(deps, open, shaper, surface.dialect));
     }
 
@@ -645,7 +645,10 @@ async fn generate(
         "Audit log: request completed"
     );
 
-    let mut response = json_response(redaction.restore_bytes(&completed.body));
+    let mut response = json_response(crate::pii_redactor::restore_body(
+        &redaction,
+        &completed.body,
+    ));
     response
         .headers_mut()
         .insert("X-Cache", HeaderValue::from_static("MISS"));

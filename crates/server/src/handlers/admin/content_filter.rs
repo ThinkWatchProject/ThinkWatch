@@ -121,7 +121,7 @@ pub async fn list_content_filter_presets(
 #[derive(Debug, Deserialize)]
 pub struct PiiRedactorTestRequest {
     pub text: String,
-    pub patterns: Vec<think_watch_gateway::pii_redactor::PiiPatternConfig>,
+    pub patterns: Vec<think_watch_common::pii::PiiPatternConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,21 +167,20 @@ pub async fn test_pii_redactor(
     let (redacted_text, ctx) = redactor.redact_str(&req.text);
 
     let matches = ctx
-        .replacements
-        .into_iter()
-        .map(|(placeholder, original)| {
-            // Extract pattern name from placeholder format "{{NAME_salt_n}}"
+        .replacements()
+        .map(|(original, placeholder)| {
+            // `{{CUSTOM_EMAIL_2}}` → `CUSTOM_EMAIL`: the prefix may itself
+            // contain underscores, so cut at the last one
             let name = placeholder
                 .trim_start_matches("{{")
                 .trim_end_matches("}}")
-                .split('_')
-                .next()
-                .unwrap_or("")
+                .rsplit_once('_')
+                .map_or("", |(label, _)| label)
                 .to_string();
             PiiRedactorTestMatch {
                 name,
-                original,
-                placeholder,
+                original: original.to_string(),
+                placeholder: placeholder.to_string(),
             }
         })
         .collect();

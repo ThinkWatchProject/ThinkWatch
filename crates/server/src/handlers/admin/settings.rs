@@ -666,23 +666,32 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "PII pattern {i}: regex max 1000 characters"
                     )));
                 }
-                // Validate regex compiles AND fits the bounded size budget.
-                // Bare `regex::Regex::new` accepts 10 MiB NFA + 2 MiB DFA
-                // by default — large enough to ReDoS the gateway at
-                // request time. Use the shared bounded helper so save-time
-                // rejection matches what the runtime would accept.
-                if think_watch_common::regex_util::compile_bounded(regex_str).is_err() {
+                // Compiled exactly as the redactor will compile it, bounds
+                // included, so what is saved is what runs.
+                if tw_guard::redact::rules::compile("", regex_str).is_err() {
                     return Err(AppError::BadRequest(format!(
                         "PII pattern {i}: invalid or oversized regex"
                     )));
                 }
-                if item
+                // The prefix lands inside the placeholder (`{{EMAIL_1}}`);
+                // a brace or a space there would make one that can never be
+                // told apart from ordinary text.
+                let prefix = item
                     .get("placeholder_prefix")
                     .and_then(|v| v.as_str())
-                    .is_none()
+                    .ok_or_else(|| {
+                        AppError::BadRequest(format!(
+                            "PII pattern {i}: missing 'placeholder_prefix'"
+                        ))
+                    })?;
+                if prefix.is_empty()
+                    || prefix.len() > 32
+                    || !prefix
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
                 {
                     return Err(AppError::BadRequest(format!(
-                        "PII pattern {i}: missing 'placeholder_prefix'"
+                        "PII pattern {i}: 'placeholder_prefix' must be 1-32 letters, digits or underscores"
                     )));
                 }
                 if item.get("name").and_then(|v| v.as_str()).is_none() {

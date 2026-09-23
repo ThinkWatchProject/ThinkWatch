@@ -139,7 +139,7 @@ pub async fn load_content_filter(dc: &DynamicConfig) -> ContentFilter {
 
 /// Build a `PiiRedactor` from the current `system_settings` value.
 pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
-    let configs: Vec<think_watch_gateway::pii_redactor::PiiPatternConfig> = dc
+    let configs: Vec<think_watch_common::pii::PiiPatternConfig> = dc
         .get("security.pii_redactor_patterns")
         .await
         .and_then(|v| serde_json::from_value(v).ok())

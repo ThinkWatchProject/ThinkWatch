@@ -12,16 +12,18 @@
 //! asking which format this is.
 //!
 //! **PII.** A whole response has its placeholders intact and is restored
-//! in one pass. A stream does not: `{{EMA` can end one frame and `IL_1}}`
-//! start the next, and between them sits `"}}]}\n\ndata: {"choices":…` —
-//! the placeholder is not contiguous in the byte stream. So restoration
-//! happens on the text field of each frame, with a restorer that holds
-//! back an unclosed `{{` until the rest arrives.
+//! in one pass (`pii_redactor::restore_body`). A stream does not: `{{EMA`
+//! can end one frame and `IL_1}}` start the next, with frame structure in
+//! between. Restoration happens per frame, on the text and the tool
+//! arguments of whichever format this is, with one lane per content block
+//! or tool call — thinkwatch-core's `FrameRestorer`, the same one the
+//! desktop gateway uses.
 
 use serde_json::Value;
 use tw_dialect::frame::{self, Decoder, Frame};
-
-use crate::pii_redactor::{PiiStreamRestorer, RedactionContext};
+use tw_dialect::ir::Dialect;
+use tw_guard::redact::replace::Ledger;
+use tw_guard::redact::sse::{FrameRestorer, Synth};
 
 /// Rewrite the model name in a whole (non-streaming) response.
 pub fn rewrite_model(body: &[u8], model: &str) -> Vec<u8> {
@@ -54,12 +56,12 @@ fn set_model(v: &mut Value, model: &str) -> bool {
 pub struct StreamShaper {
     decoder: Decoder,
     model: String,
-    restorer: Option<PiiStreamRestorer>,
+    restorer: Option<FrameRestorer>,
 }
 
 impl StreamShaper {
-    pub fn new(model: String, redaction: &RedactionContext) -> Self {
-        let restorer = PiiStreamRestorer::new(redaction);
+    pub fn new(model: String, redaction: &Ledger, client: Dialect) -> Self {
+        let restorer = FrameRestorer::new(redaction, client);
         Self {
             decoder: Decoder::default(),
             model,
@@ -69,143 +71,62 @@ impl StreamShaper {
 
     pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
         let frames = self.decoder.feed(chunk);
-        self.write(frames)
+        self.write(frames).into_bytes()
     }
 
-    /// The stream ended. Emits whatever the decoder was still holding.
+    /// The stream ended. Emits whatever the decoder was still holding, then
+    /// any text held back waiting to be a placeholder.
     pub fn finish(&mut self) -> Vec<u8> {
         let frames = self.decoder.flush();
-        self.write(frames)
+        let mut out = self.write(frames);
+        self.drain(&mut out);
+        out.into_bytes()
     }
 
-    fn write(&mut self, frames: Vec<Frame>) -> Vec<u8> {
+    fn write(&mut self, frames: Vec<Frame>) -> String {
         let mut out = String::new();
         for f in frames {
             self.frame(f, &mut out);
         }
-        out.into_bytes()
+        out
     }
 
     fn frame(&mut self, f: Frame, out: &mut String) {
         let Ok(mut v) = serde_json::from_str::<Value>(&f.data) else {
             // `[DONE]` and anything else that is not JSON. A held-back
             // tail has to go out before the stream's own terminator.
-            if let Some(tail) = self.drain() {
-                out.push_str(&frame::data(&chat_text_chunk(&self.model, &tail)));
-            }
+            self.drain(out);
             out.push_str(&raw(&f));
             return;
         };
-
-        set_model(&mut v, &self.model);
-
-        if self.restorer.is_some() {
-            if let Some(text) = text_delta_mut(&mut v) {
-                if let Some(r) = self.restorer.as_mut() {
-                    *text = r.process(text);
-                }
-            } else {
-                // A frame that closes a text run: release anything held
-                // back first, as a delta of its own, so it lands inside
-                // the block it belongs to.
-                if closes_text(&v)
-                    && let Some(tail) = self.drain()
-                {
-                    out.push_str(&synthetic_delta(&v, &self.model, &tail));
-                }
-                // Frames that carry the whole text again (`output_text.done`,
-                // `response.completed`) hold complete placeholders.
-                if let Some(r) = self.restorer.as_ref() {
-                    walk_strings(&mut v, &mut |s| *s = r.restore_oneshot(s));
-                }
+        if let Some(r) = self.restorer.as_mut() {
+            for s in r.frame(&mut v).before {
+                self.synth(s, out);
             }
         }
-
+        set_model(&mut v, &self.model);
         out.push_str(&match &f.event {
             Some(e) => frame::named(e, &v),
             None => frame::data(&v),
         });
     }
 
-    fn drain(&mut self) -> Option<String> {
-        let tail = self.restorer.as_mut()?.flush();
-        (!tail.is_empty()).then_some(tail)
-    }
-}
-
-/// The streamed text in a frame, in whichever format it is.
-fn text_delta_mut(v: &mut Value) -> Option<&mut String> {
-    match v.get("type").and_then(Value::as_str) {
-        // Anthropic
-        Some("content_block_delta") => {
-            let d = v.get_mut("delta")?;
-            if d.get("type").and_then(Value::as_str) != Some("text_delta") {
-                return None;
-            }
-            string_mut(d.get_mut("text")?)
-        }
-        // Responses
-        Some("response.output_text.delta") => string_mut(v.get_mut("delta")?),
-        Some(_) => None,
-        // Chat has no `type`
-        None => {
-            let choice = v.get_mut("choices")?.get_mut(0)?;
-            string_mut(choice.get_mut("delta")?.get_mut("content")?)
+    fn drain(&mut self, out: &mut String) {
+        let Some(r) = self.restorer.as_mut() else {
+            return;
+        };
+        for s in r.drain() {
+            self.synth(s, out);
         }
     }
-}
 
-fn string_mut(v: &mut Value) -> Option<&mut String> {
-    match v {
-        Value::String(s) => Some(s),
-        _ => None,
+    fn synth(&self, mut s: Synth, out: &mut String) {
+        set_model(&mut s.data, &self.model);
+        out.push_str(&match &s.event {
+            Some(e) => frame::named(e, &s.data),
+            None => frame::data(&s.data),
+        });
     }
-}
-
-/// Does this frame end a run of text?
-fn closes_text(v: &Value) -> bool {
-    match v.get("type").and_then(Value::as_str) {
-        Some("content_block_stop") | Some("response.output_text.done") => true,
-        Some(_) => false,
-        None => v
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("finish_reason"))
-            .is_some_and(|f| !f.is_null()),
-    }
-}
-
-/// A text delta carrying `tail`, shaped like the frame it precedes.
-fn synthetic_delta(closing: &Value, model: &str, tail: &str) -> String {
-    match closing.get("type").and_then(Value::as_str) {
-        Some("content_block_stop") => frame::named(
-            "content_block_delta",
-            &serde_json::json!({
-                "type": "content_block_delta",
-                "index": closing.get("index").cloned().unwrap_or(Value::from(0)),
-                "delta": { "type": "text_delta", "text": tail },
-            }),
-        ),
-        Some("response.output_text.done") => frame::named(
-            "response.output_text.delta",
-            &serde_json::json!({
-                "type": "response.output_text.delta",
-                "item_id": closing.get("item_id").cloned().unwrap_or(Value::Null),
-                "output_index": closing.get("output_index").cloned().unwrap_or(Value::from(0)),
-                "content_index": closing.get("content_index").cloned().unwrap_or(Value::from(0)),
-                "delta": tail,
-            }),
-        ),
-        _ => frame::data(&chat_text_chunk(model, tail)),
-    }
-}
-
-fn chat_text_chunk(model: &str, text: &str) -> Value {
-    serde_json::json!({
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{ "index": 0, "delta": { "content": text }, "finish_reason": null }],
-    })
 }
 
 fn raw(f: &Frame) -> String {
@@ -215,27 +136,20 @@ fn raw(f: &Frame) -> String {
     }
 }
 
-fn walk_strings(v: &mut Value, f: &mut impl FnMut(&mut String)) {
-    match v {
-        Value::String(s) => f(s),
-        Value::Array(items) => items.iter_mut().for_each(|i| walk_strings(i, f)),
-        Value::Object(map) => map.values_mut().for_each(|c| walk_strings(c, f)),
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    fn ctx(pairs: &[(&str, &str)]) -> RedactionContext {
-        RedactionContext {
-            replacements: pairs
-                .iter()
-                .map(|(a, b)| (a.to_string(), b.to_string()))
-                .collect::<HashMap<_, _>>(),
-        }
+    /// A ledger that issued `{{EMAIL_1}}` for `a@x.com`, or nothing.
+    fn ctx(email: Option<&str>) -> Ledger {
+        let r = crate::pii_redactor::PiiRedactor::from_config(&[
+            think_watch_common::pii::PiiPatternConfig {
+                name: "email".into(),
+                regex: r"[a-z]+@x\.com".into(),
+                placeholder_prefix: "EMAIL".into(),
+            },
+        ]);
+        r.redact_str(email.unwrap_or("")).1
     }
 
     fn frames(bytes: &[u8]) -> Vec<Value> {
@@ -276,7 +190,7 @@ mod tests {
 
     #[test]
     fn every_streamed_chunk_gets_the_callers_model_back() {
-        let mut s = StreamShaper::new("gpt-4".into(), &ctx(&[]));
+        let mut s = StreamShaper::new("gpt-4".into(), &ctx(None), Dialect::Chat);
         let mut out = s.process(chat_chunk("hi").as_bytes());
         out.extend(s.process(chat_chunk(" there").as_bytes()));
         out.extend(s.finish());
@@ -289,7 +203,7 @@ mod tests {
     fn a_placeholder_split_across_two_frames_is_restored() {
         // Exactly why this cannot be done on bytes: frame structure sits
         // between the two halves.
-        let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
+        let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Chat);
         let mut out = s.process(chat_chunk("mail {{EMA").as_bytes());
         out.extend(s.process(chat_chunk("IL_1}} now").as_bytes()));
         out.extend(s.finish());
@@ -306,7 +220,7 @@ mod tests {
 
     #[test]
     fn an_anthropic_text_delta_is_restored() {
-        let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
+        let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Anthropic);
         let ev = |d: Value| format!("event: content_block_delta\ndata: {d}\n\n");
         let mut out = s.process(
             ev(serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"to {{EMAIL_"}})).as_bytes(),
@@ -326,7 +240,7 @@ mod tests {
     fn a_held_back_tail_is_released_before_the_block_closes() {
         // Text ending in an unclosed `{{` is not a placeholder: it goes out
         // verbatim, inside the block it belongs to, not after the block ends.
-        let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
+        let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Anthropic);
         let ev = |name: &str, d: Value| format!("event: {name}\ndata: {d}\n\n");
         let mut out = s.process(
             ev("content_block_delta", serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"literal {{"}})).as_bytes(),
@@ -354,7 +268,7 @@ mod tests {
     fn a_frame_carrying_the_whole_text_again_is_restored_too() {
         // Responses repeats the whole text in output_text.done and
         // response.completed.
-        let mut s = StreamShaper::new("m".into(), &ctx(&[("{{EMAIL_1}}", "a@x.com")]));
+        let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Responses);
         let out = s.process(
             format!(
                 "event: response.output_text.done\ndata: {}\n\n",
@@ -366,8 +280,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_calls_arguments_get_the_callers_pii_back() {
+        // The old shaper restored text only: a model asked to "email
+        // a@x.com" called the tool with `{{EMAIL_1}}` as the address.
+        let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Chat);
+        let call = |args: &str| {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({"model":"up","choices":[{"index":0,"delta":{"tool_calls":[
+                    {"index":0,"function":{"arguments":args}}
+                ]},"finish_reason":null}]})
+            )
+        };
+        let mut out = s.process(call(r#"{"to":"{{EMA"#).as_bytes());
+        out.extend(s.process(call(r#"IL_1}}"}"#).as_bytes()));
+        out.extend(s.finish());
+        let args: String = frames(&out)
+            .iter()
+            .filter_map(|f| {
+                f["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(args, r#"{"to":"a@x.com"}"#);
+    }
+
+    #[test]
     fn done_passes_through_untouched() {
-        let mut s = StreamShaper::new("m".into(), &ctx(&[]));
+        let mut s = StreamShaper::new("m".into(), &ctx(None), Dialect::Chat);
         let out = s.process(b"data: [DONE]\n\n");
         assert_eq!(out, b"data: [DONE]\n\n");
     }
