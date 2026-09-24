@@ -25,6 +25,7 @@ use think_watch_common::limits::weight;
 
 mod accounting;
 mod body_capture;
+mod early_cancel;
 pub(crate) mod generate;
 mod headers;
 mod identity;
@@ -44,6 +45,7 @@ pub(crate) use log_ctx::emit_gateway_log_with_extra;
 pub(crate) use routing::{SelectionRecord, fails as upstream_failed, finalize_health};
 
 // pub re-exports — `server::app` mounts these as route handlers.
+pub use early_cancel::{EarlyCancel, EarlyCancelSlot};
 pub use generate::{
     proxy_anthropic_messages, proxy_chat_completion, proxy_gemini, proxy_responses,
 };
