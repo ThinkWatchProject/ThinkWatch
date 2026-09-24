@@ -196,8 +196,8 @@ pub async fn delete_user_credential(
         sqlx::query(
             r#"UPDATE mcp_user_credentials
                 SET is_default = true
-                WHERE id = (
-                    SELECT id FROM mcp_user_credentials
+                WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = (
+                    SELECT account_label FROM mcp_user_credentials
                      WHERE mcp_server_id = $1 AND user_id = $2
                      ORDER BY created_at DESC NULLS LAST
                      LIMIT 1
