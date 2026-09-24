@@ -1,17 +1,16 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { QRCodeSVG } from 'qrcode.react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Lock, LogOut, Trash2, ShieldCheck, AlertCircle, Copy, Check, Download } from 'lucide-react';
+import { Lock, LogOut, Trash2, ShieldCheck, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { useNavigate } from '@tanstack/react-router';
+import { TotpEnrollment } from '@/components/auth/totp-enrollment';
 import { useAuth } from '@/hooks/use-auth';
 
 export function ProfilePage() {
@@ -38,14 +37,9 @@ export function ProfilePage() {
   const [totpEnabled, setTotpEnabled] = useState(false);
   const [totpRequired, setTotpRequired] = useState(false);
   const [totpLoading, setTotpLoading] = useState(true);
-  const [totpSetup, setTotpSetup] = useState<{ secret: string; otpauth_uri: string; recovery_codes: string[] } | null>(null);
-  const [totpVerifyCode, setTotpVerifyCode] = useState('');
-  const [totpVerifyError, setTotpVerifyError] = useState('');
-  const [totpVerifyLoading, setTotpVerifyLoading] = useState(false);
   const [totpDisablePassword, setTotpDisablePassword] = useState('');
   const [totpDisableError, setTotpDisableError] = useState('');
   const [disableDialogOpen, setDisableDialogOpen] = useState(false);
-  const [codesCopied, setCodesCopied] = useState(false);
 
   useEffect(() => {
     api<{ enabled: boolean; required: boolean }>('/api/auth/totp/status')
@@ -58,52 +52,6 @@ export function ProfilePage() {
       })
       .finally(() => setTotpLoading(false));
   }, []);
-
-  const handleTotpSetup = async () => {
-    setTotpVerifyError('');
-    try {
-      const res = await apiPost<{ secret: string; otpauth_uri: string; recovery_codes: string[] }>('/api/auth/totp/setup', {});
-      setTotpSetup(res);
-    } catch (err) {
-      setTotpVerifyError(err instanceof Error ? err.message : t('common.error'));
-    }
-  };
-
-  const handleTotpVerifySetup = async (e: FormEvent) => {
-    e.preventDefault();
-    setTotpVerifyLoading(true);
-    setTotpVerifyError('');
-    try {
-      await apiPost('/api/auth/totp/verify-setup', { code: totpVerifyCode });
-      setTotpEnabled(true);
-      setTotpSetup(null);
-      setTotpVerifyCode('');
-    } catch (err) {
-      setTotpVerifyError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setTotpVerifyLoading(false);
-    }
-  };
-
-  const handleCopyRecoveryCodes = async () => {
-    if (!totpSetup) return;
-    await navigator.clipboard.writeText(totpSetup.recovery_codes.join('\n'));
-    setCodesCopied(true);
-    setTimeout(() => setCodesCopied(false), 2000);
-  };
-
-  const handleDownloadRecoveryCodes = () => {
-    if (!totpSetup) return;
-    const blob = new Blob([totpSetup.recovery_codes.join('\n') + '\n'], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'thinkwatch-recovery-codes.txt';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
 
   const handleTotpDisable = async () => {
     setTotpDisableError('');
@@ -259,10 +207,14 @@ export function ProfilePage() {
             <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
           ) : totpEnabled ? (
             <div className="space-y-3">
-              <p className="text-sm text-green-600">{t('auth.totpEnabledStatus')}</p>
-              <Button variant="outline" onClick={() => setDisableDialogOpen(true)}>
-                {t('auth.totpDisable')}
-              </Button>
+              <p className="text-sm text-green-600">
+                {totpRequired ? t('auth.totpRequiredEnabledStatus') : t('auth.totpEnabledStatus')}
+              </p>
+              {!totpRequired && (
+                <Button variant="outline" onClick={() => setDisableDialogOpen(true)}>
+                  {t('auth.totpDisable')}
+                </Button>
+              )}
               {/* Disable dialog */}
               {disableDialogOpen && (
                 <div className="space-y-3 rounded-md border p-4">
@@ -290,88 +242,8 @@ export function ProfilePage() {
                 </div>
               )}
             </div>
-          ) : totpSetup ? (
-            <div className="space-y-4">
-              <div className="space-y-3">
-                <p className="text-sm font-medium">{t('auth.totpScanQr')}</p>
-                <div className="flex justify-center rounded-lg bg-white p-4 w-fit mx-auto">
-                  <QRCodeSVG value={totpSetup.otpauth_uri} size={200} level="M" />
-                </div>
-                <Collapsible className="text-xs">
-                  <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground">
-                    {t('auth.totpManualEntry', 'Manual entry')}
-                  </CollapsibleTrigger>
-                  <CollapsibleContent>
-                    <code className="mt-1 block rounded bg-muted p-2 break-all font-mono tracking-wider">
-                      {totpSetup.secret}
-                    </code>
-                  </CollapsibleContent>
-                </Collapsible>
-              </div>
-              <div className="space-y-2">
-                <p className="text-sm font-medium">{t('auth.totpRecoveryCodes')}</p>
-                <div className="grid grid-cols-2 gap-1 rounded bg-muted p-3">
-                  {totpSetup.recovery_codes.map((code) => (
-                    <code key={code} className="text-xs font-mono">{code}</code>
-                  ))}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={handleCopyRecoveryCodes}>
-                    {codesCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                    {codesCopied ? t('common.copied') : t('auth.totpCopyCodes')}
-                  </Button>
-                  <Button type="button" variant="outline" size="sm" onClick={handleDownloadRecoveryCodes}>
-                    <Download className="h-3.5 w-3.5" />
-                    {t('auth.totpDownloadCodes')}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">{t('auth.totpRecoveryWarning')}</p>
-              </div>
-              <form onSubmit={handleTotpVerifySetup} className="space-y-3">
-                {totpVerifyError && (
-                  <Alert variant="destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>{totpVerifyError}</AlertDescription>
-                  </Alert>
-                )}
-                <div className="space-y-1">
-                  <Label>{t('auth.totpCode')}</Label>
-                  <Input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]{6}"
-                    maxLength={6}
-                    placeholder="000000"
-                    value={totpVerifyCode}
-                    onChange={(e) => setTotpVerifyCode(e.target.value.replace(/[^0-9]/g, ''))}
-                    required
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <Button type="submit" disabled={totpVerifyLoading}>
-                    {totpVerifyLoading ? t('common.loading') : t('auth.totpVerify')}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => { setTotpSetup(null); setTotpVerifyCode(''); setTotpVerifyError(''); }}
-                    disabled={totpVerifyLoading}
-                  >
-                    {t('common.cancel')}
-                  </Button>
-                </div>
-              </form>
-            </div>
           ) : (
-            <div className="space-y-3">
-              {totpVerifyError && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{totpVerifyError}</AlertDescription>
-                </Alert>
-              )}
-              <Button onClick={handleTotpSetup}>{t('auth.totpEnable')}</Button>
-            </div>
+            <TotpEnrollment onEnrolled={() => setTotpEnabled(true)} />
           )}
         </CardContent>
       </Card>

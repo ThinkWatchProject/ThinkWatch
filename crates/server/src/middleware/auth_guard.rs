@@ -2,7 +2,7 @@ use axum::{
     extract::{FromRequestParts, State},
     http::{Request, StatusCode, header::AUTHORIZATION, request::Parts},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use think_watch_auth::{api_key, jwt::Claims, rbac};
@@ -896,18 +896,22 @@ pub async fn require_auth(
     // would silently start authenticating again until expiry. One
     // indexed PK lookup per request closes the gap — cost is sub-ms
     // and only on the auth path.
-    let user_active: Option<bool> =
-        sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(claims.sub)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "DB check for users.is_active failed");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    if !matches!(user_active, Some(true)) {
+    //
+    // The same lookup reads `totp_enabled` for the TOTP-requirement
+    // gate further down, so enforcing it costs no extra query.
+    let user_row: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT is_active, totp_enabled FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(claims.sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "DB check for users.is_active failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let Some((true, totp_enabled)) = user_row else {
         return Err(StatusCode::UNAUTHORIZED);
-    }
+    };
 
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
     // Mirror the empty-string filter that `extract_client_ip` applies
@@ -939,6 +943,17 @@ pub async fn require_auth(
             });
     }
 
+    // `security.totp_required`: a session whose user has not enrolled
+    // reaches only what enrolling needs. Decided per request (not at
+    // login) so switching the setting on covers sessions that already
+    // exist, and enrolling lifts the limit on the same session.
+    if !totp_enabled
+        && !reachable_before_totp_enrollment(request.uri().path())
+        && state.dynamic_config.totp_required().await
+    {
+        return Ok(AppError::TotpEnrollmentRequired.into_response());
+    }
+
     request.extensions_mut().insert(AuthUser {
         claims,
         ip,
@@ -951,6 +966,23 @@ pub async fn require_auth(
     });
 
     Ok(next.run(request).await)
+}
+
+/// Console paths a session can reach while the platform requires TOTP
+/// and its user has not enrolled: who am I, the enrollment endpoints,
+/// the signing-key registration every signed write depends on, and
+/// logout.
+const TOTP_ENROLLMENT_PATHS: &[&str] = &[
+    "/api/auth/me",
+    "/api/auth/register-key",
+    "/api/auth/logout",
+    "/api/auth/totp/status",
+    "/api/auth/totp/setup",
+    "/api/auth/totp/verify-setup",
+];
+
+fn reachable_before_totp_enrollment(path: &str) -> bool {
+    TOTP_ENROLLMENT_PATHS.contains(&path)
 }
 
 /// Authenticate a `tw-` API key against the `console` surface and build a

@@ -32,6 +32,9 @@ export const UserResponseSchema = z.object({
   is_active: z.boolean(),
   permissions: z.array(z.string()),
   denied_permissions: z.array(z.string()),
+  /** The platform requires TOTP and this user has not enrolled; every
+   *  other console endpoint answers 403 until they do. */
+  totp_enrollment_required: z.boolean(),
 });
 export type UserResponse = z.infer<typeof UserResponseSchema>;
 

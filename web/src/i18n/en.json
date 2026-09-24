@@ -9,7 +9,8 @@
       "rate_limited": "Too many requests — wait a moment and try again.",
       "conflict": "That conflicts with an existing record.",
       "service_unavailable": "Service temporarily unavailable — please retry in a few seconds.",
-      "internal_error": "Internal server error. The team has been notified."
+      "internal_error": "Internal server error. The team has been notified.",
+      "totp_enrollment_required": "Two-factor authentication must be set up before this is available."
     },
     "byStatus": {
       "401": "Your session has expired. Please sign in again.",
@@ -239,7 +240,11 @@
     "totpHint": "Enter the 6-digit code from your authenticator app, or a recovery code.",
     "totpVerify": "Verify & Enable",
     "totpCopyCodes": "Copy codes",
-    "totpDownloadCodes": "Download .txt"
+    "totpDownloadCodes": "Download .txt",
+    "totpRequiredEnabledStatus": "Two-factor authentication is enabled. This platform requires it, so it cannot be disabled.",
+    "totpEnrollmentTitle": "Set up two-factor authentication",
+    "totpEnrollmentDescription": "This platform requires two-factor authentication. The console becomes available once it is set up.",
+    "totpEnrollmentSignedInAs": "Signed in as {{email}}"
   },
   "dashboard": {
     "title": "Dashboard",

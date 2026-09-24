@@ -31,6 +31,14 @@ pub enum AppError {
     #[error("{0}")]
     Forbidden(String),
 
+    /// The platform requires TOTP (`security.totp_required`) and the
+    /// signed-in user has not enrolled. The session stays valid but
+    /// only reaches the enrollment endpoints until they do; the
+    /// console switches on the `totp_enrollment_required` type to send
+    /// the user to enrollment.
+    #[error("Two-factor authentication must be set up before continuing")]
+    TotpEnrollmentRequired,
+
     #[error("{0}")]
     NotFound(String),
 
@@ -74,6 +82,11 @@ impl IntoResponse for AppError {
                 "Authentication required".to_string(),
             ),
             AppError::Forbidden(reason) => (StatusCode::FORBIDDEN, "forbidden", reason.clone()),
+            AppError::TotpEnrollmentRequired => (
+                StatusCode::FORBIDDEN,
+                "totp_enrollment_required",
+                self.to_string(),
+            ),
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.clone()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
             AppError::RateLimited => (

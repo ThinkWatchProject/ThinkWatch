@@ -113,6 +113,7 @@ const DYNAMIC_ENUMS = {
   'errors.byType.${_}': [
     'unauthorized', 'forbidden', 'not_found', 'bad_request',
     'rate_limited', 'conflict', 'service_unavailable', 'internal_error',
+    'totp_enrollment_required',
   ],
 };
 

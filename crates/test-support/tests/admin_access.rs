@@ -752,3 +752,44 @@ async fn requiring_totp_is_reported_to_users() {
     let status = get(&admin, "/api/auth/totp/status").await;
     assert_eq!(status["required"], true, "{status}");
 }
+
+/// With `security.totp_required` on, an SSO sign-in of a user who has
+/// not enrolled gets a session held at enrollment, exactly like a
+/// password sign-in (`totp_required.rs`), and enrolling releases it.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_unenrolled_sso_user_is_held_at_totp_enrollment() {
+    let app = TestApp::spawn_reaching_loopback().await;
+    let admin = admin_session(&app).await;
+    let idp = mock_idp().await;
+    activate_sso(&app, &admin, &idp).await;
+    app.set_setting("auth.default_role", json!("developer"))
+        .await;
+    app.set_setting("security.totp_required", json!(true)).await;
+
+    let identity = json!({"sub": unique_name("sub"), "email": unique_email()});
+    let (con, status) = sso_login(&app, &idp, identity).await;
+    assert_eq!(status, 307);
+
+    let me = get(&con, "/api/auth/me").await;
+    assert_eq!(me["totp_enrollment_required"], true, "{me}");
+    let resp = con.get("/api/keys").await.unwrap();
+    resp.assert_status(403);
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body["error"]["type"], "totp_enrollment_required", "{body}");
+
+    let setup: Value = con
+        .post_empty("/api/auth/totp/setup")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let email = me["email"].as_str().unwrap();
+    let code =
+        think_watch_auth::totp::current_code(setup["secret"].as_str().unwrap(), email).unwrap();
+    con.post("/api/auth/totp/verify-setup", json!({"code": code}))
+        .await
+        .unwrap()
+        .assert_ok();
+    con.get("/api/keys").await.unwrap().assert_ok();
+}

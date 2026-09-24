@@ -11,13 +11,14 @@ import { SetupStatusSchema } from '@/lib/schemas';
 import { readSetupStatus, rememberSetupStatus } from '@/lib/setup-status';
 import { LoginPage } from '@/routes/login';
 import { SetupPage } from '@/routes/setup';
+import { TotpEnrollmentPage } from '@/routes/totp-enrollment';
 
 // Split out of `router.tsx`: that module has to export the route tree, and a
 // module exporting both components and plain values loses Fast Refresh.
 
 export function RootComponent() {
   const { t } = useTranslation();
-  const { user, loading, login, logout, handleSsoCallback } = useAuth();
+  const { user, loading, login, logout, handleSsoCallback, handleTotpEnrolled } = useAuth();
   const [setupChecked, setSetupChecked] = useState(readSetupStatus() !== null);
   const [needsSetup, setNeedsSetup] = useState(readSetupStatus()?.needs_setup ?? false);
   const { allowRegistration: registrationOpen } = useSsoStatus();
@@ -121,6 +122,17 @@ export function RootComponent() {
     return (
       <ErrorBoundary>
         <LoginPage onLogin={login} />
+      </ErrorBoundary>
+    );
+  }
+
+  // The platform requires TOTP and this user has not enrolled: the server
+  // refuses every other console request for the session, so the console
+  // is replaced by enrollment until it completes.
+  if (user.totp_enrollment_required) {
+    return (
+      <ErrorBoundary>
+        <TotpEnrollmentPage email={user.email} onEnrolled={handleTotpEnrolled} onLogout={logout} />
       </ErrorBoundary>
     );
   }

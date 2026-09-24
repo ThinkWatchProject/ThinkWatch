@@ -12,6 +12,7 @@ vi.mock('@/lib/api', () => ({
   clearCachedPermissions: vi.fn(),
   registerKeyPair: vi.fn(),
   setCachedPermissions: vi.fn(),
+  TOTP_ENROLLMENT_REQUIRED_EVENT: 'thinkwatch:totp-enrollment-required',
 }))
 
 // logout() loads the key store lazily, and jsdom has no IndexedDB behind it.
@@ -70,5 +71,34 @@ describe('useAuth — ending a session', () => {
 
     expect(client.getQueryData(teamsKey)).toBeUndefined()
     await waitFor(() => expect(result.current.user).toBeNull())
+  })
+})
+
+// The platform can start requiring TOTP while a console tab is open. The
+// first request refused for it fires the event; the hook reloads the user,
+// whose `totp_enrollment_required` switches the console to enrollment.
+describe('useAuth — TOTP enrollment', () => {
+  it('reloads the user when a request is held at enrollment', async () => {
+    const { result } = renderAuth()
+    await waitFor(() => expect(result.current.user).toEqual(signedIn))
+
+    const held = { ...signedIn, totp_enrollment_required: true }
+    vi.mocked(api).mockResolvedValue(held)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('thinkwatch:totp-enrollment-required'))
+    })
+
+    await waitFor(() => expect(result.current.user).toEqual(held))
+  })
+
+  it('reloads the user once enrollment completes', async () => {
+    vi.mocked(api).mockResolvedValue({ ...signedIn, totp_enrollment_required: true })
+    const { result } = renderAuth()
+    await waitFor(() => expect(result.current.user?.totp_enrollment_required).toBe(true))
+
+    vi.mocked(api).mockResolvedValue({ ...signedIn, totp_enrollment_required: false })
+    await act(() => result.current.handleTotpEnrolled())
+
+    await waitFor(() => expect(result.current.user?.totp_enrollment_required).toBe(false))
   })
 })
