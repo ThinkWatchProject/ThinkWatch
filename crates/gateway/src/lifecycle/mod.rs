@@ -32,7 +32,7 @@ use tw_dialect::ir::Dialect;
 use tw_types::GatewayError;
 
 use crate::pii_redactor::PiiRedactor;
-use crate::proxy::generate::{Wire, tokens};
+use crate::proxy::generate::{Wire, priced, tokens};
 use crate::proxy::shaper::{StreamShaper, rewrite_model};
 use crate::proxy::{
     GatewayRequestIdentity, GatewayState, SelectionRecord, emit_gateway_log_with_extra,
@@ -52,8 +52,11 @@ pub struct Completed {
     /// still in place — this is also the form the cache stores, so a
     /// later caller can paint in their own values.
     pub body: Vec<u8>,
-    /// Read off the upstream's bytes, whatever format they were in.
-    pub usage: Option<tw_wire::Usage>,
+    /// Read off the upstream's bytes, whatever format they were in, or
+    /// estimated when they carried none.
+    pub usage: tw_wire::Usage,
+    /// `usage` is at least partly an estimate (see `crate::usage_estimate`).
+    pub usage_estimated: bool,
 }
 
 /// Either the upstream's answer or a short-circuit from a pipeline stage.
@@ -65,8 +68,11 @@ pub enum ChatCompletionOutcome {
 /// What a finished stream leaves behind for the hooks. Computed once in
 /// the pump's tail so the hooks read it rather than each recomputing.
 pub struct ChatStreamCaptured {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
+    /// What the upstream reported, completed by an estimate where it
+    /// reported nothing or was cut short. Zero when no answer came.
+    pub usage: tw_wire::Usage,
+    /// `usage` is at least partly an estimate.
+    pub usage_estimated: bool,
     pub cost_usd: Decimal,
     /// The stream assembled into a whole answer, for the cache and the
     /// audit row. `None` when it produced nothing or could not be
@@ -94,6 +100,9 @@ pub(crate) struct ChatRequestSnapshot {
     /// request must not be cached.
     pub cache_fingerprint: Option<Vec<u8>>,
     pub request_started_at: std::time::Instant,
+    /// The request's input in tokens, estimated — billed only when the
+    /// upstream reports no usage.
+    pub input_estimate: u64,
 }
 
 /// Pre-flight rule + cap lists, reused by the post-flight debit.
@@ -314,6 +323,7 @@ pub(crate) fn build_chat_pump(
     let trace_id = request.trace_id.clone();
     let started_at = request.request_started_at;
     let mapped_model = request.mapped_model.clone();
+    let input_estimate = request.input_estimate;
 
     let tail = Box::pin(async move {
         let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
@@ -323,21 +333,41 @@ pub(crate) fn build_chat_pump(
         )
         .increment(1);
 
-        let (usage, assembled) = match readers_for_tail.lock() {
-            Ok(mut r) => (
-                r.sniffer.take().and_then(|s| s.finish()),
-                r.collector.take().and_then(|c| c.finish().ok()),
-            ),
-            Err(_) => (None, None),
+        // The sniffer exists once the upstream answered. Without an
+        // answer there is nothing to bill.
+        let (answered, reported, assembled) = match readers_for_tail.lock() {
+            Ok(mut r) => {
+                let sniffer = r.sniffer.take();
+                (
+                    sniffer.is_some(),
+                    sniffer.and_then(|s| s.finish()),
+                    r.collector.take().and_then(|c| c.finish().ok()),
+                )
+            }
+            Err(_) => (false, None, None),
         };
-        let (prompt_tokens, completion_tokens) = usage.as_ref().map(tokens).unwrap_or((0, 0));
+        // A stream that did not run to its end lost the upstream's final
+        // count with it: the caller left, or the upstream broke off.
+        let (usage, usage_estimated) = if answered {
+            crate::usage_estimate::complete(
+                reported,
+                outcome.is_natural(),
+                input_estimate,
+                assembled.as_deref(),
+            )
+        } else {
+            (tw_wire::Usage::default(), false)
+        };
+        if usage_estimated {
+            metrics::counter!("gateway_usage_estimated_total").increment(1);
+        }
         let cost_usd = deps_state
             .cost_tracker
-            .calculate_cost(&mapped_model, prompt_tokens, completion_tokens)
+            .calculate_cost(&mapped_model, &priced(&usage))
             .await;
         let captured = ChatStreamCaptured {
-            prompt_tokens,
-            completion_tokens,
+            usage,
+            usage_estimated,
             cost_usd,
             // A cache hit hands this back to a caller, so it carries the
             // caller's model name like everything else they receive.
@@ -492,7 +522,7 @@ impl Surface for ChatCompletionSurface {
         // A stream reaches here only on a natural end — the stage gate
         // already filtered the rest — and its assembled form is exactly
         // what a whole answer would have stored.
-        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        let (prompt_tokens, completion_tokens) = tokens(&extract_usage(&invoked.view));
         let body = match &invoked.view {
             CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => Some(&c.body),
             CapturedView::Streaming { captured, .. } => captured.assembled.as_ref(),
@@ -509,15 +539,13 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn record_usage(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
         post_flight_account(
             deps.state.db.clone(),
             deps.state.redis.clone(),
             deps.state.dynamic_config.clone(),
             deps.state.weight_cache.clone(),
             deps.request.mapped_model.clone(),
-            prompt_tokens,
-            completion_tokens,
+            priced(&extract_usage(&invoked.view)),
             deps.preflight.request_rules.clone(),
             deps.preflight.budget_caps.clone(),
             deps.request.identity.user_id.clone(),
@@ -530,7 +558,8 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn emit_audit(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        let usage = extract_usage(&invoked.view);
+        let (prompt_tokens, completion_tokens) = tokens(&usage);
         let (response_body, cost, logged_status, error_detail) = match &invoked.view {
             CapturedView::Streaming { outcome, captured } => {
                 let (status, detail) = outcome.logged_status_and_detail();
@@ -545,7 +574,7 @@ impl Surface for ChatCompletionSurface {
                 let cost = deps
                     .state
                     .cost_tracker
-                    .calculate_cost(&deps.request.mapped_model, prompt_tokens, completion_tokens)
+                    .calculate_cost(&deps.request.mapped_model, &priced(&usage))
                     .await;
                 (Some(c.body.as_slice()), cost, 200_i64, None)
             }
@@ -585,23 +614,56 @@ impl Surface for ChatCompletionSurface {
             cost,
             deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
-            error_detail,
+            with_usage_detail(error_detail, &usage, usage_estimated(&invoked.view)),
             body_capture,
         );
     }
 }
 
-/// `(prompt, completion)` from a captured view — shared by
-/// `record_usage` and `emit_audit` so the budget and the audit row can
-/// never disagree.
-fn extract_usage_tokens(view: &CapturedView<ChatCompletionSurface>) -> (u32, u32) {
+/// The audit detail, with how the input splits over the prompt cache and
+/// whether the count is an estimate — `input_tokens` on the row is the
+/// whole input, and the cost depends on the split.
+fn with_usage_detail(
+    detail: Option<serde_json::Value>,
+    usage: &tw_wire::Usage,
+    estimated: bool,
+) -> Option<serde_json::Value> {
+    let mut extra = serde_json::Map::new();
+    if usage.cache_read > 0 {
+        extra.insert("cache_read_tokens".into(), usage.cache_read.into());
+    }
+    if usage.cache_write > 0 {
+        extra.insert("cache_write_tokens".into(), usage.cache_write.into());
+        if usage.cache_1h {
+            extra.insert("cache_write_1h".into(), true.into());
+        }
+    }
+    if estimated {
+        extra.insert("usage_estimated".into(), true.into());
+    }
+    if extra.is_empty() {
+        return detail;
+    }
+    if let Some(serde_json::Value::Object(d)) = detail {
+        extra.extend(d);
+    }
+    Some(serde_json::Value::Object(extra))
+}
+
+/// The usage a captured view bills — shared by `record_usage` and
+/// `emit_audit` so the budget and the audit row can never disagree.
+fn extract_usage(view: &CapturedView<ChatCompletionSurface>) -> tw_wire::Usage {
     match view {
-        CapturedView::Streaming { captured, .. } => {
-            (captured.prompt_tokens, captured.completion_tokens)
-        }
-        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => {
-            c.usage.as_ref().map(tokens).unwrap_or((0, 0))
-        }
-        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => (0, 0),
+        CapturedView::Streaming { captured, .. } => captured.usage,
+        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage,
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => tw_wire::Usage::default(),
+    }
+}
+
+fn usage_estimated(view: &CapturedView<ChatCompletionSurface>) -> bool {
+    match view {
+        CapturedView::Streaming { captured, .. } => captured.usage_estimated,
+        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage_estimated,
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
     }
 }

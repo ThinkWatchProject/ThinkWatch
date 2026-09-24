@@ -4,7 +4,8 @@
 // Manages rows in the `models` table — the exposed catalog clients see
 // via `/v1/models`. Each row carries `input_weight` / `output_weight`
 // (relative factors against `platform_pricing` for cost reporting +
-// weighted-token quota accounting). Routing to providers is handled by
+// weighted-token quota accounting), and optional cache-read / cache-write
+// weights that default from the input weight. Routing to providers is handled by
 // the `model_routes` table.
 //
 // Permissions: `models:read` for GET, `models:write` for POST/PATCH/DELETE.
@@ -37,6 +38,13 @@ pub struct ModelRow {
     pub input_weight: Decimal,
     #[schema(value_type = f64)]
     pub output_weight: Decimal,
+    /// Cache weights as stored. `None` ⇒ derived from `input_weight`.
+    #[schema(value_type = Option<f64>)]
+    pub cache_read_weight: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
+    pub cache_write_weight: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
+    pub cache_write_1h_weight: Option<Decimal>,
     pub route_count: i64,
     pub enabled_route_count: i64,
     /// Model-level kill switch. FALSE ⇒ all routes are skipped at
@@ -149,6 +157,7 @@ pub async fn list_models(
     let list_sql = format!(
         r#"SELECT m.id, m.model_id, m.display_name,
                   m.input_weight, m.output_weight,
+                  m.cache_read_weight, m.cache_write_weight, m.cache_write_1h_weight,
                   COALESCE(rc.route_count, 0)         AS route_count,
                   COALESCE(rc.enabled_route_count, 0) AS enabled_route_count,
                   m.enabled,
@@ -200,6 +209,18 @@ pub struct CreateModelRequest {
     /// Relative output-token cost factor. Defaults to 1.0.
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
+    /// Cache-read input weight. Unset ⇒ `input_weight × 0.1`.
+    #[serde(default)]
+    #[schema(value_type = Option<f64>)]
+    pub cache_read_weight: Option<Decimal>,
+    /// Cache-write input weight (5-minute). Unset ⇒ `input_weight × 1.25`.
+    #[serde(default)]
+    #[schema(value_type = Option<f64>)]
+    pub cache_write_weight: Option<Decimal>,
+    /// Cache-write input weight (1-hour). Unset ⇒ `input_weight × 2`.
+    #[serde(default)]
+    #[schema(value_type = Option<f64>)]
+    pub cache_write_1h_weight: Option<Decimal>,
     /// Override the gateway-wide default routing strategy. NULL ⇒
     /// inherit. One of weighted/latency/health/latency_health.
     #[serde(default)]
@@ -254,6 +275,12 @@ pub async fn create_model(
             "weights must be greater than zero".into(),
         ));
     }
+    let cache = [
+        req.cache_read_weight,
+        req.cache_write_weight,
+        req.cache_write_1h_weight,
+    ];
+    validate_cache_weights(&cache)?;
     validate_routing_overrides(
         req.routing_strategy.as_deref(),
         req.affinity_mode.as_deref(),
@@ -268,9 +295,11 @@ pub async fn create_model(
         r#"INSERT INTO models
               (model_id, display_name, input_weight, output_weight,
                routing_strategy, affinity_mode, affinity_ttl_secs, tags,
-               output_guardrails)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               output_guardrails,
+               cache_read_weight, cache_write_weight, cache_write_1h_weight)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            RETURNING id, model_id, display_name, input_weight, output_weight,
+                     cache_read_weight, cache_write_weight, cache_write_1h_weight,
                      routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
                      output_guardrails"#,
     )
@@ -283,6 +312,9 @@ pub async fn create_model(
     .bind(req.affinity_ttl_secs)
     .bind(req.tags.as_deref())
     .bind(&guardrails_json)
+    .bind(cache[0])
+    .bind(cache[1])
+    .bind(cache[2])
     .fetch_one(&state.db)
     .await?;
 
@@ -310,6 +342,17 @@ pub struct UpdateModelRequest {
     pub input_weight: Option<Decimal>,
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
+    /// PATCH-clearable cache weights: absent = unchanged, JSON `null` =
+    /// clear (derive from `input_weight` again), number = set.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<f64>)]
+    pub cache_read_weight: Option<Option<Decimal>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<f64>)]
+    pub cache_write_weight: Option<Option<Decimal>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<f64>)]
+    pub cache_write_1h_weight: Option<Option<Decimal>>,
     /// PATCH semantics: absent = unchanged, JSON `null` = clear (revert
     /// to global default), string = override.
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -352,6 +395,17 @@ pub(crate) fn validate_output_guardrails(rules: &[OutputGuardrail]) -> Result<()
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Cache weights may be zero (an upstream that does not bill cache
+/// reads) but not negative — the column's CHECK, as a useful 400.
+fn validate_cache_weights(weights: &[Option<Decimal>]) -> Result<(), AppError> {
+    if weights.iter().flatten().any(|w| *w < Decimal::ZERO) {
+        return Err(AppError::BadRequest(
+            "cache weights must not be negative".into(),
+        ));
     }
     Ok(())
 }
@@ -415,6 +469,7 @@ pub async fn update_model(
         .await?;
     let existing = sqlx::query_as::<_, Model>(
         r#"SELECT id, model_id, display_name, input_weight, output_weight,
+                  cache_read_weight, cache_write_weight, cache_write_1h_weight,
                   routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
                   output_guardrails
            FROM models WHERE id = $1"#,
@@ -433,6 +488,14 @@ pub async fn update_model(
     }
     // Resolve PATCH semantics for the nullable overrides:
     // absent ⇒ preserve existing; Some(None) ⇒ clear; Some(Some(v)) ⇒ overwrite.
+    let cache = [
+        req.cache_read_weight.unwrap_or(existing.cache_read_weight),
+        req.cache_write_weight
+            .unwrap_or(existing.cache_write_weight),
+        req.cache_write_1h_weight
+            .unwrap_or(existing.cache_write_1h_weight),
+    ];
+    validate_cache_weights(&cache)?;
     let new_strategy: Option<String> = match &req.routing_strategy {
         None => existing.routing_strategy.clone(),
         Some(inner) => inner.clone(),
@@ -477,9 +540,13 @@ pub async fn update_model(
               affinity_ttl_secs = $7,
               tags              = $8,
               enabled           = $9,
-              output_guardrails = $10
+              output_guardrails = $10,
+              cache_read_weight     = $11,
+              cache_write_weight    = $12,
+              cache_write_1h_weight = $13
            WHERE id = $1
            RETURNING id, model_id, display_name, input_weight, output_weight,
+                     cache_read_weight, cache_write_weight, cache_write_1h_weight,
                      routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
                      output_guardrails"#,
     )
@@ -497,6 +564,9 @@ pub async fn update_model(
     .bind(new_tags.as_deref())
     .bind(req.enabled.unwrap_or(existing.enabled))
     .bind(&new_guardrails_json)
+    .bind(cache[0])
+    .bind(cache[1])
+    .bind(cache[2])
     .fetch_one(&state.db)
     .await?;
 
