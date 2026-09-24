@@ -41,6 +41,17 @@ strip = "symbols"
 [profile.dev]
 debug = "line-tables-only"
 
+# Every login in the integration suite hashes a password with Argon2 and
+# grinds a proof-of-work over SHA-256. Unoptimised, those two dominate:
+# the login-heavy tests ran for one to two minutes each in CI. Optimising
+# just the hash crates keeps the rest of the build fast to compile.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 
 # ── thinkwatch-core (MIT) ────────────────────────────────────────────

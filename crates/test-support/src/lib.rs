@@ -9,9 +9,11 @@
 //! - `TEST_DATABASE_BASE_URL` (default `postgres://thinkwatch:thinkwatch@localhost:5432`)
 //! - `TEST_REDIS_URL` (default `redis://localhost:6379`)
 //!
-//! Tests run against the same Redis; isolation is achieved by giving
-//! every fixture a fresh UUID-suffixed email / user id, which ensures
-//! the rate-limit, lockout, and signing keys never collide.
+//! Tests run against the same Redis instance. Each `TestApp` FLUSHDBs
+//! its logical DB on spawn, so concurrent tests need separate DBs:
+//! under nextest each running test gets DB `base + slot` (see
+//! `redis_url_for_slot`); plain `cargo test` must run with
+//! `--test-threads=1`.
 
 pub mod ch;
 pub mod client;
@@ -149,6 +151,7 @@ impl TestApp {
         let redis_url = std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| {
             "redis://:225b3facaf55212ff86ad6595e6d6471@localhost:6379/1".into()
         });
+        let redis_url = redis_url_for_slot(&redis_url)?;
 
         // Per-test database with migrations applied.
         let db_owner = IsolatedDatabase::create(&base_url)
@@ -158,8 +161,11 @@ impl TestApp {
 
         // Redis: shared instance on a dedicated logical DB. We
         // FLUSHDB at spawn time to clear any stragglers from prior
-        // tests. Tests must therefore run serially
-        // (`--test-threads=1`) — the Makefile target enforces it.
+        // tests, so two tests must never share a logical DB at the
+        // same time: either run serially (`--test-threads=1`, the
+        // Makefile target) or under nextest, where
+        // `redis_url_for_slot` gives each concurrently running test
+        // its own DB.
         let redis = build_redis(&redis_url).await?;
         // fred 10 doesn't expose FLUSHDB directly (only FLUSHALL),
         // and we don't want to nuke the dev DB. Send the raw
@@ -394,6 +400,33 @@ impl Drop for TestApp {
     fn drop(&mut self) {
         self.shutdown_inner();
     }
+}
+
+/// Under nextest, move the Redis URL to logical DB `base + slot`.
+///
+/// Every `TestApp` FLUSHDBs its Redis DB on spawn, so tests that run
+/// at the same time must not share one. nextest runs each test in its
+/// own process and hands it `NEXTEST_TEST_GLOBAL_SLOT`, a number in
+/// `0..jobs` that no other running test holds; offsetting the DB by it
+/// keeps parallel tests apart. Outside nextest the URL is unchanged.
+fn redis_url_for_slot(redis_url: &str) -> anyhow::Result<String> {
+    let Ok(slot) = std::env::var("NEXTEST_TEST_GLOBAL_SLOT") else {
+        return Ok(redis_url.to_string());
+    };
+    let slot: u32 = slot.parse().context("parse NEXTEST_TEST_GLOBAL_SLOT")?;
+    let mut url = url::Url::parse(redis_url).context("parse TEST_REDIS_URL")?;
+    let base: u32 = match url.path().trim_start_matches('/') {
+        "" => 0,
+        db => db.parse().context("parse the Redis DB in TEST_REDIS_URL")?,
+    };
+    let db = base + slot;
+    // Redis ships with 16 logical DBs (0..=15).
+    anyhow::ensure!(
+        db <= 15,
+        "Redis DB {db} (base {base} + nextest slot {slot}) is past DB 15; lower the test threads"
+    );
+    url.set_path(&format!("/{db}"));
+    Ok(url.to_string())
 }
 
 async fn build_redis(redis_url: &str) -> anyhow::Result<RedisClient> {
