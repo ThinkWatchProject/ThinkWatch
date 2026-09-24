@@ -107,11 +107,13 @@ pub(super) fn launch_stream_pump(
     open: OpenUpstream,
     shaper: StreamShaper,
     client: Dialect,
+    client_sse: bool,
 ) -> axum::response::Response {
     let (response, tail) = build_chat_pump(
         open,
         shaper,
         client,
+        client_sse,
         deps.state.clone(),
         &deps.request,
         &deps.route.provider_name,

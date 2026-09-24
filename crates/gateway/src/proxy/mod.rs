@@ -1,6 +1,7 @@
 //! Gateway proxy module: shared state, identity, and the AI surface
-//! route handlers (`generate` for the three generation endpoints,
-//! `models` for the listing). Splits across files for readability —
+//! route handlers (`generate` for the four generation surfaces,
+//! `responses_ws` for the Responses API over a WebSocket, `models` for
+//! the listings). Splits across files for readability —
 //! see the leaf modules' docs for what lives where.
 
 use arc_swap::ArcSwap;
@@ -31,6 +32,7 @@ mod log_ctx;
 mod models;
 mod pipeline;
 mod protocol_relearn;
+mod responses_ws;
 mod routing;
 pub mod shaper;
 pub mod transport;
@@ -42,8 +44,11 @@ pub(crate) use log_ctx::emit_gateway_log_with_extra;
 pub(crate) use routing::{SelectionRecord, fails as upstream_failed, finalize_health};
 
 // pub re-exports — `server::app` mounts these as route handlers.
-pub use generate::{proxy_anthropic_messages, proxy_chat_completion, proxy_responses};
-pub use models::list_models_handler;
+pub use generate::{
+    proxy_anthropic_messages, proxy_chat_completion, proxy_gemini, proxy_responses,
+};
+pub use models::{list_gemini_models_handler, list_models_handler};
+pub use responses_ws::proxy_responses_ws;
 
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
@@ -164,6 +169,10 @@ impl GatewayErrorResponse {
     pub(crate) fn in_dialect(mut self, client: tw_dialect::ir::Dialect) -> Self {
         self.client = client;
         self
+    }
+
+    pub(crate) fn error(&self) -> &GatewayError {
+        &self.error
     }
 }
 

@@ -50,7 +50,7 @@ ThinkWatch 一次部署，全部解决。
 ## 核心功能
 
 ### AI API 网关
-- **多格式 API 代理** — 在同一端口原生支持 OpenAI Chat Completions (`/v1/chat/completions`)、Anthropic Messages (`/v1/messages`) 和 OpenAI Responses (`/v1/responses`) API；可直接替换 Cursor、Continue、Cline、Claude Code 以及 OpenAI/Anthropic SDK
+- **多格式 API 代理** — 在同一端口原生支持 OpenAI Chat Completions (`/v1/chat/completions`)、Anthropic Messages (`/v1/messages`)、OpenAI Responses (`/v1/responses`，HTTP 或 WebSocket) 和 Gemini (`/v1beta/models/{model}:generateContent`) API；可直接替换 Cursor、Continue、Cline、Claude Code、Codex 以及 OpenAI/Anthropic/Gemini SDK
 - **多 Provider 路由** — OpenAI、Anthropic、Google Gemini、Azure OpenAI、AWS Bedrock 或任何 OpenAI 兼容端点
 - **自动格式转换** — Anthropic Messages API、Google Gemini、Azure OpenAI、AWS Bedrock Converse API 等，统一在同一接口之后
 - **Provider 自动加载** — 启动时从数据库加载所有活跃 Provider 并注册到模型路由器；默认模型前缀（`gpt-`/`o1-`/`o3-`/`o4-` 对应 OpenAI，`claude-` 对应 Anthropic，`gemini-` 对应 Google）自动路由；Azure 和 Bedrock 需要显式注册模型
@@ -193,7 +193,7 @@ cd web && pnpm install && pnpm dev
 
 | 端口 | 服务器 | 暴露范围 | 用途 |
 |------|--------|----------|------|
-| `3000` | Gateway | **公网** — 暴露给 AI 客户端 | `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, `/mcp`, `/metrics`, `/health/*` |
+| `3000` | Gateway | **公网** — 暴露给 AI 客户端 | `/v1/chat/completions`, `/v1/messages`, `/v1/responses` (HTTP and WebSocket), `/v1beta/models/{model}:generateContent`, `/v1/models`, `/mcp`, `/metrics`, `/health/*` |
 | `3001` | Console | **内网** — 限制在 VPN/防火墙后 | `/api/*` 管理端点, Web UI |
 
 > 生产环境中，**仅端口 3000** 应可从公网访问。端口 3001 应限制在管理网络内。

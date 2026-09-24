@@ -770,8 +770,16 @@ export function GuidePage() {
                 {t('guide.responsesEndpoint')}
               </p>
               <p>
+                <Badge variant="outline" className="mr-2 font-mono text-xs">WS</Badge>
+                {t('guide.responsesWsEndpoint')}
+              </p>
+              <p>
                 <Badge variant="outline" className="mr-2 font-mono text-xs">POST</Badge>
                 {t('guide.anthropicEndpoint')}
+              </p>
+              <p>
+                <Badge variant="outline" className="mr-2 font-mono text-xs">POST</Badge>
+                {t('guide.geminiEndpoint')}
               </p>
               <p>
                 <Badge variant="outline" className="mr-2 font-mono text-xs">GET</Badge>
