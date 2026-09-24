@@ -29,7 +29,7 @@ async fn login_as(app: &TestApp, user: &fixtures::SeededUser) -> TestClient {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn admin_can_create_custom_role_and_grant_it_to_a_user() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_session(&app).await;
 
     // Create a custom "providers reader" role.

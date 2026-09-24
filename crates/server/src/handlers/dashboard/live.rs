@@ -121,6 +121,45 @@ pub struct DashboardLive {
     pub top_users: TopActiveUsersResponse,
 }
 
+/// Each active AI provider's breaker state, the worst of its routes.
+/// Best-effort: a failed lookup reads as closed rather than failing the
+/// whole dashboard.
+async fn ai_breaker_states(
+    state: &AppState,
+) -> std::collections::HashMap<String, tw_breaker::State> {
+    use tw_breaker::State;
+    let rows: Vec<(uuid::Uuid, String)> = match sqlx::query_as(
+        "SELECT mr.id, p.name FROM model_routes mr \
+           JOIN providers p ON p.id = mr.provider_id \
+          WHERE p.is_active = true AND p.deleted_at IS NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("dashboard: route list for breaker states failed: {e}");
+            return Default::default();
+        }
+    };
+    let cfg = think_watch_gateway::health::CircuitBreakerConfig::load(&state.dynamic_config).await;
+    let tracker = think_watch_gateway::health::HealthTracker::new(state.redis.clone());
+    let severity = |s: State| match s {
+        State::Closed => 0,
+        State::HalfOpen => 1,
+        State::Open => 2,
+    };
+    let mut out = std::collections::HashMap::new();
+    for (route_id, provider) in rows {
+        let s = tracker.state(route_id, cfg).await;
+        let worst = out.entry(provider).or_insert(State::Closed);
+        if severity(s) > severity(*worst) {
+            *worst = s;
+        }
+    }
+    out
+}
+
 /// Build a live snapshot. Reused by both the HTTP endpoint and the WS loop.
 ///
 /// `user_filter` is the result of `resolve_dashboard_user_filter` —
@@ -159,6 +198,14 @@ pub(super) async fn build_live_snapshot(
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.
     let cb_states = think_watch_common::cb_registry::snapshot_cb_states();
+    // AI routes keep their breakers in Redis, shared by every replica; the
+    // registry above only holds this process's MCP breakers. A provider
+    // reads as its worst route.
+    let ai_states = ai_breaker_states(state).await;
+    let ai_label = |name: &str| {
+        think_watch_common::cb_registry::label(ai_states.get(name).copied().unwrap_or_default())
+            .to_string()
+    };
 
     let seed_provider = |kind: ProviderKind, name: &str| ProviderHealth {
         kind,
@@ -171,10 +218,7 @@ pub(super) async fn build_live_snapshot(
         // from a healthy-but-active upstream.
         success_rate: None,
         throttled_rate: None,
-        cb_state: cb_states
-            .get(name)
-            .map(|c| c.as_str().to_string())
-            .unwrap_or_else(|| "Closed".to_string()),
+        cb_state: ai_label(name),
     };
     // MCP servers are a special case: when `mcp_servers.status` says
     // "disconnected" we DO want the row to read as down even with zero
@@ -188,7 +232,7 @@ pub(super) async fn build_live_snapshot(
         } else {
             cb_states
                 .get(name)
-                .map(|c| c.as_str().to_string())
+                .map(|c| think_watch_common::cb_registry::label(*c).to_string())
                 .unwrap_or_else(|| "Closed".to_string())
         };
         ProviderHealth {
@@ -549,10 +593,7 @@ pub(super) async fn build_live_snapshot(
         .into_iter()
         .map(|r| ProviderHealth {
             kind: ProviderKind::Ai,
-            cb_state: cb_states
-                .get(&r.provider)
-                .map(|c| c.as_str().to_string())
-                .unwrap_or_else(|| "Closed".to_string()),
+            cb_state: ai_label(&r.provider),
             provider: r.provider,
             success_rate: optionalize(r.requests, r.success_rate),
             throttled_rate: optionalize(r.requests, r.throttled_rate),
@@ -565,7 +606,7 @@ pub(super) async fn build_live_snapshot(
             kind: ProviderKind::Mcp,
             cb_state: cb_states
                 .get(&r.provider)
-                .map(|c| c.as_str().to_string())
+                .map(|c| think_watch_common::cb_registry::label(*c).to_string())
                 .unwrap_or_else(|| "Closed".to_string()),
             provider: r.provider,
             success_rate: optionalize(r.requests, r.success_rate),

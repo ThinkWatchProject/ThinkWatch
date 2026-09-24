@@ -1,21 +1,18 @@
-//! Building gateway adapters from a stored provider row.
+//! Building an upstream from a stored provider row.
 //!
-//! Separate from `app::load_providers_into_router` because three call
-//! sites need it: the router build, the import-time protocol probe, and
-//! the runtime relearn path that reacts to an upstream rejecting a
-//! dialect. All three must construct adapters identically — a probe
-//! that talks to the upstream differently from the live path proves
-//! nothing.
+//! Separate from `app::load_providers_into_router` because the router
+//! build and the import-time protocol probe both need it, and they must
+//! build it identically — a probe that talks to the upstream differently
+//! from the live path proves nothing.
 
 use std::sync::Arc;
 
+use think_watch_gateway::proxy::transport::{Shape, Signer, Upstream};
+
 use think_watch_common::models::Provider;
 
-/// Everything needed to build an adapter for a provider, decrypted once
-/// per router rebuild. Adapters are built per `(provider, protocol)`
-/// rather than per provider, because a single provider record can serve
-/// several wire dialects — see
-/// [`think_watch_gateway::providers::protocol::UpstreamProtocol`].
+/// Everything needed to build a provider's upstream, decrypted once per
+/// router rebuild.
 pub(crate) struct ProviderMaterials {
     pub(crate) name: String,
     pub(crate) provider_type: String,
@@ -88,53 +85,47 @@ impl ProviderMaterials {
     }
 }
 
-/// Build the adapter that speaks `protocol` to this provider.
+/// Build the upstream for a provider.
 ///
-/// Every protocol is reachable from every provider record: the dialect
-/// is a property of the route, not of the provider row, so an
-/// OpenAI-compatible aggregator can serve `anthropic.*` over
-/// `/v1/messages` without the admin creating a second provider.
-pub(crate) fn build_adapter(
-    protocol: think_watch_gateway::providers::protocol::UpstreamProtocol,
-    m: &ProviderMaterials,
-) -> Arc<dyn think_watch_gateway::providers::DynAiProvider> {
-    use think_watch_gateway::providers::protocol::UpstreamProtocol;
-    use think_watch_gateway::providers::{
-        anthropic::AnthropicProvider, azure_openai::AzureOpenAiProvider, bedrock::BedrockProvider,
-        custom::CustomProvider, google::GoogleProvider, openai::OpenAiProvider,
-        openai_responses::OpenAiResponsesProvider,
-    };
-
-    match protocol {
-        UpstreamProtocol::AnthropicMessages => Arc::new(
-            AnthropicProvider::new(m.base_url.clone()).with_custom_headers(m.headers.clone()),
-        ),
-        UpstreamProtocol::GoogleGenerate => {
-            Arc::new(GoogleProvider::new(m.base_url.clone()).with_custom_headers(m.headers.clone()))
-        }
-        UpstreamProtocol::BedrockNative => Arc::new(
-            BedrockProvider::new(m.base_url.clone(), m.bedrock_credentials.clone())
-                .with_custom_headers(m.headers.clone()),
-        ),
-        UpstreamProtocol::OpenAiResponses => Arc::new(
-            OpenAiResponsesProvider::new(m.base_url.clone()).with_custom_headers(m.headers.clone()),
-        ),
-        // Chat Completions has two shapes: Azure rewrites the path
-        // around a deployment + api-version, everyone else is plain
-        // OpenAI. `custom` keeps its own adapter only so the provider's
-        // name shows up in logs instead of the literal "openai".
-        UpstreamProtocol::OpenAiChat => match m.provider_type.as_str() {
-            "azure_openai" => Arc::new(
-                AzureOpenAiProvider::new(m.base_url.clone(), m.api_version.clone())
-                    .with_custom_headers(m.headers.clone()),
-            ),
-            "openai" => Arc::new(
-                OpenAiProvider::new(m.base_url.clone()).with_custom_headers(m.headers.clone()),
-            ),
-            _ => Arc::new(
-                CustomProvider::new(m.name.clone(), m.base_url.clone())
-                    .with_custom_headers(m.headers.clone()),
-            ),
+/// One per provider, not one per dialect: a provider record can serve
+/// several wire formats (an aggregator answering `anthropic.*` on
+/// `/v1/messages` and everything else on `/v1/chat/completions`), but
+/// the host and the credentials are the same for all of them. Which
+/// format a request goes out in is decided per route.
+pub(crate) fn build_upstream(m: &ProviderMaterials) -> Arc<Upstream> {
+    let shape = match m.provider_type.as_str() {
+        "azure_openai" => Shape::Azure {
+            api_version: m
+                .api_version
+                .clone()
+                .unwrap_or_else(|| AZURE_DEFAULT_API_VERSION.to_string()),
         },
-    }
+        "bedrock" => {
+            // `access_key:secret_key`, or empty for IMDSv2 — the instance
+            // role then supplies rotating credentials.
+            let (access_key_id, secret_access_key) = match m.bedrock_credentials.split_once(':') {
+                Some((a, s)) if !a.is_empty() => (Some(a.to_string()), Some(s.to_string())),
+                _ => (None, None),
+            };
+            Shape::Bedrock {
+                signer: Arc::new(Signer {
+                    // The provider row keeps the region in `base_url`.
+                    region: m.base_url.clone(),
+                    access_key_id,
+                    secret_access_key,
+                }),
+            }
+        }
+        _ => Shape::Standard,
+    };
+    Arc::new(Upstream::new(
+        &m.base_url,
+        m.headers.clone(),
+        shape,
+        &m.name,
+    ))
 }
+
+/// The API version an Azure deployment is addressed with when the
+/// provider row names none.
+const AZURE_DEFAULT_API_VERSION: &str = "2024-12-01-preview";

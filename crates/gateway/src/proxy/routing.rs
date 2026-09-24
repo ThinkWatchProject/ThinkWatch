@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use super::GatewayState;
 use crate::health::{CircuitBreakerConfig, RouteHealth};
-use crate::providers::traits::{CallCtx, ChatCompletionRequest, GatewayError};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
+use tw_types::{CallCtx, GatewayError};
 
 /// What the affinity layer can pin a session to.
 #[derive(Debug, Clone, Copy)]
@@ -107,13 +107,7 @@ async fn resolve_routing_config(
 }
 
 async fn resolve_breaker_config(state: &GatewayState) -> CircuitBreakerConfig {
-    CircuitBreakerConfig {
-        enabled: state.dynamic_config.cb_enabled().await,
-        error_pct: state.dynamic_config.cb_error_pct().await,
-        min_samples: state.dynamic_config.cb_min_samples().await,
-        window_secs: state.dynamic_config.cb_window_secs().await,
-        open_secs: state.dynamic_config.cb_open_secs().await,
-    }
+    CircuitBreakerConfig::load(&state.dynamic_config).await
 }
 
 /// Strategy/affinity/breaker context resolved once per request and
@@ -163,11 +157,7 @@ async fn pick_with_strategy<'a>(
     }
     let mut healths: Vec<RouteHealth> = Vec::with_capacity(group.len());
     for entry in group {
-        let h = ctx
-            .state
-            .health
-            .snapshot(entry.route_id, ctx.breaker.window_secs)
-            .await;
+        let h = ctx.state.health.snapshot(entry.route_id, ctx.breaker).await;
         healths.push(h);
     }
 
@@ -187,7 +177,7 @@ async fn pick_with_strategy<'a>(
     let mut excluded: Vec<bool> = Vec::with_capacity(group.len());
     for (i, entry) in group.iter().enumerate() {
         let h = &healths[i];
-        let excl = !h.state.allows_selection() || tried.contains(&entry.provider_id);
+        let excl = h.state == tw_breaker::State::Open || tried.contains(&entry.provider_id);
         excluded.push(excl);
         let success_rate = if h.total > 0 {
             Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
@@ -310,17 +300,11 @@ fn is_retryable(err: &GatewayError) -> bool {
 /// another candidate from the remaining set until exhausted.
 pub(super) async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
-    request: &ChatCompletionRequest,
+    outbound: &super::generate::Outbound,
     call_ctx: &CallCtx,
     ctx: &SelectionCtx<'_>,
-) -> Result<
-    (
-        &'a RouteEntry,
-        crate::providers::traits::ChatCompletionResponse,
-        SelectionRecord,
-    ),
-    GatewayError,
-> {
+    caller_model: &str,
+) -> Result<(&'a RouteEntry, crate::lifecycle::Completed, SelectionRecord), GatewayError> {
     let started_at = std::time::Instant::now();
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
@@ -333,56 +317,21 @@ pub(super) async fn select_route_with_failover<'a>(
         };
         tried.push(entry.provider_id);
 
-        let mut req = request.clone();
-        if let Some(ref upstream) = entry.upstream_model {
-            req.model = upstream.clone();
-        }
+        let upstream_model = entry.upstream_model.as_deref().unwrap_or(caller_model);
 
         // Per-attempt clock: record latency against this route as
         // *its* time, not "everything since the request started"
         // (which would double-count earlier failed attempts in
         // a failover chain and skew the latency strategy).
         let attempt_started_at = std::time::Instant::now();
-        let mut result = entry
-            .provider
-            .chat_completion_boxed(req.clone(), call_ctx.clone())
-            .await;
-
-        // The upstream may reject the dialect this route was configured
-        // with — models get moved between APIs, and the import-time
-        // probe groups by model family, which can be one bucket too
-        // coarse. Rather than surface that to an operator, try the
-        // route's other dialects and remember whichever answers.
-        if let Err(ref e) = result
-            && super::protocol_relearn::is_protocol_mismatch(e)
-        {
-            for (protocol, adapter) in &entry.alternates {
-                tracing::info!(
-                    provider = %entry.provider_name,
-                    model = %req.model,
-                    from = %entry.protocol,
-                    to = %protocol,
-                    "Upstream rejected the configured protocol — retrying with an alternate"
-                );
-                let retry = adapter
-                    .chat_completion_boxed(req.clone(), call_ctx.clone())
-                    .await;
-                let recovered = retry.is_ok();
-                result = retry;
-                if recovered {
-                    super::protocol_relearn::persist(&ctx.state.db, entry.route_id, *protocol)
-                        .await;
-                    break;
-                }
-                if let Err(ref e) = result
-                    && !super::protocol_relearn::is_protocol_mismatch(e)
-                {
-                    // A different failure means we've stopped learning
-                    // anything about dialects — stop burning requests.
-                    break;
-                }
-            }
-        }
+        // A rejected dialect is retried inside `send`, on this same route.
+        let result =
+            match super::generate::send(entry, outbound, call_ctx, &ctx.state.db, upstream_model)
+                .await
+            {
+                Ok((resp, wire)) => super::generate::read_whole(resp, &wire, caller_model).await,
+                Err(e) => Err(e),
+            };
 
         let attempt_latency_ms = attempt_started_at
             .elapsed()
@@ -412,14 +361,14 @@ pub(super) async fn select_route_with_failover<'a>(
             }
             Err(e) if is_retryable(&e) => {
                 tracing::warn!(
-                    provider = %entry.provider.name(),
+                    provider = %entry.provider_name,
                     provider_id = %entry.provider_id,
                     error = %e,
                     "Route failed, trying next"
                 );
                 metrics::counter!(
                     "gateway_provider_fallback_total",
-                    "from" => crate::metrics_labels::normalize_provider_label(entry.provider.name()),
+                    "from" => crate::metrics_labels::normalize_provider_label(&entry.provider_name),
                 )
                 .increment(1);
                 // Record the failed attempt in health so the

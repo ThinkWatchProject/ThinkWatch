@@ -37,17 +37,14 @@ pub mod models;
 // --- Data-plane primitives (referenced by gateway / mcp-gateway) ---
 pub mod audit; // AuditEntry / AuditLogger — used by every ingest path
 pub mod blob_store; // S3-compatible body offload for the audit pipeline
-pub mod cb_registry;
+pub mod cb_registry; // circuit-breaker states both gateways write and the dashboard reads
 pub mod clickhouse_client;
 pub mod cost_decimal; // Decimal ↔ raw i64/i128 helpers for CH Decimal(18, 10) columns
 pub mod lifecycle; // Surface-agnostic request pipeline (see lifecycle::mod docs)
 pub mod limits; // rate-limit & budget evaluation
-pub mod retry;
 
 // --- Utilities ---
-pub mod crypto;
 pub mod fixed_window;
-pub mod json_secret;
 pub mod pii; // BlobRedactor — at-rest body redaction shared by gateway + mcp-gateway
 pub mod regex_util;
 pub mod tasks; // supervised_spawn — panic-isolated background tasks

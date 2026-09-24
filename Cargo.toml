@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.2"
+version = "1.1.0"
 edition = "2024"
 # Pin the MSRV to the first stable rustc that ships edition 2024 (1.85,
 # released 2025-02-20). Without this, contributors on older toolchains
@@ -34,7 +34,34 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 
+# Dev and test builds keep only line tables: backtraces still name the
+# file and line, but the full variable-level debug info is gone. Each
+# integration test is its own binary linking the whole workspace, so
+# full debug info filled ~150 GB of target/ in a day.
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.dependencies]
+
+# ── thinkwatch-core (MIT) ────────────────────────────────────────────
+# The layer shared with the desktop gateway. Declared once, here, so a
+# core release is a one-line bump. Pinned to a tag: tracking a branch
+# turns every core merge into a coin flip on this build.
+#
+# Code flows one way: from core into this tree, never back. Anything
+# that lands in core is MIT from that moment on.
+#
+# One copy, not two. Code that lives in core is used from core directly,
+# never re-exported through a local shim — the envelope layout in
+# tw-crypto already drifted by 61 lines once, while two copies existed.
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-crypto = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-upstream = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-wire = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
 tower = "0.5"
@@ -123,3 +150,5 @@ think-watch-common = { path = "crates/common" }
 think-watch-auth = { path = "crates/auth" }
 think-watch-gateway = { path = "crates/gateway" }
 think-watch-mcp-gateway = { path = "crates/mcp-gateway" }
+
+

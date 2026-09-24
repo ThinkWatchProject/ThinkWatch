@@ -1,153 +1,113 @@
-//! Cross-crate PII redaction primitive.
+//! PII patterns, and the at-rest redactor.
 //!
-//! Lives in `common` (not `gateway`) so the mcp-gateway crate can
-//! use it without inverting the dep graph. The gateway crate's
-//! `pii_redactor::PiiRedactor` keeps its message-level redaction
-//! API (which needs gateway types like `ChatMessage` to walk the
-//! request shape) and delegates blob redaction to this module's
-//! [`BlobRedactor`].
+//! The patterns live in `security.pii_redactor_patterns`. Two surfaces use
+//! them, and both must see the same set — a pattern added in the admin UI
+//! that one surface skips is a leak nobody notices:
 //!
-//! ## Why blob vs message redaction is split
+//! * **In flight** (gateway only): PII in the caller's request is swapped
+//!   for placeholders (`{{EMAIL_1}}`) before it goes upstream, and put back
+//!   in the response for this caller. `gateway::pii_redactor` owns that.
+//! * **At rest** (both gateways): request and response bodies, tool
+//!   arguments and tool results are written to the audit log. The row is
+//!   write-only, so matches become `{{REDACTED_<name>}}` and nothing is
+//!   kept to restore them. That is [`BlobRedactor`].
 //!
-//! Two distinct use cases:
-//!
-//! * **In-flight redaction** (gateway only): the user's request goes
-//!   upstream with PII replaced by placeholders (`{{EMAIL_1}}`),
-//!   and the upstream response is restored back to the original PII
-//!   for THIS caller. Needs a per-request restoration context.
-//!   `gateway::pii_redactor::PiiRedactor::redact_messages` owns
-//!   this.
-//!
-//! * **At-rest redaction**: the audit pipeline serializes
-//!   `request_body` / `response_body` / `tool_arguments` /
-//!   `tool_result` and writes them into ClickHouse. The audit row
-//!   is WRITE-ONLY (the user's response was already restored from
-//!   the in-flight context); no restoration needed. Pure substring
-//!   replacement with a `{{REDACTED_<name>}}` marker is sufficient.
-//!   This is what [`BlobRedactor`] does.
-//!
-//! Both halves load the same pattern set from
-//! `security.pii_redactor_patterns` so a rule added via the admin
-//! UI applies to BOTH redaction surfaces consistently.
+//! Matching is thinkwatch-core's (`tw-guard`), the same engine the desktop
+//! gateway redacts with; the patterns are ours.
 
-use regex::Regex;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+use tw_guard::redact::rules::RuleSet;
 
-/// Pattern config as persisted in `system_settings`. Mirrors the
-/// gateway-side shape exactly because both crates deserialize from
-/// the same JSON value. The `placeholder_prefix` field is unused
-/// by `BlobRedactor` (placeholders are write-only, no per-match
-/// salt needed) but kept on the struct so config edits don't have
-/// to fork into two schemas.
+/// A pattern as persisted in `system_settings`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PiiPatternConfig {
     pub name: String,
     pub regex: String,
+    /// The label in the placeholder: `EMAIL` in `{{EMAIL_1}}`.
     pub placeholder_prefix: String,
 }
 
-#[derive(Clone)]
-struct CompiledPattern {
-    name: String,
-    regex: Regex,
+/// The rule set for these patterns: one rule per pattern, labelled with
+/// its prefix.
+///
+/// A pattern that does not compile is skipped, loudly — the save-time
+/// validator should have refused it, and one bad row should not take all
+/// redaction offline.
+pub fn rules(configs: &[PiiPatternConfig]) -> RuleSet {
+    configs.iter().fold(RuleSet::none(), |set, c| {
+        match set
+            .clone()
+            .with_labeled(&c.name, &c.regex, Some(&c.placeholder_prefix))
+        {
+            Ok(next) => next,
+            Err(e) => {
+                tracing::error!(
+                    pattern = %c.name,
+                    error = %e,
+                    "Invalid PII regex — pattern is DISABLED for redaction"
+                );
+                metrics::counter!("pii_pattern_invalid_total", "pattern" => c.name.clone())
+                    .increment(1);
+                set
+            }
+        }
+    })
 }
 
-/// Stateless, thread-safe blob redactor. Construct once at startup
-/// (or hot-swap when the operator edits patterns), wrap in
-/// `Arc<ArcSwap<...>>` for cheap reads on the hot path. `redact_blob`
-/// is `O(N · M)` worst case where N is pattern count and M is body
-/// length — same as the gateway's in-flight redactor.
-#[derive(Clone, Default)]
+/// Replace every match in `input` with `{{REDACTED_<pattern name>}}`.
+/// Nothing is kept to restore them: the result is write-only audit data.
+pub fn redact_blob(rules: &RuleSet, input: &str) -> String {
+    if rules.is_empty() {
+        return input.to_string();
+    }
+    let hits = tw_guard::redact::rules::scan_text(input, rules);
+    let mut out = input.to_string();
+    for h in hits.iter().rev() {
+        out.replace_range(
+            h.bytes.clone(),
+            &format!("{{{{REDACTED_{}}}}}", h.rule.id()),
+        );
+    }
+    out
+}
+
+/// The at-rest redactor, for a caller that holds no in-flight redactor
+/// (the MCP gateway). Hot-swapped with the patterns.
+#[derive(Clone)]
 pub struct BlobRedactor {
-    patterns: Vec<CompiledPattern>,
+    rules: Arc<RuleSet>,
+}
+
+impl Default for BlobRedactor {
+    fn default() -> Self {
+        Self {
+            rules: Arc::new(RuleSet::none()),
+        }
+    }
 }
 
 impl std::fmt::Debug for BlobRedactor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlobRedactor")
-            .field("pattern_count", &self.patterns.len())
-            .finish()
+        f.debug_struct("BlobRedactor").finish_non_exhaustive()
     }
 }
 
 impl BlobRedactor {
-    /// Build a redactor from the same config shape the gateway uses.
-    /// Invalid regexes are skipped with a loud `tracing::error!` and
-    /// a metric increment — same fail-soft posture as
-    /// `gateway::pii_redactor::PiiRedactor::from_config` because an
-    /// operator save-time validator should have rejected the bad
-    /// pattern before it reached us, and an unparseable rule
-    /// shouldn't keep ALL redaction offline.
     pub fn from_configs(configs: &[PiiPatternConfig]) -> Self {
-        let patterns = configs
-            .iter()
-            .filter_map(|c| match crate::regex_util::compile_bounded(&c.regex) {
-                Ok(regex) => Some(CompiledPattern {
-                    name: c.name.clone(),
-                    regex,
-                }),
-                Err(e) => {
-                    tracing::error!(
-                        pattern = %c.name,
-                        error = %e,
-                        "Invalid PII regex — pattern is DISABLED for blob redaction"
-                    );
-                    metrics::counter!(
-                        "blob_redactor_pattern_invalid_total",
-                        "pattern" => c.name.clone(),
-                    )
-                    .increment(1);
-                    None
-                }
-            })
-            .collect();
-        Self { patterns }
+        Self {
+            rules: Arc::new(rules(configs)),
+        }
     }
 
-    /// `true` when there are no compiled patterns — callers can
-    /// skip the redact pass entirely (avoids the per-message
-    /// `.to_string()` copy).
+    /// No patterns: callers can skip the pass (and its copy) entirely.
     pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
+        self.rules.is_empty()
     }
 
-    /// Apply all configured patterns to an arbitrary serialized blob.
-    /// Result has matched substrings replaced by
-    /// `{{REDACTED_<pattern_name>}}` markers. Overlapping matches are
-    /// resolved deterministically (longest-match-wins on tie) so
-    /// re-running the redactor on the same input is idempotent.
     pub fn redact_blob(&self, input: &str) -> String {
-        if self.patterns.is_empty() {
-            return input.to_string();
-        }
-        // Gather all matches first so overlapping patterns get a
-        // deterministic non-overlapping resolution.
-        let mut all_matches: Vec<(usize, usize, usize)> = Vec::new();
-        for (pattern_idx, pattern) in self.patterns.iter().enumerate() {
-            for m in pattern.regex.find_iter(input) {
-                all_matches.push((m.start(), m.end(), pattern_idx));
-            }
-        }
-        if all_matches.is_empty() {
-            return input.to_string();
-        }
-        // Sort earliest-start first, longest-match-wins on tie.
-        all_matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0))));
-        let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
-        for m in &all_matches {
-            if filtered.iter().all(|f| m.0 >= f.1 || m.1 <= f.0) {
-                filtered.push(*m);
-            }
-        }
-        // Reverse so replace_range from-end-first keeps earlier
-        // indices valid.
-        filtered.sort_by_key(|b| std::cmp::Reverse(b.0));
-        let mut result = input.to_string();
-        for (start, end, pattern_idx) in filtered {
-            let replacement = format!("{{{{REDACTED_{}}}}}", self.patterns[pattern_idx].name);
-            result.replace_range(start..end, &replacement);
-        }
-        result
+        redact_blob(&self.rules, input)
     }
 }
 

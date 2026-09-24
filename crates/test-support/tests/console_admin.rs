@@ -317,7 +317,7 @@ async fn teams_create_add_member_list_remove() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn providers_can_be_created_listed_deleted() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let (con, _) = admin_session_with_user(&app).await;
 
     let created: Value = con
@@ -327,13 +327,8 @@ async fn providers_can_be_created_listed_deleted() {
                 "name": unique_name("prov"),
                 "display_name": "Test Provider",
                 "provider_type": "openai",
-                // SSRF guard rejects loopback / private networks. Use a
-                // public-looking host so the validate_url check passes.
-                // No request will actually reach this URL because the
-                // gateway router isn't rebuilt in this test.
-                // SSRF guard does a DNS resolve; pick a public host
-                // that exists. No request actually leaves the test —
-                // the gateway router isn't rebuilt afterwards.
+                // No request reaches this URL: the gateway router isn't
+                // rebuilt in this test.
                 "base_url": "https://api.openai.com/v1",
                 "config": {}
             }),

@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use think_watch_auth::oauth::pkce::{pkce_challenge, random_token, state_binding};
-use think_watch_common::crypto::{self, parse_encryption_key};
 use think_watch_common::errors::AppError;
+use tw_crypto::crypto::{self, parse_encryption_key};
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -85,6 +85,7 @@ pub async fn start_wizard_authorize(
     // POST credentials to these URLs; never let an admin smuggle
     // `http://169.254.169.254/...` past us.
     crate::handlers::mcp_servers::validate_oauth_endpoint_urls(
+        &state.url_validator,
         Some(req.oauth_authorization_endpoint.as_str()),
         Some(req.oauth_token_endpoint.as_str()),
         None,

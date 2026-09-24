@@ -36,6 +36,9 @@ pub struct TestClient {
     /// the test loopback — by default the server falls back to the
     /// connection IP (also 127.0.0.1) and ignores the header.
     forwarded_for: Arc<Mutex<Option<String>>>,
+    /// Extra headers sent on every request, for tests about what the
+    /// gateway forwards to an upstream.
+    headers: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl TestClient {
@@ -56,6 +59,7 @@ impl TestClient {
             signing: Arc::new(Mutex::new(None)),
             bearer: Arc::new(Mutex::new(None)),
             forwarded_for: Arc::new(Mutex::new(None)),
+            headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -69,6 +73,14 @@ impl TestClient {
 
     pub fn clear_bearer(&self) {
         *self.bearer.lock().unwrap() = None;
+    }
+
+    /// Send `name: value` on every following request.
+    pub fn set_header(&self, name: impl Into<String>, value: impl Into<String>) {
+        self.headers
+            .lock()
+            .unwrap()
+            .push((name.into(), value.into()));
     }
 
     pub fn set_forwarded_for(&self, ip: impl Into<String>) {
@@ -200,6 +212,17 @@ impl TestClient {
         // rejects non-ASCII anyway, so the Unicode case-folding is
         // dead surface area waiting to be a future bug.
         let bound_email = email.trim().to_ascii_lowercase();
+        // A nonce is valid with probability 2^-difficulty, so the number
+        // of tries is geometric with mean 2^difficulty. A fixed cap near
+        // the mean fails now and then: 10M at difficulty 21 failed about
+        // one run in a hundred. 32 × the mean fails with probability
+        // e^-32. The server's highest tier is 23; anything above 26
+        // means the difficulty is misconfigured, not unlucky.
+        anyhow::ensure!(
+            difficulty <= 26,
+            "PoW difficulty {difficulty} is too high to grind in a test"
+        );
+        let limit = 32u64 << difficulty;
         let mut nonce: u64 = 0;
         loop {
             let nonce_str = nonce.to_string();
@@ -215,13 +238,10 @@ impl TestClient {
                 }));
             }
             nonce += 1;
-            // Safety belt — at default difficulty 19 the expected
-            // iteration count is ~262k. Stop at 10M (40-ish bits)
-            // to fail-fast if difficulty is misconfigured.
-            if nonce > 10_000_000 {
+            if nonce > limit {
                 anyhow::bail!(
-                    "PoW grinder exceeded 10M iterations at difficulty {difficulty}; \
-                     either DEFAULT_DIFFICULTY was raised dangerously high or there's a bug"
+                    "PoW grinder found no nonce in {limit} tries at difficulty {difficulty}; \
+                     the server and `verify_pow` disagree"
                 );
             }
         }
@@ -278,6 +298,9 @@ impl TestClient {
         }
         if let Some(xff) = self.forwarded_for.lock().unwrap().clone() {
             req = req.header("x-forwarded-for", xff);
+        }
+        for (k, v) in self.headers.lock().unwrap().iter() {
+            req = req.header(k, v);
         }
         req = self.maybe_sign(req, &method, path, body_bytes.as_deref());
 

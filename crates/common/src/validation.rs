@@ -150,6 +150,16 @@ pub fn validate_custom_headers(
     Ok(())
 }
 
+/// Checks an outbound URL before the server calls it. The server holds one
+/// (`validate_url` in production); integration tests swap in a permissive
+/// one so a mock listening on loopback can be reached.
+pub type UrlValidator = std::sync::Arc<dyn Fn(&str) -> Result<(), AppError> + Send + Sync>;
+
+/// The production validator: [`validate_url`].
+pub fn production_url_validator() -> UrlValidator {
+    std::sync::Arc::new(validate_url)
+}
+
 pub fn validate_url(url_str: &str) -> Result<(), AppError> {
     let parsed =
         url::Url::parse(url_str).map_err(|_| AppError::BadRequest("Invalid URL".into()))?;

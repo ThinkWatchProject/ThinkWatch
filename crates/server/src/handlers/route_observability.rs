@@ -69,10 +69,10 @@ pub async fn list_route_health(
     // window — so the UI sees the exact view the breaker uses to
     // make selection decisions.
     let tracker = think_watch_gateway::health::HealthTracker::new(state.redis.clone());
-    let window_secs = state.dynamic_config.cb_window_secs().await;
+    let cfg = think_watch_gateway::health::CircuitBreakerConfig::load(&state.dynamic_config).await;
 
     let route_ids: Vec<Uuid> = rows.iter().map(|r| r.route_id).collect();
-    let healths = tracker.snapshot_many(&route_ids, window_secs).await;
+    let healths = tracker.snapshot_many(&route_ids, cfg).await;
 
     let mut by_id: std::collections::HashMap<Uuid, RouteHealth> = healths.into_iter().collect();
     let entries: Vec<RouteHealthEntry> = rows

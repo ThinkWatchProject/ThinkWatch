@@ -1,16 +1,33 @@
-use crate::providers::traits::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
+use serde_json::Value;
 use std::sync::Arc;
 use think_watch_common::dynamic_config::DynamicConfig;
 use xxhash_rust::xxh3::xxh3_128;
+
+/// A cached answer, in the caller's format with PII placeholders intact.
+pub struct Cached {
+    pub body: Vec<u8>,
+    /// Kept so a hit can debit quota the way the original call did.
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
+/// What goes into Redis. The body is kept as JSON rather than bytes so
+/// the entry stays readable with `redis-cli`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stored {
+    body: Value,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
 
 /// Redis-based exact-match cache for LLM responses.
 ///
 /// Only caches non-streaming requests with deterministic parameters
 /// (temperature == 0 or absent).
 ///
-/// Cache keys are purely semantic: `model + messages + params`. All
+/// Cache keys are purely semantic — see [`ResponseCache::fingerprint`]. All
 /// users share the same cache — identical requests get the same
 /// response regardless of who asked, which is correct since the
 /// information surface is identical.
@@ -60,77 +77,73 @@ impl ResponseCache {
         }
     }
 
-    /// Whether this request is cacheable (deterministic).
-    ///
-    /// Both streaming and non-streaming requests are eligible — for
-    /// streaming the proxy assembles the complete response from chunks
-    /// after the stream ends and writes it to cache as a normal
-    /// `ChatCompletionResponse`.  On a subsequent cache hit with
-    /// `stream=true`, the assembled response is re-emitted as a
-    /// single-chunk SSE stream.
-    pub fn is_cacheable(request: &ChatCompletionRequest) -> bool {
-        // Only cache when temperature is 0 or absent
-        match request.temperature {
+    /// Whether this request is cacheable (deterministic): temperature
+    /// absent or zero. A streamed request is eligible — the pump assembles
+    /// the whole answer, and a later streamed hit replays it as one event.
+    fn is_cacheable(request: &Value) -> bool {
+        match request.get("temperature").and_then(Value::as_f64) {
             Some(t) => t == 0.0,
             None => true,
         }
     }
 
-    /// Compute the cache key for a request. Purely semantic — no user
-    /// scoping. Identical model + messages + params = same key.
-    pub fn cache_key(request: &ChatCompletionRequest) -> String {
-        Self::cache_key_for(&request.model, &request.messages, request.max_tokens)
-    }
-
-    /// Compute the cache key from the model + messages + max_tokens
-    /// triple directly. Most callers should use [`cache_key`]; this
-    /// variant exists for tests and any future caller that constructs
-    /// the key without holding the full request struct.
-    pub fn cache_key_for(model: &str, messages: &[ChatMessage], max_tokens: Option<u32>) -> String {
-        let messages_json = serde_json::to_string(messages).unwrap_or_default();
-
-        let mut input = Vec::with_capacity(256);
-        input.extend_from_slice(model.as_bytes());
-        input.push(b':');
-        input.extend_from_slice(messages_json.as_bytes());
-        if let Some(mt) = max_tokens {
-            input.extend_from_slice(b":mt=");
-            input.extend_from_slice(mt.to_string().as_bytes());
-        }
-
+    /// The Redis key for a fingerprint.
+    pub fn cache_key_for(fingerprint: &[u8]) -> String {
         // xxh3_128 is ~10x faster than SHA-256 for non-cryptographic hashing
-        let hash = xxh3_128(&input);
+        let hash = xxh3_128(fingerprint);
         format!("llm_cache:{hash:032x}")
     }
 
-    /// Look up a cached response by semantic key (model + messages + params).
-    pub async fn get(&self, request: &ChatCompletionRequest) -> Option<ChatCompletionResponse> {
+    /// The bytes that identify a request, or `None` when it must not be
+    /// cached at all.
+    ///
+    /// **The whole request, not a chosen subset.** The key used to be
+    /// model + messages + max_tokens, which silently ignored everything
+    /// else that changes the answer: two requests differing only in
+    /// `tools` shared a slot, and the second got the first one's tool
+    /// call. It stayed hidden only because tools never reached an
+    /// upstream. Hashing every field cannot forget one.
+    ///
+    /// **Cacheability is decided here, not at the lookup.** A request
+    /// sampled at a nonzero temperature asks for a fresh draw. That check
+    /// used to open `get` and `set`, where a refactor dropped it once;
+    /// with no fingerprint there is no key to look up or store under.
+    ///
+    /// **Computed on the redacted request, on purpose.** What is stored
+    /// carries placeholders and each caller restores their own values on
+    /// the way out, so two callers asking the same question about their
+    /// own e-mail share one slot — the point of a semantic cache, not a
+    /// leak.
+    ///
+    /// `serde_json` sorts object keys when serializing, so the same
+    /// request always produces the same bytes.
+    pub fn fingerprint(request: &Value) -> Option<Vec<u8>> {
         if !Self::is_cacheable(request) {
             return None;
         }
-        self.get_for(&request.model, &request.messages, request.max_tokens)
-            .await
+        let mut r = request.clone();
+        if let Some(obj) = r.as_object_mut() {
+            // Framing, not the answer: a streamed request should hit
+            // what a whole one stored.
+            obj.remove("stream");
+            obj.remove("stream_options");
+        }
+        Some(serde_json::to_vec(&r).unwrap_or_default())
     }
 
-    /// Like [`get`] but takes an explicit `messages` slice. Bypasses
-    /// the `is_cacheable` temperature check — caller is responsible
-    /// for asserting cacheability if it matters.
-    pub async fn get_for(
-        &self,
-        model: &str,
-        messages: &[ChatMessage],
-        max_tokens: Option<u32>,
-    ) -> Option<ChatCompletionResponse> {
-        let key = Self::cache_key_for(model, messages, max_tokens);
-        let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
-
-        cached.and_then(|json| {
-            serde_json::from_str::<ChatCompletionResponse>(&json)
-                .map_err(|e| {
-                    tracing::warn!("Failed to deserialize cached response: {e}");
-                    e
-                })
+    /// Look up a cached answer.
+    pub async fn get(&self, fingerprint: &[u8]) -> Option<Cached> {
+        let key = Self::cache_key_for(fingerprint);
+        let stored: Option<String> = self.redis.get(&key).await.ok().flatten();
+        stored.and_then(|json| {
+            serde_json::from_str::<Stored>(&json)
+                .map_err(|e| tracing::warn!("Failed to read a cached response: {e}"))
                 .ok()
+                .map(|s| Cached {
+                    body: serde_json::to_vec(&s.body).unwrap_or_default(),
+                    prompt_tokens: s.prompt_tokens,
+                    completion_tokens: s.completion_tokens,
+                })
         })
     }
 
@@ -166,44 +179,23 @@ return total
         tracing::info!(deleted, "Cache invalidated");
     }
 
-    /// Store a response in the cache. `scope` MUST identify the
-    /// requesting tenant — see `get` for the contract.
-    pub async fn set(
-        &self,
-        request: &ChatCompletionRequest,
-        response: &ChatCompletionResponse,
-        ttl: Option<u64>,
-    ) {
-        if !Self::is_cacheable(request) {
-            return;
-        }
-        self.set_for(
-            &request.model,
-            &request.messages,
-            request.max_tokens,
-            response,
-            ttl,
-        )
-        .await;
-    }
-
-    /// Like [`set`] but takes an explicit `messages` slice. Skips the
-    /// cacheability check; caller filters cacheable requests.
-    pub async fn set_for(
-        &self,
-        model: &str,
-        messages: &[ChatMessage],
-        max_tokens: Option<u32>,
-        response: &ChatCompletionResponse,
-        ttl: Option<u64>,
-    ) {
-        let key = Self::cache_key_for(model, messages, max_tokens);
+    /// Store an answer under the request's fingerprint.
+    pub async fn set(&self, fingerprint: &[u8], cached: &Cached, ttl: Option<u64>) {
+        let key = Self::cache_key_for(fingerprint);
         let ttl_secs = match ttl {
             Some(v) => v,
             None => self.default_ttl().await,
         };
 
-        let json = match serde_json::to_string(response) {
+        let Ok(body) = serde_json::from_slice::<Value>(&cached.body) else {
+            // An answer that is not JSON is not worth replaying.
+            return;
+        };
+        let json = match serde_json::to_string(&Stored {
+            body,
+            prompt_tokens: cached.prompt_tokens,
+            completion_tokens: cached.completion_tokens,
+        }) {
             Ok(j) => j,
             Err(e) => {
                 tracing::warn!("Failed to serialize response for cache: {e}");
@@ -226,77 +218,91 @@ return total
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::traits::ChatMessage;
+    use serde_json::json;
 
-    fn req(model: &str, prompt: &str) -> ChatCompletionRequest {
-        ChatCompletionRequest {
-            model: model.to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: serde_json::Value::String(prompt.to_string()),
-                ..Default::default()
-            }],
-            temperature: Some(0.0),
-            max_tokens: Some(1024),
-            stream: None,
-            extra: serde_json::json!({}),
-        }
+    fn req(model: &str, text: &str) -> Value {
+        json!({"model": model, "messages": [{"role": "user", "content": text}]})
+    }
+
+    fn key(r: &Value) -> String {
+        ResponseCache::cache_key_for(&ResponseCache::fingerprint(r).expect("cacheable"))
     }
 
     #[test]
-    fn cache_key_is_deterministic() {
+    fn the_same_request_always_produces_the_same_key() {
         let r = req("gpt-4o", "What is 2+2?");
-        let k1 = ResponseCache::cache_key(&r);
-        let k2 = ResponseCache::cache_key(&r);
-        assert_eq!(k1, k2);
+        assert_eq!(key(&r), key(&r));
     }
 
     #[test]
-    fn same_prompt_same_key_regardless_of_user() {
-        // Semantic cache: identical requests share the same entry
-        let r = req("gpt-4o", "What is 2+2?");
-        let k = ResponseCache::cache_key(&r);
-        // Same request always produces the same key
-        assert_eq!(k, ResponseCache::cache_key(&r));
+    fn key_order_in_the_body_does_not_matter() {
+        let a: Value = serde_json::from_str(r#"{"model":"m","messages":[],"top_p":1}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"top_p":1,"messages":[],"model":"m"}"#).unwrap();
+        assert_eq!(key(&a), key(&b));
     }
 
     #[test]
     fn different_models_produce_different_keys() {
-        let k1 = ResponseCache::cache_key(&req("gpt-4o", "ping"));
-        let k2 = ResponseCache::cache_key(&req("gpt-5", "ping"));
-        assert_ne!(k1, k2);
+        assert_ne!(
+            key(&req("gpt-4o", "ping")),
+            key(&req("gpt-4o-mini", "ping"))
+        );
     }
 
     #[test]
-    fn different_messages_produce_different_keys() {
-        let k1 = ResponseCache::cache_key(&req("gpt-4o", "hello"));
-        let k2 = ResponseCache::cache_key(&req("gpt-4o", "world"));
-        assert_ne!(k1, k2);
+    fn different_prompts_produce_different_keys() {
+        assert_ne!(key(&req("gpt-4o", "a")), key(&req("gpt-4o", "b")));
     }
 
     #[test]
-    fn cache_key_has_expected_prefix() {
-        let key = ResponseCache::cache_key(&req("gpt-4o", "ping"));
-        assert!(key.starts_with("llm_cache:"), "got {key}");
+    fn different_tools_produce_different_keys() {
+        // The reason this was rewritten. The old key covered model +
+        // messages + max_tokens, so "same question, different tools"
+        // shared a slot and the second caller got the first one's tool
+        // call. Hidden only while tools never reached an upstream.
+        let mut a = req("gpt-4o", "do it");
+        a["tools"] = json!([{"type":"function","function":{"name":"submit","parameters":{}}}]);
+        let mut b = req("gpt-4o", "do it");
+        b["tools"] = json!([{"type":"function","function":{"name":"cancel","parameters":{}}}]);
+        assert_ne!(key(&a), key(&b));
     }
 
     #[test]
-    fn streaming_requests_are_cacheable() {
-        let mut r = req("gpt-4o", "ping");
-        r.stream = Some(true);
-        assert!(ResponseCache::is_cacheable(&r));
+    fn any_field_the_caller_sent_is_in_the_key() {
+        let base = req("gpt-4o", "x");
+        for (field, value) in [
+            ("top_p", json!(0.5)),
+            ("stop", json!(["END"])),
+            ("seed", json!(7)),
+            ("response_format", json!({"type": "json_object"})),
+        ] {
+            let mut v = base.clone();
+            v[field] = value;
+            assert_ne!(key(&base), key(&v), "{field} is not in the key");
+        }
     }
 
     #[test]
-    fn high_temperature_requests_are_not_cacheable() {
-        let mut r = req("gpt-4o", "ping");
-        r.temperature = Some(0.7);
-        assert!(!ResponseCache::is_cacheable(&r));
+    fn streaming_does_not_change_the_key() {
+        let mut a = req("gpt-4o", "x");
+        a["stream"] = json!(true);
+        a["stream_options"] = json!({"include_usage": true});
+        assert_eq!(key(&a), key(&req("gpt-4o", "x")));
     }
 
     #[test]
-    fn temperature_zero_is_cacheable() {
-        let r = req("gpt-4o", "ping");
-        assert!(ResponseCache::is_cacheable(&r));
+    fn a_nonzero_temperature_has_no_fingerprint_so_it_can_never_be_looked_up() {
+        // This gate used to live inside get/set and a refactor dropped it
+        // once. A nonzero temperature asks for a fresh draw.
+        let mut r = req("gpt-4o", "x");
+        r["temperature"] = json!(0.7);
+        assert!(ResponseCache::fingerprint(&r).is_none());
+        r["temperature"] = json!(0.0);
+        assert!(ResponseCache::fingerprint(&r).is_some());
+    }
+
+    #[test]
+    fn keys_carry_their_prefix() {
+        assert!(key(&req("gpt-4o", "x")).starts_with("llm_cache:"));
     }
 }

@@ -5,7 +5,6 @@ use uuid::Uuid;
 use think_watch_common::dto::{CreateProviderRequest, ProviderHeader};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
-use think_watch_common::validation::validate_url;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -15,14 +14,14 @@ use crate::middleware::auth_guard::AuthUser;
 //
 // Every header `value` and the `aws_secret_access_key` field are wrapped as
 // `{"$enc": "<hex-envelope>"}` before INSERT/UPDATE. The hex payload is the
-// AES-256-GCM versioned envelope produced by `think_watch_common::crypto`
+// AES-256-GCM versioned envelope produced by `tw_crypto::crypto`
 // (same envelope MCP OAuth client_secrets use). Hex (not base64) keeps us
 // dependency-aligned with the OIDC / TOTP storage path which already encodes
 // the envelope as hex.
 //
 // ---------------------------------------------------------------------------
 
-use think_watch_common::json_secret::JsonSecret;
+use tw_crypto::json_secret::JsonSecret;
 
 /// Encrypt `plaintext` and return a value suitable for storing inside
 /// `providers.config_json`. Thin wrapper over [`JsonSecret::encrypt`]
@@ -259,7 +258,7 @@ pub async fn create_provider(
     }
 
     // SSRF prevention: validate base_url
-    validate_url(&req.base_url)?;
+    (state.url_validator)(&req.base_url)?;
 
     // Store unified headers in config_json, encrypting every header
     // value at rest. AWS bedrock secrets (when nested in `config`) get
@@ -342,7 +341,7 @@ pub async fn update_provider(
     let base_url = req.base_url.as_deref().unwrap_or(&existing.base_url);
 
     if req.base_url.is_some() {
-        validate_url(base_url)?;
+        (state.url_validator)(base_url)?;
     }
 
     // Update headers in config_json if provided. Encrypt every header
@@ -603,7 +602,7 @@ pub(crate) async fn run_provider_test(
     // like the gateway does, so it has to honour the same swappable
     // policy — otherwise the probe paths built on it can't be
     // integration-tested against a loopback mock at all.
-    validate: &crate::app::UrlValidator,
+    validate: &think_watch_common::validation::UrlValidator,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     if req.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));

@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-tw-crypto = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "main" }
-tw-resil = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "main" }
+tw-breaker = { workspace = true }
+tw-guard = { workspace = true }
+tw-crypto = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 fred = { workspace = true }

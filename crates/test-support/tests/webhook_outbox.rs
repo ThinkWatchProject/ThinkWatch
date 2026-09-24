@@ -33,7 +33,7 @@ async fn install_forwarder(app: &TestApp, url: &str) -> Uuid {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn delivery_failure_enqueues_outbox_row_then_drain_redelivers() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
 
     // Receiver that 500s on the FIRST request, 200s afterwards.
     // wiremock's mock priority makes the more-specific (count-bounded)
@@ -71,19 +71,10 @@ async fn delivery_failure_enqueues_outbox_row_then_drain_redelivers() {
     }
 
     // The outbox scheduler sets `next_attempt_at` to ~30s from now
-    // on the first failure. Tests can't wait that long, so we
-    // backdate it manually before driving drain_once.
-    sqlx::query(
-        "UPDATE webhook_outbox SET next_attempt_at = now() - interval '1 second' \
-         WHERE forwarder_id = $1",
-    )
-    .bind(forwarder_id)
-    .execute(&app.db)
-    .await
-    .unwrap();
-
-    // First drain — receiver returns 200 this time, row should be gone.
-    app.state.audit.drain_webhook_outbox_once().await.unwrap();
+    // on the first failure. Tests can't wait that long; `drain_outbox`
+    // makes the row due and drives one pass. The receiver returns 200
+    // this time, so the row should be gone.
+    app.drain_outbox(forwarder_id).await;
 
     let remaining: i64 =
         sqlx::query_scalar("SELECT count(*) FROM webhook_outbox WHERE forwarder_id = $1")
@@ -103,7 +94,7 @@ async fn delivery_failure_enqueues_outbox_row_then_drain_redelivers() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn drain_bumps_attempts_and_doubles_backoff_on_repeated_failures() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500))
@@ -127,21 +118,11 @@ async fn drain_bumps_attempts_and_doubles_backoff_on_repeated_failures() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    // Drive 3 drain passes, backdating before each so the row is
-    // due. After each pass `attempts` should grow and the next
-    // schedule gap should roughly double.
+    // Drive 3 drain passes. After each pass `attempts` should grow
+    // and the next schedule gap should roughly double.
     let mut prior_gap_secs: Option<i64> = None;
     for pass in 1..=3 {
-        sqlx::query(
-            "UPDATE webhook_outbox SET next_attempt_at = now() - interval '1 second' \
-             WHERE forwarder_id = $1",
-        )
-        .bind(forwarder_id)
-        .execute(&app.db)
-        .await
-        .unwrap();
-
-        app.state.audit.drain_webhook_outbox_once().await.unwrap();
+        app.drain_outbox(forwarder_id).await;
 
         let row: (i32, chrono::DateTime<Utc>) = sqlx::query_as(
             "SELECT attempts, next_attempt_at FROM webhook_outbox WHERE forwarder_id = $1",
@@ -173,7 +154,7 @@ async fn drain_drops_row_after_max_attempts() {
     // After 24 failed attempts the drain should give up and the row
     // should disappear from the outbox so the table doesn't grow
     // forever on a chronically broken receiver.
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500))
@@ -181,8 +162,9 @@ async fn drain_drops_row_after_max_attempts() {
         .await;
     let forwarder_id = install_forwarder(&app, &receiver.uri()).await;
 
-    // Plant a row directly with attempts = 23, due now — the next
-    // drain attempt will be #24, which should retire it.
+    // Plant a row directly with attempts = 23 — the next drain
+    // attempt will be #24, which should retire it. Not due yet:
+    // `drain_outbox` makes it due.
     let payload = json!({
         "id": Uuid::new_v4().to_string(),
         "log_type": "audit",
@@ -196,12 +178,12 @@ async fn drain_drops_row_after_max_attempts() {
     )
     .bind(forwarder_id)
     .bind(&payload)
-    .bind(Utc::now() - Duration::seconds(1))
+    .bind(Utc::now() + Duration::hours(1))
     .execute(&app.db)
     .await
     .unwrap();
 
-    app.state.audit.drain_webhook_outbox_once().await.unwrap();
+    app.drain_outbox(forwarder_id).await;
 
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_outbox WHERE forwarder_id = $1")
         .bind(forwarder_id)

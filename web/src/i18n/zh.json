@@ -117,7 +117,7 @@
     "unknown": "状态未知"
   },
   "contentSecurity": {
-    "subtitle": "应用于 AI 网关请求的内容过滤规则和 PII 脱敏配置"
+    "subtitle": "应用于 AI 网关流量的内容过滤规则、PII 脱敏和工具调用审查"
   },
   "mcpStore": {
     "title": "MCP 商店",
@@ -1424,6 +1424,78 @@
       "sandboxNoMatches": "（未检测到 PII — 文本未变化）",
       "sandboxMatchCount": "脱敏 {{count}} 项",
       "redactedOutput": "脱敏后输出（AI 接收到的内容）"
+    },
+    "hiddenText": {
+      "title": "隐藏字符",
+      "intro": "Unicode 标签字符在屏幕上不显示，却会进入模型的输入，一整段指令可以藏在里面；双向覆盖符会让屏幕上的文字顺序和实际字符顺序不一致。这两种字符在提示词里都没有正当用途，而且常出现在调用方并没有写过的地方，例如工具抓取的网页或文件。检查范围是调用方的消息及其中的工具结果；表情、波斯文和俄文不会被误报。",
+      "action": "发现时",
+      "off": "关闭",
+      "behavior": "告警：放行请求，并在审计日志中写入 gateway.hidden_text_flagged；拦截：以 403 拒绝请求，并写入 gateway.hidden_text_blocked；记录：只写入应用日志。"
+    },
+    "toolInspection": {
+      "title": "工具调用审查",
+      "intro": "响应由上游写出，上游可以在其中加入模型并未发出的工具调用，例如下载并执行脚本的命令。响应中的每个工具调用都会按这些规则检查。观察档只在审计日志中记录命中，不改变响应；拦截档在处置为「切断」的规则命中时截断响应，客户端收不到完整的调用。修改立即生效，无需重启。",
+      "mode": "档位",
+      "modeOff": "关闭",
+      "modeObserve": "观察",
+      "modeEnforce": "拦截",
+      "builtin": "内置规则",
+      "custom": "自定义规则",
+      "rule": "规则",
+      "enabled": "启用",
+      "inEnforce": "拦截档下",
+      "actionCut": "切断",
+      "actionRecord": "仅记录",
+      "addRule": "添加规则",
+      "customEmpty": "暂无自定义规则。",
+      "name": "名称",
+      "namePlaceholder": "例如：删除集群资源",
+      "pattern": "正则（匹配工具调用的参数）",
+      "behavior": "流式响应在补全这次调用的那一帧处截断：此前的内容照常送达，不完整的调用无法执行。非流式响应直接以 403 拒绝。每次命中都会写入审计日志，事件为 gateway.tool_call_flagged 或 gateway.tool_call_blocked。",
+      "sandboxNoMatches": "没有规则命中。",
+      "sandboxMatchCount": "命中 {{count}} 条规则",
+      "rules": {
+        "curl-pipe-sh": {
+          "name": "下载即执行",
+          "why": "下载后直接执行，执行的内容由远端决定且无法预先查看"
+        },
+        "base64-decode-exec": {
+          "name": "解码后执行",
+          "why": "将要执行的内容隐藏在 base64 编码中"
+        },
+        "exfil-env": {
+          "name": "外发环境变量",
+          "why": "将环境变量（通常包含密钥）发送到外部"
+        },
+        "exfil-credentials": {
+          "name": "外发凭据文件",
+          "why": "要求模型将凭据文件的内容发送出去"
+        },
+        "exfil-credentials-reversed": {
+          "name": "外发凭据文件（动词在前）",
+          "why": "要求模型将凭据文件的内容发送出去"
+        },
+        "ssh-key-read": {
+          "name": "读取私钥或云凭据",
+          "why": "读取私钥或云服务凭据"
+        },
+        "write-startup-item": {
+          "name": "写入启动项",
+          "why": "写入开机或打开终端时自动执行的位置"
+        },
+        "crontab-install": {
+          "name": "安装定时任务",
+          "why": "安装定时任务，或删除全部现有定时任务"
+        },
+        "rm-rf-root": {
+          "name": "删除主目录或根目录",
+          "why": "删除整个主目录或根目录"
+        },
+        "chmod-777": {
+          "name": "开放全部写权限",
+          "why": "将文件权限设为所有人可写"
+        }
+      }
     },
     "defaultExpiry": "默认过期时间（天）",
     "inactivityTimeout": "不活跃超时（天）",

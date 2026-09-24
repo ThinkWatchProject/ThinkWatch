@@ -146,9 +146,8 @@ async fn oversize_body_offloads_to_blob_store_and_dereferences_via_endpoint() {
     // Force the request body to exceed the inline cap. The serialized
     // [{ "role":"user", "content":"..." }] envelope adds ~30 bytes, so
     // 200 + envelope > 100.
-    fixtures::set_setting(&app.db, "audit.body_max_bytes", Value::from(100_i64))
-        .await
-        .unwrap();
+    app.set_setting("audit.body_max_bytes", Value::from(100_i64))
+        .await;
     let (api_key, user_id) = seed_runtime(&app).await;
     let big_prompt = format!("{} {}", PROBE_PROMPT, "x".repeat(400));
 
@@ -290,11 +289,10 @@ async fn streaming_on_done_offloads_oversize_assembled_response() {
 
     // Tiny cap so even a small assembled response exceeds it. The
     // streaming mock returns a few SSE chunks that assemble into a
-    // ChatCompletionResponse of a few hundred bytes — comfortably
+    // chat completion of a few hundred bytes — comfortably
     // > 64.
-    fixtures::set_setting(&app.db, "audit.body_max_bytes", Value::from(64_i64))
-        .await
-        .unwrap();
+    app.set_setting("audit.body_max_bytes", Value::from(64_i64))
+        .await;
     let (api_key, user_id) = seed_streaming_runtime(&app).await;
     let big_prompt = format!("{} {}", PROBE_PROMPT, "y".repeat(400));
 
@@ -367,9 +365,8 @@ async fn cache_hit_body_capture_offloads_oversize_cached_response() {
     })
     .await
     .expect("spawn with custom blob_store");
-    fixtures::set_setting(&app.db, "audit.body_max_bytes", Value::from(100_i64))
-        .await
-        .unwrap();
+    app.set_setting("audit.body_max_bytes", Value::from(100_i64))
+        .await;
 
     let (api_key, user_id) = seed_runtime(&app).await;
     let big_prompt = format!("{} {}", PROBE_PROMPT, "z".repeat(400));

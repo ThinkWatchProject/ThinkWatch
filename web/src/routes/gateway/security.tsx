@@ -23,7 +23,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles, ShieldCheck, Eye } from 'lucide-react';
+import { Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles, ShieldCheck, Eye, Wrench } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Textarea } from '@/components/ui/textarea';
@@ -44,9 +44,17 @@ import {
   type PiiPattern,
   type PiiTestResponse,
   type SettingEntry,
+  type HiddenTextAction,
+  type ToolInspectionConfig,
+  type ToolRule,
+  type ToolTestMatch,
   getSettingValue,
   normalizeContentRule,
+  normalizeHiddenText,
+  normalizeToolInspection,
 } from '../admin/settings/types';
+import { HiddenTextCard } from './hidden-text-card';
+import { ToolInspectionCard } from './tool-inspection-card';
 
 type ContentFilterRuleWithId = ContentFilterRule & { _clientId: string };
 
@@ -67,6 +75,9 @@ export function GatewaySecurityPage() {
 
   const [contentFilters, setContentFilters] = useState<ContentFilterRuleWithId[]>([]);
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
+  const [toolConfig, setToolConfig] = useState<ToolInspectionConfig>(normalizeToolInspection(null));
+  const [toolRules, setToolRules] = useState<ToolRule[]>([]);
+  const [hiddenText, setHiddenText] = useState<HiddenTextAction>('warn');
 
   const cfPager = useClientPagination(contentFilters, 20);
   const piiPager = useClientPagination(piiPatterns, 20);
@@ -79,6 +90,8 @@ export function GatewaySecurityPage() {
   const [cfSandboxLoading, setCfSandboxLoading] = useState(false);
   const [piiSandboxResult, setPiiSandboxResult] = useState<PiiTestResponse | null>(null);
   const [piiSandboxLoading, setPiiSandboxLoading] = useState(false);
+  const [toolSandboxResult, setToolSandboxResult] = useState<ToolTestMatch[] | null>(null);
+  const [toolSandboxLoading, setToolSandboxLoading] = useState(false);
 
   // Content filter presets
   const [cfPresetsOpen, setCfPresetsOpen] = useState(false);
@@ -91,12 +104,17 @@ export function GatewaySecurityPage() {
         setContentFilters(Array.isArray(cf) ? cf.map((r: unknown) => withClientId(normalizeContentRule(r))) : []);
         const pp = getSettingValue(data, 'security', 'pii_redactor_patterns');
         setPiiPatterns(Array.isArray(pp) ? pp : []);
+        setToolConfig(normalizeToolInspection(getSettingValue(data, 'security', 'tool_inspection')));
+        setHiddenText(normalizeHiddenText(getSettingValue(data, 'security', 'hidden_text')));
       })
       .catch((err) => {
         // Previously silent — left the form blank with no feedback.
         toast.error(err instanceof Error ? err.message : t('common.error'));
       })
       .finally(() => setLoading(false));
+    api<ToolRule[]>('/api/admin/settings/tool-inspection/rules')
+      .then(setToolRules)
+      .catch((err) => toast.error(err instanceof Error ? err.message : t('common.error')));
   }, [t]);
 
   const handleSave = async () => {
@@ -116,6 +134,8 @@ export function GatewaySecurityPage() {
         settings: {
           'security.content_filter_patterns': dedupCf.map(stripClientId),
           'security.pii_redactor_patterns': dedupPii,
+          'security.tool_inspection': toolConfig,
+          'security.hidden_text': hiddenText,
         },
       });
       setStatusMsg({ type: 'success', text: t('settings.saved') });
@@ -201,16 +221,19 @@ export function GatewaySecurityPage() {
     setSandboxOpen(true);
     setCfSandboxResult(null);
     setPiiSandboxResult(null);
+    setToolSandboxResult(null);
   };
 
-  const sandboxRunning = cfSandboxLoading || piiSandboxLoading;
+  const sandboxRunning = cfSandboxLoading || piiSandboxLoading || toolSandboxLoading;
 
   const runSandbox = async () => {
     if (!sandboxText.trim()) return;
     setCfSandboxLoading(true);
     setPiiSandboxLoading(true);
+    setToolSandboxLoading(true);
     setCfSandboxResult(null);
     setPiiSandboxResult(null);
+    setToolSandboxResult(null);
 
     const cfPromise = apiPost<{ matches: ContentFilterTestMatch[] }>(
       '/api/admin/settings/content-filter/test',
@@ -226,7 +249,16 @@ export function GatewaySecurityPage() {
       .catch(() => setPiiSandboxResult({ redacted_text: '', matches: [] }))
       .finally(() => setPiiSandboxLoading(false));
 
-    await Promise.all([cfPromise, piiPromise]);
+    // The sample is read as a tool call's arguments, against the rules as
+    // edited, not as saved.
+    const toolPromise = apiPost<{ matches: ToolTestMatch[] }>(
+      '/api/admin/settings/tool-inspection/test',
+      { text: sandboxText, config: toolConfig },
+    ).then(res => setToolSandboxResult(res.matches))
+      .catch(() => setToolSandboxResult([]))
+      .finally(() => setToolSandboxLoading(false));
+
+    await Promise.all([cfPromise, piiPromise, toolPromise]);
   };
 
   // ---------------------------------------------------------------------------
@@ -241,7 +273,8 @@ export function GatewaySecurityPage() {
     );
   }
 
-  const hasResults = cfSandboxResult !== null || piiSandboxResult !== null;
+  const hasResults =
+    cfSandboxResult !== null || piiSandboxResult !== null || toolSandboxResult !== null;
 
   return (
     <div className="space-y-6">
@@ -543,6 +576,19 @@ export function GatewaySecurityPage() {
         </CardContent>
       </Card>
 
+      <HiddenTextCard
+        action={hiddenText}
+        onChange={setHiddenText}
+        canWrite={hasPermission('content_filter:write')}
+      />
+
+      <ToolInspectionCard
+        config={toolConfig}
+        rules={toolRules}
+        onChange={setToolConfig}
+        canWrite={hasPermission('content_filter:write')}
+      />
+
       {/* Unified test sandbox dialog */}
       <Dialog open={sandboxOpen} onOpenChange={setSandboxOpen}>
         <DialogContent className="max-w-2xl">
@@ -577,6 +623,15 @@ export function GatewaySecurityPage() {
                     {piiSandboxResult && piiSandboxResult.matches.length > 0 && (
                       <Badge variant="secondary" className="text-[10px] ml-1 px-1.5 py-0">
                         {piiSandboxResult.matches.length}
+                      </Badge>
+                    )}
+                  </TabsTrigger>
+                  <TabsTrigger value="tools" className="flex-1 gap-1.5">
+                    <Wrench className="h-3.5 w-3.5" />
+                    {t('settings.toolInspection.title')}
+                    {toolSandboxResult && toolSandboxResult.length > 0 && (
+                      <Badge variant="destructive" className="text-[10px] ml-1 px-1.5 py-0">
+                        {toolSandboxResult.length}
                       </Badge>
                     )}
                   </TabsTrigger>
@@ -647,6 +702,45 @@ export function GatewaySecurityPage() {
                               </div>
                             ))}
                           </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </TabsContent>
+                {/* Tool-call inspection results */}
+                <TabsContent value="tools">
+                  {toolSandboxLoading ? (
+                    <p className="text-xs text-muted-foreground text-center py-3">{t('common.loading')}</p>
+                  ) : toolSandboxResult !== null && (
+                    <div className="border rounded-md p-3 max-h-64 overflow-y-auto">
+                      {toolSandboxResult.length === 0 ? (
+                        <p className="text-sm text-muted-foreground text-center py-2">
+                          {t('settings.toolInspection.sandboxNoMatches')}
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          <p className="text-xs font-medium text-muted-foreground">
+                            {t('settings.toolInspection.sandboxMatchCount', { count: toolSandboxResult.length })}
+                          </p>
+                          {toolSandboxResult.map((m) => (
+                            <div key={m.rule} className="text-xs border-l-2 pl-3 py-1" style={{
+                              borderColor: m.cut ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground))',
+                            }}>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold">
+                                  {m.custom
+                                    ? m.name
+                                    : t(`settings.toolInspection.rules.${m.rule}.name`, { defaultValue: m.name })}
+                                </span>
+                                <Badge variant={m.cut ? 'destructive' : 'secondary'} className="text-[10px]">
+                                  {m.cut
+                                    ? t('settings.toolInspection.actionCut')
+                                    : t('settings.toolInspection.actionRecord')}
+                                </Badge>
+                              </div>
+                              <p className="font-mono text-muted-foreground mt-1 break-all">{m.excerpt}</p>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>

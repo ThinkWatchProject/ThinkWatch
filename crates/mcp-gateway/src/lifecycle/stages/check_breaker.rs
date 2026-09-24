@@ -42,7 +42,7 @@ pub async fn check_breaker(
     server_name: &str,
     audit: &AuditLogger,
 ) -> Result<Authorized<McpSurface>, JsonRpcResponse> {
-    if breakers.check(server_id, server_name).await.is_err() {
+    if breakers.check(server_id, server_name).is_err() {
         metrics::counter!("lifecycle_breaker_short_circuit_total").increment(1);
         tracing::warn!(
             trace_id = %state.trace_id,

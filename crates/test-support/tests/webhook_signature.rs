@@ -1,16 +1,18 @@
 //! Webhook payload signing — `x-signature: sha256=<hex>`.
 //!
-//! `crates/common/src/audit.rs::send_webhook` HMAC-SHA256s the JSON
-//! body with the forwarder's `signing_secret` and stamps the result
-//! into an `x-signature` header. Receivers verify by recomputing the
-//! same HMAC over the raw body — a mismatch means tampering or a
-//! different sender.
+//! `crates/common/src/audit/forwarders.rs::send_webhook` HMAC-SHA256s
+//! `<timestamp>.<body>` with the forwarder's `signing_secret`, sends the
+//! result as `x-signature` and the timestamp as `x-signature-timestamp`.
+//! Receivers recompute it over the header's timestamp and the raw body,
+//! and reject a stale timestamp — without it in the signed input, a
+//! captured delivery could be replayed forever.
 //!
 //! The contract pinned here:
 //!
 //!   - With `signing_secret` set, every delivery carries
-//!     `x-signature: sha256=<hex>` and the hex matches HMAC-SHA256
-//!     over the *exact* body bytes the receiver got.
+//!     `x-signature: sha256=<hex>` and `x-signature-timestamp`, and the
+//!     hex matches HMAC-SHA256 over that timestamp, a `.`, and the
+//!     *exact* body bytes the receiver got.
 //!   - With `signing_secret` empty / unset, no `x-signature` header
 //!     is emitted (back-compat for receivers wired up before signing
 //!     was introduced).
@@ -31,9 +33,25 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn expected_sig(secret: &[u8], body: &[u8]) -> String {
+/// The signature a receiver expects for this delivery: over the
+/// timestamp it was sent with, a `.`, and the body. Also checks the
+/// timestamp is present and recent, as a receiver would.
+fn expected_sig(secret: &[u8], req: &wiremock::Request) -> String {
+    let ts = req
+        .headers
+        .get("x-signature-timestamp")
+        .expect("x-signature-timestamp must accompany x-signature")
+        .to_str()
+        .unwrap();
+    let sent: i64 = ts.parse().expect("the timestamp is Unix seconds");
+    assert!(
+        (chrono::Utc::now().timestamp() - sent).abs() < 300,
+        "timestamp {sent} is not recent"
+    );
     let mut mac = HmacSha256::new_from_slice(secret).unwrap();
-    mac.update(body);
+    mac.update(ts.as_bytes());
+    mac.update(b".");
+    mac.update(&req.body);
     hex::encode(mac.finalize().into_bytes())
 }
 
@@ -68,7 +86,7 @@ async fn wait_for_request(receiver: &MockServer) -> Vec<wiremock::Request> {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn signature_header_round_trips_hmac_sha256_over_body() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200))
@@ -101,7 +119,7 @@ async fn signature_header_round_trips_hmac_sha256_over_body() {
         .strip_prefix("sha256=")
         .unwrap_or_else(|| panic!("x-signature must be prefixed with 'sha256=', got {header}"));
 
-    let want = expected_sig(secret.as_bytes(), &req.body);
+    let want = expected_sig(secret.as_bytes(), req);
     assert_eq!(
         stripped, want,
         "HMAC-SHA256 mismatch: header={stripped} expected={want}"
@@ -117,7 +135,7 @@ async fn signature_header_round_trips_hmac_sha256_over_body() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn no_signature_header_when_signing_secret_unset() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200))
@@ -144,7 +162,7 @@ async fn empty_signing_secret_treated_as_unset() {
     // should not accidentally start sending an HMAC computed over an
     // empty key (which would be a constant per-body and worse than
     // no signature at all).
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200))
@@ -170,7 +188,7 @@ async fn signature_coexists_with_custom_headers() {
     // Adding a signing secret must not silently drop user-defined
     // `custom_headers` (e.g. `Authorization: Bearer …` for receivers
     // that need both auth + signature verification).
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200))
@@ -223,7 +241,7 @@ async fn outbox_redelivery_resigns_payload() {
     // re-runs `send_webhook`, which must re-sign the body. Both
     // attempts should carry `x-signature` headers that verify against
     // the body bytes the receiver actually saw on that attempt.
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let receiver = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500))
@@ -259,15 +277,7 @@ async fn outbox_redelivery_resigns_payload() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    sqlx::query(
-        "UPDATE webhook_outbox SET next_attempt_at = now() - interval '1 second' \
-         WHERE forwarder_id = $1",
-    )
-    .bind(forwarder_id)
-    .execute(&app.db)
-    .await
-    .unwrap();
-    app.state.audit.drain_webhook_outbox_once().await.unwrap();
+    app.drain_outbox(forwarder_id).await;
 
     let received = receiver.received_requests().await.unwrap_or_default();
     assert!(
@@ -284,7 +294,7 @@ async fn outbox_redelivery_resigns_payload() {
             .unwrap()
             .strip_prefix("sha256=")
             .unwrap();
-        let want = expected_sig(secret.as_bytes(), &req.body);
+        let want = expected_sig(secret.as_bytes(), req);
         assert_eq!(
             sig, want,
             "attempt #{i}: signature must verify against THIS attempt's body bytes"

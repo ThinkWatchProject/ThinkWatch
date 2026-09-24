@@ -30,24 +30,8 @@ use think_watch_mcp_gateway::proxy::McpProxy;
 use think_watch_mcp_gateway::session::SessionManager;
 use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
 
-use crate::gateway_adapters::{ProviderMaterials, build_adapter};
+use crate::gateway_adapters::{ProviderMaterials, build_upstream};
 use crate::handlers;
-
-/// SSRF guard for URLs the server is about to fetch. Boxed so tests
-/// can swap in a permissive variant (allowing 127.0.0.1 wiremocks)
-/// without weakening `think_watch_common::validation::validate_url`,
-/// which production code uses by default. The trait-object form costs
-/// one atomic load per call — negligible relative to the outbound
-/// HTTP requests that follow it.
-pub type UrlValidator =
-    Arc<dyn Fn(&str) -> Result<(), think_watch_common::errors::AppError> + Send + Sync>;
-
-/// Construct the production validator, which delegates to
-/// `think_watch_common::validation::validate_url`. Use this in
-/// `init_state`; tests can replace it via `SpawnOptions.url_validator`.
-pub fn production_url_validator() -> UrlValidator {
-    Arc::new(|u: &str| think_watch_common::validation::validate_url(u))
-}
 
 /// Shared state accessible by both gateway and console servers.
 #[derive(Clone)]
@@ -69,6 +53,9 @@ pub struct AppState {
     pub content_filter: Arc<arc_swap::ArcSwap<ContentFilter>>,
     /// Hot-swappable PII redactor.
     pub pii_redactor: Arc<arc_swap::ArcSwap<PiiRedactor>>,
+    /// Hot-swappable tool-call inspection.
+    pub tool_inspection:
+        Arc<arc_swap::ArcSwap<think_watch_gateway::tool_inspection::ToolInspection>>,
     /// In-memory registry of upstream MCP servers. Shared between the MCP
     /// gateway runtime and the console CRUD handlers so that adding/removing
     /// a server in the admin UI is reflected immediately, without restart.
@@ -101,7 +88,7 @@ pub struct AppState {
     /// `production_url_validator()` here; tests can pass a permissive
     /// variant via `SpawnOptions::url_validator` so wiremock instances
     /// on 127.0.0.1 are reachable.
-    pub url_validator: UrlValidator,
+    pub url_validator: think_watch_common::validation::UrlValidator,
 
     /// CostTracker handle shared with the gateway. The platform-pricing
     /// PATCH handler calls `invalidate_baseline()` on this so the
@@ -139,12 +126,26 @@ pub async fn load_content_filter(dc: &DynamicConfig) -> ContentFilter {
 
 /// Build a `PiiRedactor` from the current `system_settings` value.
 pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
-    let configs: Vec<think_watch_gateway::pii_redactor::PiiPatternConfig> = dc
+    let configs: Vec<think_watch_common::pii::PiiPatternConfig> = dc
         .get("security.pii_redactor_patterns")
         .await
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     PiiRedactor::from_config(&configs)
+}
+
+/// Build the tool-call inspection from `security.tool_inspection`. A
+/// missing or unreadable value means the default: observe, every built-in
+/// rule on.
+pub async fn load_tool_inspection(
+    dc: &DynamicConfig,
+) -> think_watch_gateway::tool_inspection::ToolInspection {
+    let cfg: think_watch_gateway::tool_inspection::ToolInspectionConfig = dc
+        .get("security.tool_inspection")
+        .await
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    think_watch_gateway::tool_inspection::ToolInspection::from_config(&cfg)
 }
 
 /// Build the cross-crate at-rest `BlobRedactor` from the SAME
@@ -266,6 +267,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             state.dynamic_config.clone(),
         )),
         pii_redactor: state.pii_redactor.clone(),
+        tool_inspection: state.tool_inspection.clone(),
         // Share AppState's cost tracker so the platform-pricing PATCH
         // handler's `invalidate_baseline()` call is observed by THIS
         // process's hot path (gateway request handling) — without the
@@ -325,10 +327,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     // Pre-register a CB for every loaded server so the dashboard upstream
     // health panel shows them as `Closed` immediately on first paint.
     for server in registry.list().await {
-        state
-            .mcp_circuit_breakers
-            .register(server.id, &server.name)
-            .await;
+        state.mcp_circuit_breakers.register(server.id, &server.name);
     }
 
     // Background health check loop — keeps the in-memory registry status
@@ -987,6 +986,15 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/settings/pii-redactor/test",
             post(handlers::admin::test_pii_redactor),
         )
+        // Tool-call inspection
+        .route(
+            "/api/admin/settings/tool-inspection/rules",
+            get(handlers::admin::list_tool_rules),
+        )
+        .route(
+            "/api/admin/settings/tool-inspection/test",
+            post(handlers::admin::test_tool_inspection),
+        )
         // Log forwarders CRUD
         .route(
             "/api/admin/log-forwarders",
@@ -1350,13 +1358,11 @@ pub(crate) async fn load_providers_into_router(
     let mut providers_with_routes: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
 
-    // One adapter per (provider, protocol) — a provider serving 55
-    // models over two dialects builds two adapters, not 55.
-    use think_watch_gateway::providers::protocol::UpstreamProtocol;
-    let mut adapter_cache: HashMap<
-        (uuid::Uuid, UpstreamProtocol),
-        Arc<dyn think_watch_gateway::providers::DynAiProvider>,
-    > = HashMap::new();
+    // One upstream per provider: the host and credentials are the same
+    // whatever format a route speaks to it in.
+    use think_watch_gateway::protocol::UpstreamProtocol;
+    let mut upstreams: HashMap<uuid::Uuid, Arc<think_watch_gateway::proxy::transport::Upstream>> =
+        HashMap::new();
 
     for row in &route_rows {
         if let Some(materials) = provider_map.get(&row.provider_id) {
@@ -1371,30 +1377,22 @@ pub(crate) async fn load_providers_into_router(
                 .unwrap_or_else(|| {
                     UpstreamProtocol::default_for_provider_type(&materials.provider_type)
                 });
-            let mut adapter_for = |p: UpstreamProtocol| {
-                adapter_cache
-                    .entry((row.provider_id, p))
-                    .or_insert_with(|| build_adapter(p, materials))
-                    .clone()
-            };
-            let dyn_provider = adapter_for(protocol);
-            // Pre-build the dialects this route could fall back to, so
-            // the gateway can recover from an upstream rejecting the
-            // configured one without reaching back into this crate for
-            // credential decryption. Cheap: adapters are shared per
-            // (provider, protocol), so this is a map lookup after the
-            // first route.
-            let alternates: Vec<(UpstreamProtocol, Arc<_>)> =
+            let upstream = upstreams
+                .entry(row.provider_id)
+                .or_insert_with(|| build_upstream(materials))
+                .clone();
+            // The dialects this route can fall back to when the upstream
+            // rejects the configured one.
+            let alternates: Vec<UpstreamProtocol> =
                 UpstreamProtocol::candidates_for(&materials.provider_type, &row.upstream_model)
                     .into_iter()
                     .filter(|p| *p != protocol)
-                    .map(|p| (p, adapter_for(p)))
                     .collect();
             let provider_name = &materials.name;
             router.register_route(
                 &row.model_id,
                 RouteEntry {
-                    provider: Arc::clone(&dyn_provider),
+                    upstream,
                     provider_id: row.provider_id,
                     route_id: row.id,
                     provider_name: provider_name.clone(),
@@ -1424,16 +1422,16 @@ pub(crate) async fn load_providers_into_router(
             let provider_type = &materials.provider_type;
             let provider_name = &materials.name;
             let protocol = UpstreamProtocol::default_for_provider_type(provider_type);
-            let dyn_provider = adapter_cache
-                .entry((*provider_id, protocol))
-                .or_insert_with(|| build_adapter(protocol, materials))
+            let upstream = upstreams
+                .entry(*provider_id)
+                .or_insert_with(|| build_upstream(materials))
                 .clone();
             let prefixes = default_model_prefixes(provider_type);
             for prefix in &prefixes {
                 router.register_route(
                     prefix,
                     RouteEntry {
-                        provider: Arc::clone(&dyn_provider),
+                        upstream: Arc::clone(&upstream),
                         provider_id: *provider_id,
                         // Synthetic route — derive a stable id from
                         // the provider so health entries cluster

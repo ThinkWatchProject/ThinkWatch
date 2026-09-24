@@ -101,6 +101,8 @@ INSERT INTO system_settings (key, value, category, description) VALUES
     {"name": "phone_us",    "regex": "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b",                          "placeholder_prefix": "PHONE"},
     {"name": "ipv4",        "regex": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",             "placeholder_prefix": "IP"}
 ]', 'security', 'PII redactor patterns (JSON array)'),
+('security.hidden_text', '"warn"', 'security', 'What a request carrying hidden characters (Unicode tag characters, bidi overrides) gets: off, log, warn or block'),
+('security.tool_inspection', '{"mode": "observe", "disabled": [], "actions": {}, "custom": []}', 'security', 'Tool-call inspection: mode, built-in rules switched off or re-graded, custom rules (JSON object)'),
 ('security.budget_alert_webhook_url', '""', 'security', 'Webhook URL for budget cap alerts'),
 ('security.trusted_proxies', '[]', 'security', 'JSON array of trusted reverse proxy IPs')
 ON CONFLICT (key) DO NOTHING;

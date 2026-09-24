@@ -3539,6 +3539,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap 2.13.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "serdect"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4022,7 +4035,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "think-watch-auth"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4047,12 +4060,13 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
+ "tw-crypto",
  "uuid",
 ]
 
 [[package]]
 name = "think-watch-common"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4080,8 +4094,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tw-breaker",
  "tw-crypto",
- "tw-resil",
+ "tw-guard",
  "url",
  "utoipa",
  "uuid",
@@ -4089,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-gateway"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4120,10 +4135,12 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "tw-protocol",
- "tw-provider",
- "tw-resil",
+ "tw-breaker",
+ "tw-dialect",
+ "tw-guard",
  "tw-types",
+ "tw-upstream",
+ "tw-wire",
  "utoipa",
  "uuid",
  "xxhash-rust",
@@ -4131,7 +4148,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-mcp-gateway"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4153,13 +4170,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tw-breaker",
+ "tw-crypto",
  "uuid",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "think-watch-server"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4197,6 +4216,11 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tw-breaker",
+ "tw-crypto",
+ "tw-dialect",
+ "tw-guard",
+ "tw-types",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -4206,7 +4230,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-test-support"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4242,6 +4266,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tw-crypto",
  "url",
  "uuid",
  "wiremock",
@@ -4653,9 +4678,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tw-breaker"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "tw-crypto"
-version = "0.1.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#6d27617d95c8f3bdf97976b4db1546987f4dbea4"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4666,66 +4699,67 @@ dependencies = [
 ]
 
 [[package]]
-name = "tw-protocol"
-version = "0.1.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#6d27617d95c8f3bdf97976b4db1546987f4dbea4"
+name = "tw-dialect"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
 dependencies = [
- "bytes",
- "futures",
- "metrics",
- "reqwest 0.13.2",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "tw-provider"
-version = "0.1.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#6d27617d95c8f3bdf97976b4db1546987f4dbea4"
-dependencies = [
- "async-stream",
- "aws-credential-types",
- "aws-sigv4",
- "aws-smithy-eventstream",
- "bytes",
- "chrono",
- "futures",
- "hex",
- "hmac 0.13.0",
- "http 1.4.0",
- "reqwest 0.13.2",
  "serde",
  "serde_json",
- "sha2 0.11.0",
- "tracing",
- "tw-protocol",
- "tw-types",
- "urlencoding",
- "uuid",
 ]
 
 [[package]]
-name = "tw-resil"
-version = "0.1.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#6d27617d95c8f3bdf97976b4db1546987f4dbea4"
+name = "tw-guard"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
 dependencies = [
- "futures",
- "metrics",
- "rand 0.10.0",
- "tokio",
- "tracing",
- "tw-provider",
- "tw-types",
+ "base64 0.22.1",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror 2.0.18",
+ "tw-dialect",
+ "tw-secret",
+]
+
+[[package]]
+name = "tw-secret"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "tw-types"
-version = "0.1.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#6d27617d95c8f3bdf97976b4db1546987f4dbea4"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tw-upstream"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+dependencies = [
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-eventstream",
+ "bytes",
+ "http 1.4.0",
+ "reqwest 0.13.2",
+ "serde_json",
+]
+
+[[package]]
+name = "tw-wire"
+version = "0.40.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -4782,6 +4816,12 @@ dependencies = [
  "crypto-common 0.1.7",
  "subtle",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

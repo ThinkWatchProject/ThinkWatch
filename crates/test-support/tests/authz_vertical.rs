@@ -109,7 +109,7 @@ fn passed_auth_gate(code: u16) -> bool {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn vertical_role_endpoint_matrix() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
 
     // Pre-seed targets that some endpoints need in their URL or
     // body. Using stable rows so the matrix can re-target them

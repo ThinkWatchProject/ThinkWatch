@@ -252,7 +252,7 @@ pub async fn sync_registry(
     // metadata endpoints + reject `http://` to avoid downgrade. The
     // `settings:write` permission is a broad-scope knob and not a
     // sufficient gate against an internal-fetch primitive.
-    think_watch_common::validation::validate_url(&url)?;
+    (state.url_validator)(&url)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))

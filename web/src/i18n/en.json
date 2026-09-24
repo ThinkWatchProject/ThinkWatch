@@ -117,7 +117,7 @@
     "unknown": "Status unknown"
   },
   "contentSecurity": {
-    "subtitle": "Content filter rules and PII redaction patterns applied to AI gateway requests"
+    "subtitle": "Content filter rules, PII redaction patterns and tool-call inspection applied to AI gateway traffic"
   },
   "mcpStore": {
     "title": "MCP Store",
@@ -1424,6 +1424,78 @@
       "sandboxNoMatches": "(no PII detected — text unchanged)",
       "sandboxMatchCount": "{{count}} item(s) redacted",
       "redactedOutput": "Redacted output (what the AI receives)"
+    },
+    "hiddenText": {
+      "title": "Hidden characters",
+      "intro": "Unicode tag characters render as nothing and still reach the model, so a whole instruction can ride along invisibly; bidirectional overrides make text read on screen in a different order than it really is. Neither has a use in a prompt, and both turn up where the caller did not write them — in a page or file a tool fetched. The caller's messages and the tool results inside them are checked; emoji, Persian and Russian text are not flagged.",
+      "action": "When found",
+      "off": "Off",
+      "behavior": "Warn lets the request through and writes gateway.hidden_text_flagged to the audit log; Block refuses it with 403 and writes gateway.hidden_text_blocked; Log only records it in the application log."
+    },
+    "toolInspection": {
+      "title": "Tool-call inspection",
+      "intro": "The upstream writes the response, so it can hand back a tool call the model never made, such as a command that downloads and runs a script. Every tool call in a response is checked against these rules. Observe records each hit in the audit log and changes nothing; Enforce also cuts the response when a rule set to Cut matches, so the client never receives a complete call. Changes apply immediately, no restart needed.",
+      "mode": "Mode",
+      "modeOff": "Off",
+      "modeObserve": "Observe",
+      "modeEnforce": "Enforce",
+      "builtin": "Built-in rules",
+      "custom": "Custom rules",
+      "rule": "Rule",
+      "enabled": "Enabled",
+      "inEnforce": "In Enforce mode",
+      "actionCut": "Cut",
+      "actionRecord": "Record only",
+      "addRule": "Add rule",
+      "customEmpty": "No custom rules.",
+      "name": "Name",
+      "namePlaceholder": "e.g. Delete cluster resources",
+      "pattern": "Pattern (regex, matched against the call's arguments)",
+      "behavior": "A streamed response is cut at the frame that would complete the matching call: what the model said before it still arrives, and an incomplete call cannot be run. A non-streamed response is refused with 403. Every hit is written to the audit log as gateway.tool_call_flagged or gateway.tool_call_blocked.",
+      "sandboxNoMatches": "No rules matched.",
+      "sandboxMatchCount": "{{count}} rule(s) matched",
+      "rules": {
+        "curl-pipe-sh": {
+          "name": "Download and run",
+          "why": "Downloads and runs it straight away; what runs is decided remotely and cannot be read first"
+        },
+        "base64-decode-exec": {
+          "name": "Decode and run",
+          "why": "Hides what will run inside base64"
+        },
+        "exfil-env": {
+          "name": "Send out environment variables",
+          "why": "Sends the environment, which usually holds keys, somewhere else"
+        },
+        "exfil-credentials": {
+          "name": "Send out a credential file",
+          "why": "Asks the model to send the contents of a credential file somewhere"
+        },
+        "exfil-credentials-reversed": {
+          "name": "Send out a credential file (verb first)",
+          "why": "Asks the model to send the contents of a credential file somewhere"
+        },
+        "ssh-key-read": {
+          "name": "Read a private key or cloud credential",
+          "why": "Reads a private key or a cloud credential"
+        },
+        "write-startup-item": {
+          "name": "Write a startup item",
+          "why": "Writes somewhere that runs at login or whenever a terminal opens"
+        },
+        "crontab-install": {
+          "name": "Install a scheduled job",
+          "why": "Installs a scheduled job, or deletes every existing one"
+        },
+        "rm-rf-root": {
+          "name": "Delete home or root",
+          "why": "Deletes the whole home directory or the root"
+        },
+        "chmod-777": {
+          "name": "World-writable permissions",
+          "why": "Makes a file writable by everyone"
+        }
+      }
     },
     "defaultExpiry": "Default Expiry (days)",
     "inactivityTimeout": "Inactivity Timeout (days)",

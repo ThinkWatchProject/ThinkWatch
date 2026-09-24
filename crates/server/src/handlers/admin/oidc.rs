@@ -218,7 +218,7 @@ pub async fn update_oidc_draft(
     if let Some(ref issuer) = req.issuer_url
         && !issuer.is_empty()
     {
-        think_watch_common::validation::validate_url(issuer)?;
+        (state.url_validator)(issuer)?;
     }
 
     let dc = &state.dynamic_config;
@@ -354,7 +354,7 @@ pub async fn discover_oidc_draft(
         .clone()
         .filter(|s| !s.is_empty())
         .ok_or(AppError::BadRequest("Draft is missing issuer_url".into()))?;
-    think_watch_common::validation::validate_url(&issuer)?;
+    (state.url_validator)(&issuer)?;
 
     // Discovery only needs the issuer; pass placeholders for the rest
     // so the validate() check passes. We discard the manager.

@@ -100,7 +100,7 @@ pub async fn create_forwarder(
         )));
     }
 
-    validate_forwarder_config(&req.forwarder_type, &req.config)?;
+    validate_forwarder_config(&req.forwarder_type, &req.config, &state.url_validator)?;
 
     let log_types = req.log_types.unwrap_or_else(|| vec!["audit".into()]);
     for lt in &log_types {
@@ -180,7 +180,7 @@ pub async fn update_forwarder(
         .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
     if let Some(ref config) = req.config {
-        validate_forwarder_config(&existing.forwarder_type, config)?;
+        validate_forwarder_config(&existing.forwarder_type, config, &state.url_validator)?;
     }
 
     let log_types = if let Some(ref lts) = req.log_types {
@@ -570,6 +570,7 @@ pub async fn test_forwarder(
 fn validate_forwarder_config(
     forwarder_type: &str,
     config: &serde_json::Value,
+    check: &think_watch_common::validation::UrlValidator,
 ) -> Result<(), AppError> {
     match forwarder_type {
         "udp_syslog" | "tcp_syslog" => {
@@ -591,7 +592,7 @@ fn validate_forwarder_config(
                     AppError::BadRequest("Kafka config requires 'broker_url' field".into())
                 })?;
             // SSRF: Kafka REST proxy URL must be a public HTTP(S) host.
-            think_watch_common::validation::validate_url(broker_url)?;
+            check(broker_url)?;
             let topic = config
                 .get("topic")
                 .and_then(|v| v.as_str())
@@ -605,7 +606,7 @@ fn validate_forwarder_config(
                 AppError::BadRequest("Webhook config requires 'url' field".into())
             })?;
             // SSRF: reject localhost / private IPs / cloud metadata endpoints.
-            think_watch_common::validation::validate_url(url)?;
+            check(url)?;
         }
         _ => {}
     }

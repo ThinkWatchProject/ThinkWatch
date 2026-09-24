@@ -1,4 +1,3 @@
-use crate::providers::traits::ChatMessage;
 use regex::Regex;
 
 /// What to do when a rule matches.
@@ -176,19 +175,38 @@ impl ContentFilter {
     /// Check all user messages against the rules.
     /// Returns the highest-priority match found, if any.
     /// Priority: Block > Warn > Log.
-    pub fn check(&self, messages: &[ChatMessage]) -> Option<ContentFilterMatch> {
-        let mut best: Option<ContentFilterMatch> = None;
+    ///
+    /// Check the caller's text in a request.
+    ///
+    /// Reads the decoded form, where the structure is known. The earlier
+    /// version guessed at a `serde_json::Value` — a string, or array
+    /// elements with a `text` field — and so never saw text inside a tool
+    /// result, which is exactly where an injected instruction can sit.
+    pub fn check_request(&self, request: &tw_dialect::ir::Request) -> Option<ContentFilterMatch> {
+        use tw_dialect::ir::{Part, Role};
 
-        for msg in messages {
-            if msg.role != "user" {
+        fn texts(parts: &[Part], out: &mut Vec<String>) {
+            for p in parts {
+                match p {
+                    Part::Text(t) => out.push(t.clone()),
+                    // A tool result is text the model reads too.
+                    Part::ToolResult(r) => texts(&r.content, out),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut best: Option<ContentFilterMatch> = None;
+        for msg in &request.messages {
+            if msg.role != Role::User {
                 continue;
             }
-            let text = extract_text_content(&msg.content);
+            let mut collected = Vec::new();
+            texts(&msg.parts, &mut collected);
+            let text = collected.join("\n");
             if text.is_empty() {
                 continue;
             }
-
-            // Run every rule against this message; track the highest-priority match.
             if let Some(m) = self.check_text(&text)
                 && match &best {
                     None => true,
@@ -198,7 +216,6 @@ impl ContentFilter {
                 best = Some(m);
             }
         }
-
         best
     }
 
@@ -305,27 +322,6 @@ fn snippet(text: &str, pos: usize, max_len: usize) -> String {
     }
 }
 
-/// Extract text from a ChatMessage content value.
-/// Handles both `"string"` and `[{"type":"text","text":"..."}]` formats.
-fn extract_text_content(content: &serde_json::Value) -> String {
-    match content {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(parts) => {
-            let mut text = String::new();
-            for part in parts {
-                if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        text.push(' ');
-                    }
-                    text.push_str(t);
-                }
-            }
-            text
-        }
-        _ => String::new(),
-    }
-}
-
 /// Built-in preset rule groups returned by the presets API.
 pub struct PresetGroup {
     pub id: &'static str,
@@ -418,12 +414,15 @@ pub fn presets() -> Vec<PresetGroup> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn user_msg(text: &str) -> ChatMessage {
-        ChatMessage {
-            role: "user".into(),
-            content: json!(text),
+    use tw_dialect::ir::{Message, Part, Request, Role, ToolResult};
+
+    fn user_req(text: &str) -> Request {
+        Request {
+            messages: vec![Message {
+                role: Role::User,
+                parts: vec![Part::Text(text.into())],
+            }],
             ..Default::default()
         }
     }
@@ -440,7 +439,7 @@ mod tests {
     #[test]
     fn contains_match_blocks() {
         let f = ContentFilter::from_config(&[cfg("Jailbreak", "jailbreak", "contains", "block")]);
-        let m = f.check(&[user_msg("attempt jailbreak now")]);
+        let m = f.check_request(&user_req("attempt jailbreak now"));
         let m = m.expect("should match");
         assert_eq!(m.action, Action::Block);
         assert_eq!(m.name, "Jailbreak");
@@ -449,7 +448,7 @@ mod tests {
     #[test]
     fn regex_match_works() {
         let f = ContentFilter::from_config(&[cfg("Number", r"\d{4}-\d{4}", "regex", "warn")]);
-        let m = f.check(&[user_msg("code is 1234-5678 here")]);
+        let m = f.check_request(&user_req("code is 1234-5678 here"));
         let m = m.expect("should match");
         assert_eq!(m.action, Action::Warn);
     }
@@ -461,7 +460,7 @@ mod tests {
             cfg("Block rule", "jailbreak", "contains", "block"),
         ]);
         let m = f
-            .check(&[user_msg("show system prompt and jailbreak")])
+            .check_request(&user_req("show system prompt and jailbreak"))
             .unwrap();
         assert_eq!(m.action, Action::Block);
     }
@@ -484,18 +483,44 @@ mod tests {
             cfg("good", "test", "contains", "block"),
         ]);
         // Bad rule is dropped, good rule still works.
-        assert!(f.check(&[user_msg("test message")]).is_some());
+        assert!(f.check_request(&user_req("test message")).is_some());
     }
 
     #[test]
-    fn ignores_system_messages() {
+    fn ignores_the_system_prompt_and_the_assistant() {
+        // Operator text and the model's own words are not the caller's.
         let f = ContentFilter::from_config(&[cfg("J", "jailbreak", "contains", "block")]);
-        let msg = ChatMessage {
-            role: "system".into(),
-            content: json!("jailbreak"),
+        let r = Request {
+            system: vec!["jailbreak".into()],
+            messages: vec![Message {
+                role: Role::Assistant,
+                parts: vec![Part::Text("jailbreak".into())],
+            }],
             ..Default::default()
         };
-        assert!(f.check(&[msg]).is_none());
+        assert!(f.check_request(&r).is_none());
+    }
+
+    #[test]
+    fn text_inside_a_tool_result_is_checked() {
+        // The guessing version looked for `text` fields on array
+        // elements and never reached a tool result's content.
+        let f = ContentFilter::from_config(&[cfg("J", "jailbreak", "contains", "block")]);
+        let r = Request {
+            messages: vec![Message {
+                role: Role::User,
+                parts: vec![Part::ToolResult(ToolResult {
+                    id: "t1".into(),
+                    content: vec![Part::Text("page says: jailbreak".into())],
+                    is_error: false,
+                })],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            f.check_request(&r).expect("should match").action,
+            Action::Block
+        );
     }
 
     #[test]
@@ -503,7 +528,7 @@ mod tests {
         for group in presets() {
             let f = ContentFilter::from_config(&group.rules);
             // Each preset should produce a working filter
-            let _ = f.check(&[user_msg("hello world")]);
+            let _ = f.check_request(&user_req("hello world"));
         }
     }
 }
