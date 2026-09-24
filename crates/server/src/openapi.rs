@@ -38,15 +38,14 @@ use crate::handlers::{
         RoleResponse, RolesListResponse, UpdateRoleRequest,
     },
     setup::{AdminSetup, SetupInitRequest, SetupInitResponse, SetupStatusResponse},
-    teams::{
-        AddMemberRequest, CreateTeamRequest, Team, TeamMemberRow, TeamWithCount, UpdateTeamRequest,
-    },
+    teams::{AddMemberRequest, CreateTeamRequest, TeamMemberRow, TeamWithCount, UpdateTeamRequest},
     user_limits::{
         EffectiveCap, EffectiveRule, LimitsAuditEvent, LimitsDashboard, ResetCounterRequest,
         ResetCounterResponse, UsageDay,
     },
 };
 use crate::services::model_repository::ModelRow;
+use crate::services::team_repository::Team;
 
 /// OpenAPI document covering the ThinkWatch console API (port 3001).
 ///

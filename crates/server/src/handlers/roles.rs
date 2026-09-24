@@ -9,6 +9,7 @@ use think_watch_common::errors::AppError;
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_role_perms};
+use crate::services::role_repository::{self as repo, RoleRow};
 
 /// Validate any Constraints blocks inside a policy_document's statements.
 fn validate_policy_constraints_in_doc(doc: &serde_json::Value) -> Result<(), AppError> {
@@ -244,10 +245,7 @@ fn system_role_default_policy(name: &str) -> Option<serde_json::Value> {
 /// are footguns that silently break authorization, so we want a loud
 /// fail-fast.
 pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    let rows: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT name, policy_document FROM rbac_roles")
-            .fetch_all(pool)
-            .await?;
+    let rows = repo::policy_documents(pool).await?;
     let all_perm_keys: Vec<&str> = PERMISSIONS.iter().map(|p| p.key).collect();
     let mut unknown: Vec<String> = Vec::new();
     for (role_name, doc) in &rows {
@@ -312,26 +310,6 @@ pub struct RolesListResponse {
     pub items: Vec<RoleResponse>,
 }
 
-/// One row from `rbac_roles` (with creator email LEFT JOINed in)
-/// mapped 1:1 by sqlx.
-type RoleRow = (
-    Uuid,
-    String,
-    Option<String>,
-    bool,
-    serde_json::Value,
-    Option<String>,
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-);
-
-const ROLE_SELECT: &str = "SELECT r.id, r.name, r.description, r.is_system, \
-                                  r.policy_document, \
-                                  u.email AS created_by_email, \
-                                  r.created_at, r.updated_at \
-                           FROM rbac_roles r \
-                           LEFT JOIN users u ON u.id = r.created_by";
-
 fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
     RoleResponse {
         id: row.0,
@@ -367,22 +345,11 @@ pub async fn list_roles(
         .await?;
     // System rows first, then alphabetical. Permissions and counts are
     // pulled in two more queries (no N+1) and merged in Rust.
-    let rows: Vec<RoleRow> =
-        sqlx::query_as(&format!("{ROLE_SELECT} ORDER BY is_system DESC, name ASC"))
-            .fetch_all(&state.db)
-            .await?;
+    let rows = repo::list(&state.db).await?;
 
     let role_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
 
-    let counts: Vec<(Uuid, i64)> = sqlx::query_as(
-        "SELECT role_id, COUNT(*)::bigint \
-           FROM rbac_role_assignments \
-          WHERE role_id = ANY($1) \
-          GROUP BY role_id",
-    )
-    .bind(&role_ids)
-    .fetch_all(&state.db)
-    .await?;
+    let counts = repo::assignment_counts(&state.db, &role_ids).await?;
     let mut count_map: std::collections::HashMap<Uuid, i64> = std::collections::HashMap::new();
     for (rid, c) in counts {
         count_map.insert(rid, c);
@@ -437,23 +404,13 @@ pub async fn create_role(
     rbac::validate_policy_document(&payload.policy_document).map_err(AppError::BadRequest)?;
     validate_policy_constraints_in_doc(&payload.policy_document)?;
 
-    let row: RoleRow = sqlx::query_as(
-        "WITH inserted AS ( \
-            INSERT INTO rbac_roles (name, description, is_system, policy_document, created_by) \
-            VALUES ($1, $2, FALSE, $3, $4) \
-            RETURNING * \
-         ) \
-         SELECT i.id, i.name, i.description, i.is_system, i.policy_document, \
-                u.email AS created_by_email, \
-                i.created_at, i.updated_at \
-         FROM inserted i \
-         LEFT JOIN users u ON u.id = i.created_by",
+    let row: RoleRow = repo::insert(
+        &state.db,
+        name,
+        payload.description.as_deref(),
+        &payload.policy_document,
+        auth_user.claims.sub,
     )
-    .bind(name)
-    .bind(&payload.description)
-    .bind(&payload.policy_document)
-    .bind(auth_user.claims.sub)
-    .fetch_one(&state.db)
     .await
     .map_err(|e| match &e {
         sqlx::Error::Database(db_err) if db_err.constraint() == Some("rbac_roles_name_key") => {
@@ -515,12 +472,9 @@ pub async fn update_role(
     auth_user
         .require_global_permission(&state.db, "roles:update")
         .await?;
-    let existing =
-        sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = repo::find_kind(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
     let is_system = existing.0;
 
     // System role gating:
@@ -549,36 +503,19 @@ pub async fn update_role(
         None => (false, None),
         Some(inner) => (true, inner.as_deref()),
     };
-    sqlx::query(
-        "UPDATE rbac_roles SET \
-            name             = COALESCE($2, name), \
-            description      = CASE WHEN $5 THEN $3 ELSE description END, \
-            policy_document  = COALESCE($4, policy_document), \
-            updated_at       = now() \
-         WHERE id = $1",
+    repo::update(
+        &state.db,
+        id,
+        payload.name.as_deref().map(str::trim),
+        description_value,
+        payload.policy_document.as_ref(),
+        description_set,
     )
-    .bind(id)
-    .bind(payload.name.as_deref().map(str::trim))
-    .bind(description_value)
-    .bind(payload.policy_document.as_ref())
-    .bind(description_set)
-    .execute(&state.db)
     .await?;
 
-    // Qualify with `r.id`: ROLE_SELECT joins `users u`, which also
-    // has an `id` column — an unqualified WHERE here used to bubble
-    // a 500 from "column reference \"id\" is ambiguous".
-    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE r.id = $1"))
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+    let row = repo::get(&state.db, id).await?;
 
-    let user_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM rbac_role_assignments WHERE role_id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    let user_count = repo::assignment_count(&state.db, id).await.unwrap_or(0);
 
     invalidate_role_perms(&state.db, &state.redis, id).await;
 
@@ -627,12 +564,9 @@ pub async fn reset_role(
         .require_global_permission(&state.db, "roles:edit_system")
         .await?;
 
-    let existing =
-        sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = repo::find_kind(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
     if !existing.0 {
         return Err(AppError::BadRequest(
             "Reset is only available for system roles".into(),
@@ -646,30 +580,10 @@ pub async fn reset_role(
         ))
     })?;
 
-    sqlx::query(
-        "UPDATE rbac_roles SET \
-            policy_document  = $2, \
-            updated_at       = now() \
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&default_doc)
-    .execute(&state.db)
-    .await?;
+    repo::set_policy_document(&state.db, id, &default_doc).await?;
 
-    // Qualify with `r.id`: ROLE_SELECT joins `users u`, which also
-    // has an `id` column — an unqualified WHERE here used to bubble
-    // a 500 from "column reference \"id\" is ambiguous".
-    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE r.id = $1"))
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
-    let user_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM rbac_role_assignments WHERE role_id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    let row = repo::get(&state.db, id).await?;
+    let user_count = repo::assignment_count(&state.db, id).await.unwrap_or(0);
 
     invalidate_role_perms(&state.db, &state.redis, id).await;
 
@@ -716,23 +630,15 @@ pub async fn delete_role(
     auth_user
         .require_global_permission(&state.db, "roles:delete")
         .await?;
-    let existing =
-        sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = repo::find_kind(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
     if existing.0 {
         return Err(AppError::BadRequest("Cannot delete system roles".into()));
     }
     let role_name = existing.1;
 
-    let assigned: i64 =
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM rbac_role_assignments WHERE role_id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    let assigned = repo::assignment_count(&state.db, id).await.unwrap_or(0);
 
     let mut tx = state.db.begin().await?;
 
@@ -744,31 +650,13 @@ pub async fn delete_role(
                 ));
             }
             Some(target_id) => {
-                let target_exists: bool =
-                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
-                        .bind(target_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
+                let target_exists = repo::exists_in(&mut tx, target_id).await?;
                 if !target_exists {
                     return Err(AppError::BadRequest("reassign_to role not found".into()));
                 }
                 // Migrate every (user, scope) pair to the new role.
-                sqlx::query(
-                    "INSERT INTO rbac_role_assignments \
-                         (user_id, role_id, scope_kind, scope_id, assigned_by) \
-                     SELECT user_id, $2, scope_kind, scope_id, $3 \
-                       FROM rbac_role_assignments WHERE role_id = $1 \
-                     ON CONFLICT DO NOTHING",
-                )
-                .bind(id)
-                .bind(target_id)
-                .bind(auth_user.claims.sub)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query("DELETE FROM rbac_role_assignments WHERE role_id = $1")
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
+                repo::copy_assignments(&mut tx, id, target_id, auth_user.claims.sub).await?;
+                repo::delete_assignments(&mut tx, id).await?;
             }
             None => {
                 return Err(AppError::BadRequest(format!(
@@ -778,10 +666,7 @@ pub async fn delete_role(
         }
     }
 
-    sqlx::query("DELETE FROM rbac_roles WHERE id = $1 AND is_system = FALSE")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    repo::delete_custom(&mut tx, id).await?;
 
     tx.commit().await?;
 
@@ -846,32 +731,12 @@ pub async fn list_role_members(
     auth_user
         .require_global_permission(&state.db, "roles:read")
         .await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+    let exists = repo::exists(&state.db, id).await?;
     if !exists {
         return Err(AppError::NotFound("Role not found".into()));
     }
 
-    type Row = (
-        Uuid,
-        String,
-        Option<String>,
-        String,
-        Option<Uuid>,
-        chrono::DateTime<chrono::Utc>,
-    );
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, ra.scope_kind, ra.scope_id, ra.assigned_at \
-           FROM rbac_role_assignments ra \
-           JOIN users u ON u.id = ra.user_id \
-          WHERE ra.role_id = $1 \
-          ORDER BY u.email ASC",
-    )
-    .bind(id)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = repo::members(&state.db, id).await?;
 
     let items = rows
         .into_iter()
@@ -979,10 +844,7 @@ pub async fn list_role_history(
         .await?;
 
     // 404 if the role doesn't exist — same shape as list_role_members.
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+    let exists = repo::exists(&state.db, id).await?;
     if !exists {
         return Err(AppError::NotFound("Role not found".into()));
     }

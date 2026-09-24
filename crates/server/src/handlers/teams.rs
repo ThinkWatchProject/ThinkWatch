@@ -29,7 +29,6 @@ use axum::Json;
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 use think_watch_common::errors::AppError;
@@ -37,14 +36,8 @@ use think_watch_common::errors::AppError;
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_team_perms, invalidate_user_perms};
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
-pub struct Team {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
+use crate::services::team_repository::{self as repo, Team, TeamRoleRow, TeamWithCountRow};
+use crate::services::user_repository;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TeamWithCount {
@@ -96,14 +89,9 @@ async fn caller_is_team_member(
     caller_id: Uuid,
     team_id: Uuid,
 ) -> Result<bool, AppError> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM team_members WHERE user_id = $1 AND team_id = $2)",
-    )
-    .bind(caller_id)
-    .bind(team_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("team membership check failed: {e}")))?;
+    let exists = repo::is_member(pool, caller_id, team_id)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("team membership check failed: {e}")))?;
     Ok(exists)
 }
 
@@ -160,56 +148,23 @@ pub async fn list_teams(
         .await?;
 
     let rows: Vec<TeamWithCount> = match scope {
-        None => sqlx::query_as::<_, TeamWithCountRow>(
-            "SELECT t.id, t.name, t.description, t.created_at, \
-                    COALESCE(c.cnt, 0) AS member_count \
-               FROM teams t \
-          LEFT JOIN ( \
-               SELECT team_id, COUNT(*) AS cnt FROM team_members GROUP BY team_id \
-          ) c ON c.team_id = t.id \
-              ORDER BY t.name ASC",
-        )
-        .fetch_all(&state.db)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect(),
-        Some(scoped_team_ids) => {
-            // Convert the HashSet to a Vec for binding to ANY($2).
-            let scoped: Vec<uuid::Uuid> = scoped_team_ids.iter().copied().collect();
-            sqlx::query_as::<_, TeamWithCountRow>(
-                "SELECT t.id, t.name, t.description, t.created_at, \
-                        COALESCE(c.cnt, 0) AS member_count \
-                   FROM teams t \
-              LEFT JOIN ( \
-                   SELECT team_id, COUNT(*) AS cnt FROM team_members GROUP BY team_id \
-              ) c ON c.team_id = t.id \
-                  WHERE EXISTS ( \
-                      SELECT 1 FROM team_members tm \
-                       WHERE tm.team_id = t.id AND tm.user_id = $1 \
-                  ) OR t.id = ANY($2) \
-                  ORDER BY t.name ASC",
-            )
-            .bind(auth_user.claims.sub)
-            .bind(&scoped)
-            .fetch_all(&state.db)
+        None => repo::list(&state.db)
             .await?
             .into_iter()
             .map(Into::into)
-            .collect()
+            .collect(),
+        Some(scoped_team_ids) => {
+            // Convert the HashSet to a Vec for binding to ANY($2).
+            let scoped: Vec<uuid::Uuid> = scoped_team_ids.iter().copied().collect();
+            repo::list_for_member_or_in(&state.db, auth_user.claims.sub, &scoped)
+                .await?
+                .into_iter()
+                .map(Into::into)
+                .collect()
         }
     };
 
     Ok(Json(rows))
-}
-
-#[derive(FromRow)]
-struct TeamWithCountRow {
-    id: Uuid,
-    name: String,
-    description: Option<String>,
-    created_at: DateTime<Utc>,
-    member_count: i64,
 }
 
 impl From<TeamWithCountRow> for TeamWithCount {
@@ -253,19 +208,9 @@ pub async fn get_team(
     // renders the count card off this field. Returning a bare Team
     // here left the card showing undefined and any optimistic
     // decrement after a member removal flipping to NaN.
-    let row = sqlx::query_as::<_, TeamWithCountRow>(
-        "SELECT t.id, t.name, t.description, t.created_at, \
-                COALESCE(c.cnt, 0) AS member_count \
-           FROM teams t \
-           LEFT JOIN (SELECT team_id, COUNT(*) AS cnt \
-                        FROM team_members GROUP BY team_id) c \
-                  ON c.team_id = t.id \
-          WHERE t.id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Team not found".into()))?;
+    let row = repo::find_with_count(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Team not found".into()))?;
     Ok(Json(row.into()))
 }
 
@@ -302,27 +247,21 @@ pub async fn create_team(
     if name.chars().count() > 255 {
         return Err(AppError::BadRequest("Team name too long".into()));
     }
-    let team = sqlx::query_as::<_, Team>(
-        "INSERT INTO teams (name, description) VALUES ($1, $2) \
-         RETURNING id, name, description, created_at",
-    )
-    .bind(name)
-    .bind(req.description.as_deref().map(str::trim))
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-            AppError::Conflict(format!("Team '{name}' already exists"))
-        }
-        // Delegate non-unique-violation errors to the global
-        // `From<sqlx::Error>` mapping. Without `e.into()`, the
-        // catch-all `Internal(...)` here would swallow the
-        // `PoolTimedOut` / `PoolClosed` / `WorkerCrashed` / `Io`
-        // → `ServiceUnavailable(503)` distinction the global
-        // mapping makes, losing operator-facing infra-vs-app
-        // separation in dashboards.
-        other => other.into(),
-    })?;
+    let team = repo::insert(&state.db, name, req.description.as_deref().map(str::trim))
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
+                AppError::Conflict(format!("Team '{name}' already exists"))
+            }
+            // Delegate non-unique-violation errors to the global
+            // `From<sqlx::Error>` mapping. Without `e.into()`, the
+            // catch-all `Internal(...)` here would swallow the
+            // `PoolTimedOut` / `PoolClosed` / `WorkerCrashed` / `Io`
+            // → `ServiceUnavailable(503)` distinction the global
+            // mapping makes, losing operator-facing infra-vs-app
+            // separation in dashboards.
+            other => other.into(),
+        })?;
 
     state.audit.log(
         auth_user
@@ -366,13 +305,9 @@ pub async fn update_team(
         .assert_scope_for_team(&state.db, "teams:update", id)
         .await?;
 
-    let existing = sqlx::query_as::<_, Team>(
-        "SELECT id, name, description, created_at FROM teams WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Team not found".into()))?;
+    let existing = repo::find(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Team not found".into()))?;
 
     // Distinguish absent (preserve current) from empty (reject).
     // The previous shape silently fell back to `existing.name` on
@@ -406,23 +341,16 @@ pub async fn update_team(
         }
     };
 
-    let updated = sqlx::query_as::<_, Team>(
-        "UPDATE teams SET name = $2, description = $3 WHERE id = $1 \
-         RETURNING id, name, description, created_at",
-    )
-    .bind(id)
-    .bind(new_name)
-    .bind(new_desc)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-            AppError::Conflict(format!("Team '{new_name}' already exists"))
-        }
-        // See create_team above — delegate to global mapping so
-        // transient-vs-permanent DB failures stay distinguishable.
-        other => other.into(),
-    })?;
+    let updated = repo::update(&state.db, id, new_name, new_desc)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
+                AppError::Conflict(format!("Team '{new_name}' already exists"))
+            }
+            // See create_team above — delegate to global mapping so
+            // transient-vs-permanent DB failures stay distinguishable.
+            other => other.into(),
+        })?;
 
     state.audit.log(
         auth_user
@@ -461,16 +389,10 @@ pub async fn delete_team(
         .require_global_permission(&state.db, "teams:delete")
         .await?;
 
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM teams WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
+    let name = repo::name_of(&state.db, id).await?;
     let name = name.ok_or_else(|| AppError::NotFound("Team not found".into()))?;
 
-    sqlx::query("DELETE FROM teams WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    repo::delete(&state.db, id).await?;
 
     state.audit.log(
         auth_user
@@ -517,18 +439,7 @@ pub async fn list_members(
             .await?;
     }
 
-    type Row = (Uuid, String, String, DateTime<Utc>);
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, tm.joined_at \
-           FROM team_members tm \
-           JOIN users u ON u.id = tm.user_id \
-          WHERE tm.team_id = $1 \
-            AND u.deleted_at IS NULL \
-          ORDER BY tm.joined_at ASC",
-    )
-    .bind(team_id)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = repo::members(&state.db, team_id).await?;
 
     Ok(Json(
         rows.into_iter()
@@ -571,12 +482,7 @@ pub async fn add_member(
         .await?;
 
     // Validate the user actually exists, is active, and isn't soft-deleted.
-    let user_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL)",
-    )
-    .bind(req.user_id)
-    .fetch_one(&state.db)
-    .await?;
+    let user_exists = user_repository::active_exists(&state.db, req.user_id).await?;
     if !user_exists {
         return Err(AppError::NotFound("User not found".into()));
     }
@@ -592,28 +498,13 @@ pub async fn add_member(
     //
     // ON CONFLICT DO NOTHING handles re-adding an existing member
     // idempotently (0 rows affected but not an error).
-    let result = sqlx::query(
-        r#"INSERT INTO team_members (user_id, team_id)
-           SELECT $1, $2
-           WHERE (SELECT COUNT(*) FROM team_members WHERE user_id = $1) < $3
-           ON CONFLICT (user_id, team_id) DO NOTHING"#,
-    )
-    .bind(req.user_id)
-    .bind(team_id)
-    .bind(MAX_TEAMS_PER_USER)
-    .execute(&state.db)
-    .await?;
+    let inserted =
+        repo::add_member_capped(&state.db, req.user_id, team_id, MAX_TEAMS_PER_USER).await?;
 
     // 0 rows can mean "already a member" (fine) OR "at limit" (error).
     // Disambiguate with a follow-up check so we return the right message.
-    if result.rows_affected() == 0 {
-        let already_member: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM team_members WHERE user_id = $1 AND team_id = $2)",
-        )
-        .bind(req.user_id)
-        .bind(team_id)
-        .fetch_one(&state.db)
-        .await?;
+    if inserted == 0 {
+        let already_member = repo::is_member(&state.db, req.user_id, team_id).await?;
         if !already_member {
             return Err(AppError::BadRequest(format!(
                 "User already belongs to {MAX_TEAMS_PER_USER} teams (maximum)"
@@ -660,12 +551,7 @@ pub async fn remove_member(
         .assert_scope_for_team(&state.db, "team_members:write", team_id)
         .await?;
 
-    let removed = sqlx::query("DELETE FROM team_members WHERE team_id = $1 AND user_id = $2")
-        .bind(team_id)
-        .bind(user_id)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
+    let removed = repo::remove_member(&state.db, team_id, user_id).await?;
 
     if removed == 0 {
         return Err(AppError::NotFound("Member not found".into()));
@@ -688,14 +574,6 @@ pub async fn remove_member(
 // Team role assignments — roles assigned to a team are inherited by all
 // members. This turns teams into permission groups.
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, serde::Serialize, sqlx::FromRow)]
-pub struct TeamRoleRow {
-    pub role_id: Uuid,
-    pub name: String,
-    pub is_system: bool,
-    pub assigned_at: chrono::DateTime<chrono::Utc>,
-}
 
 #[utoipa::path(
     get,
@@ -720,16 +598,7 @@ pub async fn list_team_roles(
         .assert_scope_for_team(&state.db, "teams:read", team_id)
         .await?;
 
-    let rows: Vec<TeamRoleRow> = sqlx::query_as::<_, TeamRoleRow>(
-        "SELECT tra.role_id, r.name, r.is_system, tra.assigned_at \
-           FROM team_role_assignments tra \
-           JOIN rbac_roles r ON r.id = tra.role_id \
-          WHERE tra.team_id = $1 \
-          ORDER BY r.is_system DESC, r.name ASC",
-    )
-    .bind(team_id)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = repo::roles(&state.db, team_id).await?;
 
     Ok(Json(rows))
 }
@@ -764,16 +633,7 @@ pub async fn assign_team_role(
         .assert_scope_for_team(&state.db, "teams:update", team_id)
         .await?;
 
-    sqlx::query(
-        "INSERT INTO team_role_assignments (team_id, role_id, assigned_by) \
-         VALUES ($1, $2, $3) \
-         ON CONFLICT (team_id, role_id) DO NOTHING",
-    )
-    .bind(team_id)
-    .bind(req.role_id)
-    .bind(auth_user.claims.sub)
-    .execute(&state.db)
-    .await?;
+    repo::assign_role(&state.db, team_id, req.role_id, auth_user.claims.sub).await?;
 
     invalidate_team_perms(&state.db, &state.redis, team_id).await;
 
@@ -813,11 +673,7 @@ pub async fn remove_team_role(
         .assert_scope_for_team(&state.db, "teams:update", team_id)
         .await?;
 
-    sqlx::query("DELETE FROM team_role_assignments WHERE team_id = $1 AND role_id = $2")
-        .bind(team_id)
-        .bind(role_id)
-        .execute(&state.db)
-        .await?;
+    repo::remove_role(&state.db, team_id, role_id).await?;
 
     invalidate_team_perms(&state.db, &state.redis, team_id).await;
 
