@@ -41,6 +41,7 @@ use tw_dialect::convert::Session;
 use tw_dialect::ir::{Dialect, Target};
 
 use super::body_capture::prepare_body_capture;
+use super::early_cancel::EarlyCancelSlot;
 use super::headers::{request_id_header, resolve_session_id, resolve_trace_id};
 use super::log_ctx::{LogCtx, emit_gateway_error_log, emit_gateway_log};
 use super::pipeline::{launch_stream_pump, run_buffered_post_invoke, run_preflight_stages};
@@ -102,12 +103,14 @@ pub async fn proxy_chat_completion(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
+    cancel: Option<axum::Extension<EarlyCancelSlot>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
         state,
         headers,
         identity,
+        cancel.map(|c| c.0),
         body,
         CHAT,
         "/v1/chat/completions",
@@ -121,12 +124,14 @@ pub async fn proxy_anthropic_messages(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
+    cancel: Option<axum::Extension<EarlyCancelSlot>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
         state,
         headers,
         identity,
+        cancel.map(|c| c.0),
         body,
         MESSAGES,
         "/v1/messages",
@@ -140,12 +145,14 @@ pub async fn proxy_responses(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
+    cancel: Option<axum::Extension<EarlyCancelSlot>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
         state,
         headers,
         identity,
+        cancel.map(|c| c.0),
         body,
         RESPONSES,
         "/v1/responses",
@@ -163,12 +170,14 @@ pub async fn proxy_gemini(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
+    cancel: Option<axum::Extension<EarlyCancelSlot>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
         state,
         headers,
         identity,
+        cancel.map(|c| c.0),
         body,
         GEMINI,
         uri.path(),
@@ -458,24 +467,32 @@ pub(crate) async fn read_whole(
 ///
 /// `path` and `query` are the caller's: Gemini puts the model, whether to
 /// stream and which stream form in them.
+///
+/// `cancel` is the middleware's record of a request whose client leaves
+/// before the response exists (see `early_cancel`); `None` on a
+/// WebSocket turn, whose connection records its own end.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
+    cancel: Option<EarlyCancelSlot>,
     body: Bytes,
     surface: ClientSurface,
     path: &str,
     query: Option<&str>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    run(state, headers, identity, body, surface, path, query)
+    run(state, headers, identity, cancel, body, surface, path, query)
         .await
         .map_err(|e| e.in_dialect(surface.dialect))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
+    cancel: Option<EarlyCancelSlot>,
     body: Bytes,
     surface: ClientSurface,
     path: &str,
@@ -484,6 +501,9 @@ async fn run(
     let trace_id = resolve_trace_id(&headers);
     let session_id = resolve_session_id(&headers);
     let request_started_at = std::time::Instant::now();
+    if let Some(c) = &cancel {
+        c.request(&trace_id, session_id.as_deref());
+    }
 
     // A row even for a body we cannot read: an operator chasing a 400
     // should find it.
@@ -527,6 +547,9 @@ async fn run(
 
     // 1. Model aliases
     let mapped_model = state.model_mapper.map(&model);
+    if let Some(c) = &cancel {
+        c.model(&mapped_model);
+    }
     let ctx = LogCtx::new(
         &state.audit,
         &identity,
