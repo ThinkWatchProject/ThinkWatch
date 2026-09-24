@@ -13,6 +13,7 @@ use think_watch_common::models::ApiKey;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::api_key_repository::{self as repo, ApiKeyPatch, NewApiKey};
 
 /// Resolve whether the caller sees only their own keys or the whole
 /// table. API keys are user-owned, so scope collapses to two cases:
@@ -51,12 +52,9 @@ async fn assert_owner_or_admin(
     // and the downstream UPDATE no-op'd because it carried its own
     // `AND deleted_at IS NULL` guard, but an audit entry still fired
     // claiming the operation happened.
-    let owner: Option<Uuid> =
-        sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
-            .bind(key_id)
-            .fetch_optional(pool)
-            .await?;
-    let owner = owner.ok_or_else(|| AppError::NotFound("API key not found".into()))?;
+    let owner = repo::owner_of_live(pool, key_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".into()))?;
     if auth_user.claims.sub == owner {
         return Ok(());
     }
@@ -205,16 +203,7 @@ async fn validate_mcp_account_overrides(
         let label = label_val.as_str().ok_or_else(|| {
             AppError::BadRequest("mcp_account_overrides values must be strings".into())
         })?;
-        let exists: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM mcp_user_credentials
-              WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3",
-        )
-        .bind(server_id)
-        .bind(user_id)
-        .bind(label)
-        .fetch_optional(pool)
-        .await?;
-        if exists.is_none() {
+        if !repo::mcp_credential_exists(pool, server_id, user_id, label).await? {
             return Err(AppError::BadRequest(format!(
                 "mcp_account_overrides points at '{label}' for server {server_id_str}, \
                  but you have no credential with that label"
@@ -291,50 +280,22 @@ pub async fn list_keys(
     // every key in the system.
     let global = caller_is_admin_tier(&auth_user);
 
-    // Two view modes:
-    //   live:     deleted_at IS NULL                      (default)
-    //   archived: deleted_at IS NOT NULL AND revoke variant
-    // The archived predicate excludes user_deleted / account_deleted
-    // soft-deletes — those are cascades from a user wipe, not
-    // intentional key revocations, and shouldn't appear in a
-    // "revoked keys" tab.
-    let visibility_clause = if params.archived {
-        "deleted_at IS NOT NULL \
-         AND (disabled_reason = 'revoked' OR disabled_reason LIKE 'force_revoked:%')"
-    } else {
-        "deleted_at IS NULL"
-    };
-
+    // Two view modes: live keys (default), or `archived` — revoked
+    // keys only, not the soft-deletes cascaded from a user wipe.
+    let archived = params.archived;
     let (total, keys): (i64, Vec<ApiKey>) = if global {
-        let total: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM api_keys WHERE {visibility_clause}"
-        ))
-        .fetch_one(&state.db)
-        .await?;
-        let keys = sqlx::query_as::<_, ApiKey>(&format!(
-            "SELECT * FROM api_keys WHERE {visibility_clause} \
-             ORDER BY created_at DESC LIMIT $1 OFFSET $2"
-        ))
-        .bind(per_page as i64)
-        .bind(offset as i64)
-        .fetch_all(&state.db)
-        .await?;
+        let total = repo::count_all(&state.db, archived).await?;
+        let keys = repo::list_all_page(&state.db, archived, per_page as i64, offset as i64).await?;
         (total, keys)
     } else {
-        let total: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM api_keys WHERE {visibility_clause} AND user_id = $1"
-        ))
-        .bind(caller_id)
-        .fetch_one(&state.db)
-        .await?;
-        let keys = sqlx::query_as::<_, ApiKey>(&format!(
-            "SELECT * FROM api_keys WHERE {visibility_clause} AND user_id = $1 \
-             ORDER BY created_at DESC LIMIT $2 OFFSET $3"
-        ))
-        .bind(caller_id)
-        .bind(per_page as i64)
-        .bind(offset as i64)
-        .fetch_all(&state.db)
+        let total = repo::count_for_user(&state.db, archived, caller_id).await?;
+        let keys = repo::list_for_user_page(
+            &state.db,
+            archived,
+            caller_id,
+            per_page as i64,
+            offset as i64,
+        )
         .await?;
         (total, keys)
     };
@@ -475,25 +436,23 @@ pub async fn create_key(
     // key. Subsequent rotations carry over the same lineage_id,
     // so descendants will have id != lineage_id.
     let id = uuid::Uuid::new_v4();
-    let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (id, lineage_id, key_prefix, key_hash, name, user_id, surfaces,
-                allowed_models, allowed_mcp_tools, mcp_account_overrides, expires_at,
-                cost_center, rotation_period_days)
-           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *"#,
+    let row = repo::insert(
+        &state.db,
+        &NewApiKey {
+            id,
+            key_prefix: &generated.prefix,
+            key_hash: &generated.hash,
+            name: &req.name,
+            user_id: auth_user.claims.sub,
+            surfaces: &surfaces,
+            allowed_models: &req.allowed_models,
+            allowed_mcp_tools: &req.allowed_mcp_tools,
+            mcp_account_overrides: &mcp_account_overrides,
+            expires_at,
+            cost_center: cost_center.as_deref(),
+            rotation_period_days,
+        },
     )
-    .bind(id)
-    .bind(&generated.prefix)
-    .bind(&generated.hash)
-    .bind(&req.name)
-    .bind(auth_user.claims.sub)
-    .bind(&surfaces)
-    .bind(&req.allowed_models)
-    .bind(&req.allowed_mcp_tools)
-    .bind(&mcp_account_overrides)
-    .bind(expires_at)
-    .bind(cost_center.as_deref())
-    .bind(rotation_period_days)
-    .fetch_one(&state.db)
     .await?;
 
     Ok(Json(CreateApiKeyResponse {
@@ -526,12 +485,9 @@ pub async fn get_key(
 ) -> Result<Json<ApiKey>, AppError> {
     auth_user.require_permission("api_keys:read")?;
     assert_owner_or_admin(&auth_user, &state.db, id).await?;
-    let key =
-        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(AppError::NotFound("API key not found".into()))?;
+    let key = repo::find_live(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("API key not found".into()))?;
 
     Ok(Json(key))
 }
@@ -569,16 +525,7 @@ pub async fn revoke_key(
     // disappears from the default list view and is hard-deleted by
     // the retention sweep ~30 days later. The `?archived=true` view
     // surfaces it in the meantime for audit / oh-shit lookups.
-    let result = sqlx::query(
-        "UPDATE api_keys SET is_active = false, grace_period_ends_at = NULL, \
-                disabled_reason = 'revoked', deleted_at = now() \
-          WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .execute(&state.db)
-    .await?;
-
-    if result.rows_affected() == 0 {
+    if repo::revoke(&state.db, id).await? == 0 {
         return Err(AppError::NotFound("API key not found".into()));
     }
 
@@ -650,17 +597,7 @@ pub async fn force_revoke_key(
         "force_revoked:{}",
         reason.chars().take(64).collect::<String>()
     );
-    let result = sqlx::query(
-        "UPDATE api_keys SET is_active = false, grace_period_ends_at = NULL, \
-                disabled_reason = $1, deleted_at = now() \
-          WHERE id = $2 AND deleted_at IS NULL",
-    )
-    .bind(&disabled_reason)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
-
-    if result.rows_affected() == 0 {
+    if repo::force_revoke(&state.db, id, &disabled_reason).await? == 0 {
         return Err(AppError::NotFound("API key not found".into()));
     }
 
@@ -762,12 +699,9 @@ pub async fn update_key(
             return Err(AppError::BadRequest(format!("{name} must be >= 0")));
         }
     }
-    let key =
-        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(AppError::NotFound("API key not found".into()))?;
+    let key = repo::find_live(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("API key not found".into()))?;
 
     // Subset check against the *key owner's* roles, not the caller's —
     // a super-admin editing someone else's key still can't grant tools
@@ -851,35 +785,25 @@ pub async fn update_key(
         }
     };
 
-    let updated = sqlx::query_as::<_, ApiKey>(
-        r#"UPDATE api_keys SET
-            allowed_models = CASE WHEN $11 THEN $1 ELSE allowed_models END,
-            allowed_mcp_tools = CASE WHEN $12 THEN $10 ELSE allowed_mcp_tools END,
-            surfaces = COALESCE($2, surfaces),
-            expires_at = $3,
-            rotation_period_days = COALESCE($4, rotation_period_days),
-            inactivity_timeout_days = COALESCE($5, inactivity_timeout_days),
-            cost_center = CASE WHEN $7 THEN $6 ELSE cost_center END,
-            mcp_account_overrides = CASE WHEN $13 THEN $14 ELSE mcp_account_overrides END,
-            last_expiry_warning_days = CASE WHEN $9 THEN NULL
-                                            ELSE last_expiry_warning_days END
-           WHERE id = $8 RETURNING *"#,
+    let updated = repo::update(
+        &state.db,
+        id,
+        &ApiKeyPatch {
+            allowed_models_set: models_set,
+            allowed_models: models_value,
+            allowed_mcp_tools_set: mcp_tools_set,
+            allowed_mcp_tools: mcp_tools_value,
+            surfaces: normalized_surfaces.as_ref(),
+            expires_at,
+            rotation_period_days: req.rotation_period_days,
+            inactivity_timeout_days: req.inactivity_timeout_days,
+            cost_center_set,
+            cost_center: cost_center_value.as_deref(),
+            mcp_account_overrides_set: overrides_set,
+            mcp_account_overrides: &overrides_value,
+            expiry_extended,
+        },
     )
-    .bind(models_value)
-    .bind(normalized_surfaces.as_ref())
-    .bind(expires_at)
-    .bind(req.rotation_period_days)
-    .bind(req.inactivity_timeout_days)
-    .bind(cost_center_value.as_deref())
-    .bind(cost_center_set)
-    .bind(id)
-    .bind(expiry_extended)
-    .bind(mcp_tools_value)
-    .bind(models_set)
-    .bind(mcp_tools_set)
-    .bind(overrides_set)
-    .bind(&overrides_value)
-    .fetch_one(&state.db)
     .await?;
 
     // Record what actually changed in the audit detail. Surfaces /
@@ -978,12 +902,9 @@ pub async fn rotate_key(
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
     auth_user.require_permission("api_keys:rotate")?;
     assert_owner_or_admin(&auth_user, &state.db, id).await?;
-    let old_key =
-        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(AppError::NotFound("API key not found".into()))?;
+    let old_key = repo::find_live(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("API key not found".into()))?;
 
     if !old_key.is_active {
         return Err(AppError::BadRequest("Cannot rotate an inactive key".into()));
@@ -1013,55 +934,19 @@ pub async fn rotate_key(
     // when rotation happens.
     let generated = api_key::generate_api_key();
 
-    // INSERT new key + UPDATE old key's grace period must be atomic.
-    // Without the transaction, an error between the two leaves the
-    // old key with no grace_period_ends_at — meaning it never enters
-    // the rotation grace window and both keys remain valid forever.
-    let mut tx = state.db.begin().await?;
-
-    let new_key = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models,
-            allowed_mcp_tools, expires_at, rotation_period_days, inactivity_timeout_days,
-            cost_center, rotated_from_id, last_rotation_at, lineage_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)
-           RETURNING *"#,
+    // The new key carries the old one's name verbatim — the chain is
+    // in `rotated_from_id` + `last_rotation_at`, so a " (rotated)"
+    // suffix would only stack up on every rotation — and its lineage
+    // id, so per-key analytics group every generation together. The
+    // insert and the old key's grace window are one transaction.
+    let new_key = repo::rotate(
+        &state.db,
+        &old_key,
+        &generated.prefix,
+        &generated.hash,
+        grace_period_ends_at,
     )
-    .bind(&generated.prefix)
-    .bind(&generated.hash)
-    // Carry the original name verbatim. The provenance / generation
-    // chain is already captured by `rotated_from_id` + `last_rotation_at`,
-    // and the row's status badge ("已轮换" / "活跃") tells the operator
-    // which generation is which. An earlier version stamped a literal
-    // " (rotated)" suffix into `name`, which (a) outlived the old key
-    // (the suffix has no removal logic), and (b) stacked on every
-    // subsequent rotation — "Foo (rotated) (rotated) (rotated)…".
-    .bind(&old_key.name)
-    .bind(old_key.user_id)
-    .bind(&old_key.surfaces)
-    .bind(&old_key.allowed_models)
-    .bind(&old_key.allowed_mcp_tools)
-    .bind(old_key.expires_at)
-    .bind(old_key.rotation_period_days)
-    .bind(old_key.inactivity_timeout_days)
-    .bind(old_key.cost_center.as_deref())
-    .bind(id)
-    // Inherit the parent's lineage_id so every generation in the
-    // rotation chain shares one stable identity. Per-key analytics
-    // can then group on `api_key_lineage_id` instead of recursing
-    // on `rotated_from_id`.
-    .bind(old_key.lineage_id)
-    .fetch_one(&mut *tx)
     .await?;
-
-    sqlx::query(
-        "UPDATE api_keys SET grace_period_ends_at = $1, disabled_reason = 'rotated' WHERE id = $2",
-    )
-    .bind(grace_period_ends_at)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
 
     state.audit.log(
         auth_user
@@ -1119,31 +1004,9 @@ pub async fn list_expiring_keys(
     let global = caller_is_admin_tier(&auth_user);
 
     let keys = if global {
-        sqlx::query_as::<_, ApiKey>(
-            r#"SELECT * FROM api_keys
-               WHERE is_active = true
-                 AND deleted_at IS NULL
-                 AND expires_at IS NOT NULL
-                 AND expires_at <= $1
-               ORDER BY expires_at ASC"#,
-        )
-        .bind(threshold)
-        .fetch_all(&state.db)
-        .await?
+        repo::list_expiring_all(&state.db, threshold).await?
     } else {
-        sqlx::query_as::<_, ApiKey>(
-            r#"SELECT * FROM api_keys
-               WHERE is_active = true
-                 AND deleted_at IS NULL
-                 AND expires_at IS NOT NULL
-                 AND expires_at <= $1
-                 AND user_id = $2
-               ORDER BY expires_at ASC"#,
-        )
-        .bind(threshold)
-        .bind(caller_id)
-        .fetch_all(&state.db)
-        .await?
+        repo::list_expiring_for_user(&state.db, threshold, caller_id).await?
     };
 
     Ok(Json(keys))
@@ -1186,14 +1049,7 @@ pub async fn list_cost_centers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<String>>, AppError> {
     auth_user.require_permission("api_keys:read")?;
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT cost_center FROM api_keys \
-          WHERE cost_center IS NOT NULL AND deleted_at IS NULL \
-          ORDER BY cost_center ASC",
-    )
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(rows.into_iter().map(|(s,)| s).collect()))
+    Ok(Json(repo::cost_centers(&state.db).await?))
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]

@@ -9,9 +9,9 @@ use think_watch_common::audit::AuditActor;
 use think_watch_common::config::AppConfig;
 use think_watch_common::crypto::parse_encryption_key;
 use think_watch_common::errors::AppError;
-use think_watch_common::models::User;
 
 use crate::app::AppState;
+use crate::services::auth_repository;
 
 const OIDC_STATE_KEY_PREFIX: &str = "oidc:state:";
 const OIDC_STATE_TTL_SECS: i64 = 600;
@@ -322,13 +322,9 @@ async fn handle_live_callback(
         .await
         .map_err(|e| AppError::BadRequest(format!("SSO authentication failed: {e}")))?;
 
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE oidc_subject = $1 AND oidc_issuer = $2",
-    )
-    .bind(&user_info.subject)
-    .bind(&user_info.issuer)
-    .fetch_optional(&state.db)
-    .await?;
+    let user =
+        auth_repository::find_by_oidc_identity(&state.db, &user_info.subject, &user_info.issuer)
+            .await?;
 
     let user = match user {
         Some(u) if u.deleted_at.is_some() => {
@@ -395,26 +391,17 @@ async fn handle_live_callback(
                 .as_deref()
                 .unwrap_or(user_info.email.as_deref().unwrap_or(&email));
 
-            let u = sqlx::query_as::<_, User>(
-                r#"INSERT INTO users (email, display_name, oidc_subject, oidc_issuer)
-                   VALUES ($1, $2, $3, $4) RETURNING *"#,
+            let u = auth_repository::insert_oidc_user(
+                &state.db,
+                &email,
+                display_name,
+                &user_info.subject,
+                &user_info.issuer,
             )
-            .bind(&email)
-            .bind(display_name)
-            .bind(&user_info.subject)
-            .bind(&user_info.issuer)
-            .fetch_one(&state.db)
             .await?;
 
             if let Some(role_name) = state.dynamic_config.default_role().await {
-                sqlx::query(
-                    r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-                       SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = $2"#,
-                )
-                .bind(u.id)
-                .bind(&role_name)
-                .execute(&state.db)
-                .await?;
+                auth_repository::assign_default_role(&state.db, u.id, &role_name).await?;
             }
 
             u

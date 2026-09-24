@@ -29,6 +29,7 @@ use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::settings_repository;
 
 const OIDC_TEST_RESULT_KEY: &str = "oidc:test:result";
 
@@ -306,9 +307,7 @@ pub async fn delete_oidc_draft(
     auth_user
         .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
-    sqlx::query("DELETE FROM system_settings WHERE key = 'oidc.draft'")
-        .execute(&state.db)
-        .await?;
+    settings_repository::delete_oidc_draft(&state.db).await?;
     state
         .dynamic_config
         .reload()
@@ -564,9 +563,7 @@ pub async fn activate_oidc_draft(
             .map_err(AppError::Internal)?;
     }
 
-    sqlx::query("DELETE FROM system_settings WHERE key = 'oidc.draft'")
-        .execute(&state.db)
-        .await?;
+    settings_repository::delete_oidc_draft(&state.db).await?;
     dc.reload().await.map_err(AppError::Internal)?;
     let _: Result<(), _> =
         fred::interfaces::KeysInterface::del::<(), _>(&state.redis, OIDC_TEST_RESULT_KEY).await;

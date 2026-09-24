@@ -15,6 +15,7 @@ use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::settings_repository;
 
 use super::retention::{MAX_RETENTION_DAYS, apply_blob_lifecycle, apply_clickhouse_ttls};
 
@@ -270,17 +271,10 @@ pub async fn update_settings(
     // DB-level validation for settings that reference other entities
     if let Some(role_val) = req.settings.get("auth.default_role") {
         let role_name = role_val.as_str().unwrap_or("");
-        if !role_name.is_empty() {
-            let exists: Option<(String,)> =
-                sqlx::query_as("SELECT name FROM rbac_roles WHERE name = $1")
-                    .bind(role_name)
-                    .fetch_optional(&state.db)
-                    .await?;
-            if exists.is_none() {
-                return Err(AppError::BadRequest(format!(
-                    "Role '{role_name}' does not exist"
-                )));
-            }
+        if !role_name.is_empty() && !settings_repository::role_exists(&state.db, role_name).await? {
+            return Err(AppError::BadRequest(format!(
+                "Role '{role_name}' does not exist"
+            )));
         }
     }
 

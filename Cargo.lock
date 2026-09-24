@@ -4237,6 +4237,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.13.0",
+ "jsonwebtoken",
  "once_cell",
  "p256",
  "rand 0.10.0",
