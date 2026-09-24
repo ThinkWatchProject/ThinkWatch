@@ -379,9 +379,7 @@ async fn registration_assigns_the_default_role_and_me_lists_roles_and_teams() {
     let app = TestApp::spawn().await;
     let admin = admin_session(&app).await;
 
-    // The setting has no seeded row; the admin API only changes rows
-    // that exist.
-    app.set_setting("auth.default_role", json!("")).await;
+    // Seeded empty: no role until an admin picks one through the API.
     assert_eq!(app.state.dynamic_config.default_role().await, None);
     // The default role must name a role that exists.
     admin
@@ -719,4 +717,38 @@ async fn sso_provisions_a_user_then_signs_them_in_again() {
         .unwrap();
     let (_, status) = sso_login(&app, &idp, identity).await;
     assert_eq!(status, 403);
+}
+
+/// `security.totp_required` is a JSON boolean. It used to be read as a
+/// string and compared with "true", which never matched, so a platform
+/// that required TOTP told every user it did not.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn requiring_totp_is_reported_to_users() {
+    let app = TestApp::spawn().await;
+    let admin = admin_session(&app).await;
+
+    let status = get(&admin, "/api/auth/totp/status").await;
+    assert_eq!(status["required"], false, "{status}");
+
+    // A string is refused: it would read as "not required".
+    admin
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.totp_required": "true"}}),
+        )
+        .await
+        .unwrap()
+        .assert_status(400);
+    admin
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.totp_required": true}}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+
+    let status = get(&admin, "/api/auth/totp/status").await;
+    assert_eq!(status["required"], true, "{status}");
 }
