@@ -8,19 +8,19 @@
 //! both show up where the caller did not write them: in a web page or a
 //! file a tool fetched, handed back as a tool result.
 //!
-//! Detection is thinkwatch-core's (`tw_guard::hidden`), the scanner the
-//! desktop gateway runs over client config files. Only the two kinds that
-//! `tw_guard::hidden::Kind::smuggles` names are flagged here: zero-width joiners build
-//! emoji, a zero-width non-joiner is ordinary Persian, and Cyrillic is
-//! ordinary Russian.
+//! Detection is thinkwatch-core's (`tw_guard::hidden::scan_request`), the
+//! same scan the desktop gateway runs over its requests. Only the two
+//! kinds in `tw_guard::hidden::SMUGGLING` are flagged: zero-width joiners
+//! build emoji, a zero-width non-joiner is ordinary Persian, and Cyrillic
+//! is ordinary Russian.
 //!
 //! Scanned: the caller's messages and the tool results inside them.
 //! Not scanned: the system prompt (the operator's) and the model's own
-//! turns.
+//! turns. Nothing is stripped: a hit is logged, recorded or refused.
 
 use serde::{Deserialize, Serialize};
 use think_watch_common::dynamic_config::DynamicConfig;
-use tw_dialect::ir::{Part, Request, Role};
+use tw_dialect::ir::Request;
 use tw_guard::hidden;
 
 /// What a hit does. Same words as the content filter's actions.
@@ -46,7 +46,8 @@ pub async fn action(dc: &DynamicConfig) -> Action {
         .unwrap_or_default()
 }
 
-/// One kind of hidden character, where it was found and how often.
+/// One kind of hidden character, where it was found and how often —
+/// the shape the audit event carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Found {
     /// `tag` or `bidi`
@@ -56,51 +57,39 @@ pub struct Found {
     pub count: usize,
     /// The first code point seen, as `U+E0049`.
     pub example: String,
+    /// What tag characters spell out, when they spell ASCII (at most
+    /// `tw_guard::hidden::REVEAL_MAX` characters). Empty for bidi.
+    pub revealed: String,
 }
 
-/// Scan the caller's messages, tool results included.
-pub fn scan(request: &Request) -> Vec<Found> {
-    let mut out: Vec<Found> = Vec::new();
-    for m in request.messages.iter().filter(|m| m.role == Role::User) {
-        scan_parts(&m.parts, false, &mut out);
-    }
-    out
-}
-
-fn scan_parts(parts: &[Part], in_tool_result: bool, out: &mut Vec<Found>) {
-    for p in parts {
-        match p {
-            Part::Text(s) => {
-                for h in hidden::scan(s).into_iter().filter(|h| h.kind.smuggles()) {
-                    let kind = h.kind.slug();
-                    match out
-                        .iter_mut()
-                        .find(|f| f.kind == kind && f.in_tool_result == in_tool_result)
-                    {
-                        Some(f) => f.count += 1,
-                        None => out.push(Found {
-                            kind,
-                            in_tool_result,
-                            count: 1,
-                            example: h.codepoint,
-                        }),
-                    }
-                }
-            }
-            Part::ToolResult(r) => scan_parts(&r.content, true, out),
-            Part::Image(_) | Part::File { .. } | Part::Thinking(_) | Part::ToolCall(_) => {}
+impl From<hidden::Smuggled> for Found {
+    fn from(s: hidden::Smuggled) -> Self {
+        Found {
+            kind: s.kind.slug(),
+            in_tool_result: s.in_tool_result,
+            count: s.count,
+            example: s.example,
+            revealed: s.revealed,
         }
     }
 }
 
+/// Scan the caller's messages, tool results included.
+pub fn scan(request: &Request) -> Vec<Found> {
+    hidden::scan_request(request, &hidden::SMUGGLING)
+        .into_iter()
+        .map(Found::from)
+        .collect()
+}
+
 /// What the caller is told when the request is refused.
-pub fn refusal(found: &[Found]) -> tw_types::GatewayError {
+pub fn refusal(found: &[Found]) -> crate::error::GatewayError {
     let place = if found.iter().any(|f| f.in_tool_result) {
         "a tool result"
     } else {
         "the message"
     };
-    tw_types::GatewayError::PolicyBlocked(format!(
+    crate::error::GatewayError::PolicyBlocked(format!(
         "{place} contains invisible characters that can hide instructions from a reader ({})",
         found.iter().map(|f| f.kind).collect::<Vec<_>>().join(", ")
     ))
@@ -109,7 +98,7 @@ pub fn refusal(found: &[Found]) -> tw_types::GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tw_dialect::ir::{Message, ToolResult};
+    use tw_dialect::ir::{Message, Part, Role, ToolResult};
 
     fn user(parts: Vec<Part>) -> Request {
         Request {
@@ -146,6 +135,7 @@ mod tests {
         assert_eq!(found[0].kind, "tag");
         assert!(found[0].in_tool_result);
         assert_eq!(found[0].count, 6);
+        assert_eq!(found[0].revealed, "ignore");
         assert!(refusal(&found).to_string().contains("tool result"));
     }
 

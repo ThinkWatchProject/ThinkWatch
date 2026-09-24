@@ -337,7 +337,7 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
             : errorBody?.message ?? body?.message ?? retryRes.statusText;
         const errorType: string | undefined =
           typeof errorBody === 'object' ? errorBody?.type : undefined;
-        throw new ApiError(serverMessage || 'Request failed', retryRes.status, errorType);
+        throw apiFailure(serverMessage || 'Request failed', retryRes.status, errorType);
       }
     }
     // Skip eviction for probe calls like /api/auth/me on mount —
@@ -364,11 +364,24 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
         : errorBody?.message ?? body?.message ?? res.statusText;
     const errorType: string | undefined =
       typeof errorBody === 'object' ? errorBody?.type : undefined;
-    throw new ApiError(serverMessage || 'Request failed', res.status, errorType);
+    throw apiFailure(serverMessage || 'Request failed', res.status, errorType);
   }
 
   notifyWrite(method);
   return validate(path, await res.json(), options.schema);
+}
+
+/// Event fired when the server holds this session at TOTP enrollment
+/// (the platform started requiring TOTP after this page loaded). The
+/// auth hook reloads the signed-in user, which switches the console to
+/// the enrollment screen.
+export const TOTP_ENROLLMENT_REQUIRED_EVENT = 'thinkwatch:totp-enrollment-required';
+
+function apiFailure(message: string, status: number, type: string | undefined): ApiError {
+  if (type === 'totp_enrollment_required' && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(TOTP_ENROLLMENT_REQUIRED_EVENT));
+  }
+  return new ApiError(message, status, type);
 }
 
 /**

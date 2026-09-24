@@ -9,7 +9,7 @@
 //! state blob and the resulting tokens land in Redis under
 //! `mcp_wizard:cred:{wizard_session_id}` instead of going straight
 //! to `mcp_server_shared_credentials`. The wizard's `Save` step
-//! calls `claim_wizard_credential` + `insert_shared_credential_from_wizard`
+//! calls `claim_wizard_credential` + `mcp_credential_repository::insert_shared_credential`
 //! to atomically promote the pending blob into the real
 //! shared-credential table at server-create time.
 
@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use think_watch_auth::oauth::pkce::{pkce_challenge, random_token, state_binding};
+use think_watch_common::crypto::{self, parse_encryption_key};
 use think_watch_common::errors::AppError;
-use tw_crypto::crypto::{self, parse_encryption_key};
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -310,33 +310,4 @@ pub struct PoppedWizardCredential {
     pub scopes: Vec<String>,
     pub upstream_subject: Option<String>,
     pub configured_by: Uuid,
-}
-
-/// Insert a popped wizard credential into `mcp_server_shared_credentials`.
-/// Called by [`mcp_servers::create_server`] inside the same TX as the
-/// server-row insert so the credential and the row land atomically.
-pub async fn insert_shared_credential_from_wizard(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    server_id: Uuid,
-    cred: &PoppedWizardCredential,
-) -> Result<(), AppError> {
-    sqlx::query(
-        r#"INSERT INTO mcp_server_shared_credentials (
-               mcp_server_id, credential_type,
-               access_token_encrypted, refresh_token_encrypted,
-               expires_at, scopes, upstream_subject, configured_by
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
-    )
-    .bind(server_id)
-    .bind(&cred.credential_type)
-    .bind(&cred.access_token_encrypted)
-    .bind(cred.refresh_token_encrypted.as_deref())
-    .bind(cred.expires_at)
-    .bind(&cred.scopes)
-    .bind(cred.upstream_subject.as_deref())
-    .bind(cred.configured_by)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }

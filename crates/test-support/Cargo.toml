@@ -14,7 +14,6 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-tw-crypto = { workspace = true }
 think-watch-server = { path = "../server" }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
@@ -55,4 +54,5 @@ bytes = { workspace = true }
 rust_decimal = { workspace = true }
 
 [dev-dependencies]
+jsonwebtoken = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

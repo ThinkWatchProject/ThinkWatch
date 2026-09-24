@@ -34,6 +34,7 @@ use think_watch_common::limits::{
 use super::limits::validate_override_meta_pub;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::limits_repository;
 
 // ----------------------------------------------------------------------------
 // Request shapes
@@ -543,12 +544,6 @@ async fn run_bulk_id_op(
     let mut outcomes = Vec::with_capacity(ids.len());
     let mut success = 0usize;
     let mut errors = 0usize;
-    let mutate_sql = match op {
-        BulkIdOp::Disable => {
-            format!("UPDATE {table} SET enabled = FALSE, updated_at = now() WHERE id = $1")
-        }
-        BulkIdOp::Delete => format!("DELETE FROM {table} WHERE id = $1"),
-    };
     // SECURITY: pre-flight scope check per row. The single-row
     // `delete_rule` / `delete_cap` handlers take `(kind, subject_id)`
     // in their URL path and call `assert_scope_for_subject` against
@@ -557,14 +552,8 @@ async fn run_bulk_id_op(
     // Without this, a team-scoped caller with `rate_limits:write` can
     // pass arbitrary ids and disable / delete rows for users outside
     // their scope.
-    let lookup_sql = format!("SELECT subject_kind, subject_id FROM {table} WHERE id = $1");
-
     for id in ids {
-        let subject: Option<(String, Uuid)> = match sqlx::query_as(&lookup_sql)
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await
-        {
+        let subject = match limits_repository::subject_of(&state.db, table, *id).await {
             Ok(row) => row,
             Err(e) => {
                 errors += 1;
@@ -598,9 +587,12 @@ async fn run_bulk_id_op(
             continue;
         }
 
-        let result = sqlx::query(&mutate_sql).bind(id).execute(&state.db).await;
+        let result = match &op {
+            BulkIdOp::Disable => limits_repository::disable(&state.db, table, *id).await,
+            BulkIdOp::Delete => limits_repository::delete(&state.db, table, *id).await,
+        };
         match result {
-            Ok(r) if r.rows_affected() > 0 => {
+            Ok(rows) if rows > 0 => {
                 success += 1;
                 state.audit.log(audit(*id));
                 outcomes.push(BulkIdsOutcome {

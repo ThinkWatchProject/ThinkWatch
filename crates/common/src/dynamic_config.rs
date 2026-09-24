@@ -298,6 +298,10 @@ dc_getters_bool! {
     is_initialized,          "setup.initialized",               false;
     rate_limit_fail_closed,  "security.rate_limit_fail_closed", false;
     allow_registration,      "auth.allow_registration",         false;
+    // Stored as a JSON boolean. It used to be read as a string and
+    // compared with "true", which never matched, so the requirement
+    // was never reported.
+    totp_required,           "security.totp_required",          false;
     oidc_enabled,            "oidc.enabled",                    false;
     cb_enabled,              "gateway.cb_enabled",              true;
     // Full-body capture for enterprise audit. Defaults ON: the
@@ -616,7 +620,10 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
         }
 
         // Boolean settings
-        "setup.initialized" | "auth.allow_registration" | "security.rate_limit_fail_closed" => {
+        "setup.initialized"
+        | "auth.allow_registration"
+        | "security.rate_limit_fail_closed"
+        | "security.totp_required" => {
             value
                 .as_bool()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;

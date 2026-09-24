@@ -1,10 +1,10 @@
 //! Gateway proxy module: shared state, identity, and the AI surface
-//! route handlers (`generate` for the three generation endpoints,
-//! `models` for the listing). Splits across files for readability —
+//! route handlers (`generate` for the four generation surfaces,
+//! `responses_ws` for the Responses API over a WebSocket, `models` for
+//! the listings). Splits across files for readability —
 //! see the leaf modules' docs for what lives where.
 
 use arc_swap::ArcSwap;
-use axum::Json;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::cache::ResponseCache;
 use crate::content_filter::ContentFilter;
 use crate::cost_tracker::CostTracker;
+use crate::error::GatewayError;
 use crate::health::HealthTracker;
 use crate::model_mapping::ModelMapper;
 use crate::pii_redactor::PiiRedactor;
@@ -21,10 +22,10 @@ use crate::router::ModelRouter;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::SurfaceConstraints;
 use think_watch_common::limits::weight;
-use tw_types::GatewayError;
 
 mod accounting;
 mod body_capture;
+mod early_cancel;
 pub(crate) mod generate;
 mod headers;
 mod identity;
@@ -32,6 +33,7 @@ mod log_ctx;
 mod models;
 mod pipeline;
 mod protocol_relearn;
+mod responses_ws;
 mod routing;
 pub mod shaper;
 pub mod transport;
@@ -40,11 +42,15 @@ pub mod transport;
 pub(crate) use accounting::post_flight_account;
 pub(crate) use body_capture::prepare_body_capture;
 pub(crate) use log_ctx::emit_gateway_log_with_extra;
-pub(crate) use routing::{SelectionRecord, finalize_health};
+pub(crate) use routing::{SelectionRecord, fails as upstream_failed, finalize_health};
 
 // pub re-exports — `server::app` mounts these as route handlers.
-pub use generate::{proxy_anthropic_messages, proxy_chat_completion, proxy_responses};
-pub use models::list_models_handler;
+pub use early_cancel::{EarlyCancel, EarlyCancelSlot};
+pub use generate::{
+    proxy_anthropic_messages, proxy_chat_completion, proxy_gemini, proxy_responses,
+};
+pub use models::{list_gemini_models_handler, list_models_handler};
+pub use responses_ws::proxy_responses_ws;
 
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
@@ -136,12 +142,39 @@ pub(super) fn gateway_error_status(err: &GatewayError) -> i64 {
 
 // ---------- Error adapter ----------
 
-/// Newtype wrapper so we can implement `IntoResponse` for `GatewayError`.
-pub struct GatewayErrorResponse(GatewayError);
+/// A `GatewayError` on its way to the caller, in the caller's format.
+///
+/// The body is the one the caller's own SDK knows how to read: an
+/// Anthropic client gets `{"type":"error","error":{…}}`, a Gemini client
+/// `{"error":{"code","status",…}}`, Chat and Responses clients OpenAI's
+/// `{"error":{"message","type",…}}`. Before, every surface got the Chat
+/// shape, and an Anthropic SDK reported a gateway refusal as an
+/// unparseable response.
+pub struct GatewayErrorResponse {
+    error: GatewayError,
+    client: tw_dialect::ir::Dialect,
+}
 
 impl From<GatewayError> for GatewayErrorResponse {
-    fn from(err: GatewayError) -> Self {
-        Self(err)
+    /// In Chat's format until the surface says otherwise
+    /// ([`GatewayErrorResponse::in_dialect`]).
+    fn from(error: GatewayError) -> Self {
+        Self {
+            error,
+            client: tw_dialect::ir::Dialect::Chat,
+        }
+    }
+}
+
+impl GatewayErrorResponse {
+    /// Answer in `client`'s format.
+    pub(crate) fn in_dialect(mut self, client: tw_dialect::ir::Dialect) -> Self {
+        self.client = client;
+        self
+    }
+
+    pub(crate) fn error(&self) -> &GatewayError {
+        &self.error
     }
 }
 
@@ -149,36 +182,24 @@ impl IntoResponse for GatewayErrorResponse {
     fn into_response(self) -> axum::response::Response {
         use axum::http::{HeaderValue, StatusCode, header};
 
-        let status =
-            StatusCode::from_u16(self.0.status_code() as u16).unwrap_or(StatusCode::BAD_GATEWAY);
-        let error_type = match &self.0 {
-            GatewayError::ProviderError(_) => "provider_error",
-            GatewayError::ProviderHttpError { .. } => "provider_http_error",
-            GatewayError::ProviderTimeout(_) => "provider_timeout",
-            GatewayError::ProviderInvalidResponse(_) => "provider_invalid_response",
-            GatewayError::TransformError(_) => "transform_error",
-            GatewayError::NetworkError(_) => "network_error",
-            GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited(_) => {
-                "rate_limited"
-            }
-            GatewayError::UpstreamAuthError => "auth_error",
-            GatewayError::PolicyBlocked(_) => "policy_blocked",
-        };
-
-        let retry_after = self.0.retry_after_secs();
-        let body = serde_json::json!({
-            "error": {
-                "message": self.0.to_string(),
-                "type": error_type,
-            }
-        });
-
-        let mut response = (status, Json(body)).into_response();
+        let status = StatusCode::from_u16(self.error.status_code() as u16)
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let body =
+            tw_dialect::convert::error_body(self.client, status.as_u16(), &self.error.to_string());
+        let mut response = (
+            status,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            body,
+        )
+            .into_response();
         // Echo the upstream's Retry-After (or our local default) so
         // well-behaved clients back off the right amount instead of
         // burning quota with tight 3× retries that all hit the same
         // open window.
-        if let Some(secs) = retry_after
+        if let Some(secs) = self.error.retry_after_secs()
             && let Ok(v) = HeaderValue::from_str(&secs.to_string())
         {
             response.headers_mut().insert(header::RETRY_AFTER, v);
@@ -354,9 +375,34 @@ mod helper_tests {
         );
     }
 
+    /// Each client gets the error in the shape its SDK reads.
+    #[tokio::test]
+    async fn the_error_body_is_in_the_callers_format() {
+        use tw_dialect::ir::Dialect;
+        async fn body(d: Dialect) -> serde_json::Value {
+            let resp = GatewayErrorResponse::from(GatewayError::LocalRateLimited("rule".into()))
+                .in_dialect(d)
+                .into_response();
+            assert_eq!(resp.status().as_u16(), 429);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        let chat = body(Dialect::Chat).await;
+        assert_eq!(chat["error"]["type"], "rate_limit_error");
+        assert_eq!(chat["error"]["message"], "Rate limited: rule");
+        let anthropic = body(Dialect::Anthropic).await;
+        assert_eq!(anthropic["type"], "error");
+        assert_eq!(anthropic["error"]["type"], "rate_limit_error");
+        let gemini = body(Dialect::Gemini).await;
+        assert_eq!(gemini["error"]["code"], 429);
+        assert_eq!(gemini["error"]["status"], "RESOURCE_EXHAUSTED");
+    }
+
     #[test]
     fn retry_after_parser_handles_delta_seconds_and_garbage() {
-        use tw_types::parse_retry_after_seconds;
+        use crate::error::parse_retry_after_seconds;
         assert_eq!(parse_retry_after_seconds("30"), Some(30));
         assert_eq!(parse_retry_after_seconds("  45  "), Some(45));
         assert_eq!(parse_retry_after_seconds("0"), Some(0));

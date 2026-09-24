@@ -25,9 +25,27 @@
 //! [`REVIEW_PLAN_2026-04-20.md`] (gitignored). Not every handler has
 //! a service yet; the migration is iterative.
 
+pub mod analytics_repository;
+pub mod api_key_repository;
 pub mod auth_lockout;
+pub mod auth_repository;
+pub mod limits_repository;
+pub mod log_forwarder_repository;
+pub mod mcp_credential_repository;
+pub mod mcp_server_repository;
+pub mod mcp_store_repository;
+pub mod mcp_tool_repository;
+pub mod model_repository;
+pub mod observability_repository;
+pub mod pricing_repository;
+pub mod provider_repository;
 pub mod rbac_service;
 pub mod refresh_blacklist;
+pub mod role_repository;
 pub mod session_service;
+pub mod settings_repository;
+pub mod setup_repository;
+pub mod team_repository;
 pub mod totp_service;
 pub mod user_repository;
+pub mod webhook_outbox_repository;

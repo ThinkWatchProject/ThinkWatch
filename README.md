@@ -50,7 +50,7 @@ ThinkWatch solves all of this with a single deployment.
 ## Key Features
 
 ### AI API Gateway
-- **Multi-format API proxy** — natively serves OpenAI Chat Completions (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), and OpenAI Responses (`/v1/responses`) APIs on a single port; works as a drop-in replacement for Cursor, Continue, Cline, Claude Code, and the OpenAI/Anthropic SDKs
+- **Multi-format API proxy** — natively serves OpenAI Chat Completions (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), OpenAI Responses (`/v1/responses`, over HTTP or a WebSocket) and Gemini (`/v1beta/models/{model}:generateContent`) APIs on a single port; works as a drop-in replacement for Cursor, Continue, Cline, Claude Code, Codex, and the OpenAI/Anthropic/Gemini SDKs
 - **Multi-provider routing** — OpenAI, Anthropic, Google Gemini, Azure OpenAI, AWS Bedrock, or any OpenAI-compatible endpoint
 - **Automatic format conversion** — Anthropic Messages API, Google Gemini, Azure OpenAI, AWS Bedrock Converse API, and more, all behind a unified interface
 - **Provider auto-loading** — active providers are loaded from the database at startup and registered in the model router; default model prefixes (`gpt-`/`o1-`/`o3-`/`o4-` for OpenAI, `claude-` for Anthropic, `gemini-` for Google) route automatically; Azure and Bedrock require explicit model registration
@@ -323,7 +323,7 @@ Full documentation: **[thinkwat.ch/docs](https://thinkwat.ch/docs)**
 
 | Port | Server | Exposure | Purpose |
 |------|--------|----------|---------|
-| `3000` | Gateway | **Public** — expose to AI clients | `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, `/mcp`, `/metrics`†, `/health/*` |
+| `3000` | Gateway | **Public** — expose to AI clients | `/v1/chat/completions`, `/v1/messages`, `/v1/responses` (HTTP and WebSocket), `/v1beta/models/{model}:generateContent`, `/v1/models`, `/mcp`, `/metrics`†, `/health/*` |
 | `3001` | Console | **Internal** — behind VPN/firewall | `/api/*` management endpoints, Web UI |
 
 † `/metrics` is only mounted when `METRICS_BEARER_TOKEN` is set. Without the env var the route returns 404 and the Prometheus recorder isn't installed.

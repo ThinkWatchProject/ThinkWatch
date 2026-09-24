@@ -43,6 +43,7 @@ use think_watch_common::limits::{
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::analytics_repository;
 
 /// Hard ceiling on how far into the future a temporary override can
 /// extend. Anything longer is almost certainly a "permanent" change
@@ -110,11 +111,7 @@ async fn resolve_subject_id(pool: &sqlx::PgPool, kind: &str, id: Uuid) -> Result
     if kind != "api_key" {
         return Ok(id);
     }
-    let lineage_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT lineage_id FROM api_keys WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+    let lineage_id = analytics_repository::api_key_lineage_id(pool, id).await?;
     lineage_id.ok_or_else(|| AppError::NotFound(format!("api_key {id} not found")))
 }
 

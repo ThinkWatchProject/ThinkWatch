@@ -25,8 +25,9 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
+use think_watch_gateway::call_ctx::CallCtx;
+use think_watch_gateway::error::GatewayError;
 use think_watch_gateway::protocol::UpstreamProtocol;
-use tw_types::{CallCtx, GatewayError};
 use uuid::Uuid;
 
 use crate::gateway_adapters::{ProviderMaterials, build_upstream};
@@ -185,13 +186,8 @@ fn is_inconclusive(err: &GatewayError) -> bool {
         | GatewayError::UpstreamRateLimited { .. }
         | GatewayError::NetworkError(_)
         | GatewayError::ProviderTimeout(_) => true,
-        GatewayError::ProviderHttpError { status, .. } => *status == 401 || *status == 403,
-        GatewayError::ProviderError(message) => {
-            let m = message.to_ascii_lowercase();
-            m.contains(" returned 401")
-                || m.contains(" returned 403")
-                || m.contains(" returned 429")
-        }
+        // An upstream incident is about the moment too.
+        GatewayError::ProviderHttpError { status, .. } => *status >= 500 || *status == 408,
         _ => false,
     }
 }
@@ -355,20 +351,22 @@ mod tests {
         assert!(is_inconclusive(&GatewayError::NetworkError(
             "connection reset".into()
         )));
-        assert!(is_inconclusive(&GatewayError::ProviderError(
-            "OpenAI returned 401 Unauthorized: bad key".into()
-        )));
+        assert!(is_inconclusive(&GatewayError::ProviderHttpError {
+            status: 503,
+            message: "OpenAI: overloaded".into(),
+        }));
     }
 
     #[test]
     fn a_refusal_of_the_model_itself_is_conclusive() {
         // This is the case worth recording: the upstream answered, and
         // its answer was "not this model".
-        assert!(!is_inconclusive(&GatewayError::ProviderError(
-            "OpenAI returned 400 Bad Request: The model 'openai.gpt-5.5' does not support \
-             the '/v1/chat/completions' API"
-                .into()
-        )));
+        assert!(!is_inconclusive(&GatewayError::ProviderHttpError {
+            status: 400,
+            message: "OpenAI: The model 'openai.gpt-5.5' does not support \
+                      the '/v1/chat/completions' API"
+                .into(),
+        }));
         assert!(!is_inconclusive(&GatewayError::ProviderHttpError {
             status: 404,
             message: "no such model".into(),

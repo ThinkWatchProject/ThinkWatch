@@ -1,4 +1,5 @@
-//! `GET /v1/models` — list available models in OpenAI-compatible format.
+//! `GET /v1/models` and Gemini's `GET /v1beta/models` — the models this
+//! gateway routes, in the shape each kind of client reads.
 
 use axum::Json;
 use axum::extract::State;
@@ -27,4 +28,26 @@ pub async fn list_models_handler(State(state): State<GatewayState>) -> Json<serd
         "object": "list",
         "data": model_objects,
     }))
+}
+
+/// GET /v1beta/models
+///
+/// The same list, in Gemini's shape: `name` carries the `models/` prefix
+/// its clients strip.
+pub async fn list_gemini_models_handler(
+    State(state): State<GatewayState>,
+) -> Json<serde_json::Value> {
+    let models: Vec<serde_json::Value> = state
+        .router
+        .load()
+        .list_models()
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "name": format!("models/{id}"),
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "models": models }))
 }

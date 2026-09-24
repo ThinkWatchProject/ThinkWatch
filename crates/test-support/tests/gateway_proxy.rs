@@ -570,3 +570,54 @@ async fn revoked_api_key_no_longer_authorises() {
         .unwrap();
     resp.assert_status(401);
 }
+
+/// A conversation that went through a format conversion earlier carries
+/// reasoning signatures the gateway wrote (`tw1.`). When a later turn of
+/// it is forwarded as sent to Anthropic, those signatures go too, and
+/// Anthropic refuses the whole request over them. They are taken out; a
+/// signature Anthropic issued itself stays.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_passthrough_request_leaves_the_gateways_own_signatures_behind() {
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::anthropic_messages_ok("claude-carried").await;
+    let api_key =
+        seed_provider_and_key(&app, &upstream.uri(), "anthropic", "claude-carried", None).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    let resp = gw
+        .post(
+            "/v1/messages",
+            json!({
+                "model": "claude-carried",
+                "max_tokens": 16,
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "converted", "signature": "tw1.abc"},
+                        {"type": "text", "text": "answer one"}
+                    ]},
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "native", "signature": "EqQBCkgIBx"},
+                        {"type": "text", "text": "answer two"}
+                    ]},
+                    {"role": "user", "content": "second"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+
+    let sent = upstream.received_requests().await;
+    assert_eq!(sent.len(), 1);
+    let text = String::from_utf8_lossy(&sent[0].body).into_owned();
+    assert!(
+        !text.contains("tw1."),
+        "a carried signature was forwarded: {text}"
+    );
+    let sent: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(sent["messages"][1]["content"][0]["text"], "answer one");
+    assert_eq!(sent["messages"][2]["content"][0]["signature"], "EqQBCkgIBx");
+}

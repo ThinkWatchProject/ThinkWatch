@@ -205,7 +205,7 @@ impl StreamInspector {
     /// Look at the next client-format bytes. Every hit is recorded; one
     /// that stops the response comes back with how many of these bytes
     /// may still go out — what the model said before the call.
-    pub fn check(&mut self, bytes: &[u8]) -> Option<(tw_types::GatewayError, usize)> {
+    pub fn check(&mut self, bytes: &[u8]) -> Option<(crate::error::GatewayError, usize)> {
         for v in self.wall.feed(bytes) {
             let blocked = self.inspection.blocks(&v);
             record(&self.audit, &self.caller, &self.provider, &v, blocked);
@@ -218,8 +218,8 @@ impl StreamInspector {
 }
 
 /// What the caller is told when a response is cut.
-pub fn refusal(v: &Verdict) -> tw_types::GatewayError {
-    tw_types::GatewayError::PolicyBlocked(format!(
+pub fn refusal(v: &Verdict) -> crate::error::GatewayError {
+    crate::error::GatewayError::PolicyBlocked(format!(
         "the upstream returned a {} call that matched rule \"{}\"",
         v.tool, v.name
     ))
@@ -264,7 +264,7 @@ pub fn check_whole(
     caller: &Caller,
     provider: &str,
     body: &[u8],
-) -> Option<tw_types::GatewayError> {
+) -> Option<crate::error::GatewayError> {
     for v in inspection.whole(body) {
         let blocked = inspection.blocks(&v);
         record(audit, caller, provider, &v, blocked);

@@ -8,20 +8,21 @@ use think_watch_common::models::Provider;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::provider_repository as repo;
 
 // ---------------------------------------------------------------------------
 // At-rest encryption for provider secrets stored in `providers.config_json`.
 //
 // Every header `value` and the `aws_secret_access_key` field are wrapped as
 // `{"$enc": "<hex-envelope>"}` before INSERT/UPDATE. The hex payload is the
-// AES-256-GCM versioned envelope produced by `tw_crypto::crypto`
+// AES-256-GCM versioned envelope produced by `think_watch_common::crypto`
 // (same envelope MCP OAuth client_secrets use). Hex (not base64) keeps us
 // dependency-aligned with the OIDC / TOTP storage path which already encodes
 // the envelope as hex.
 //
 // ---------------------------------------------------------------------------
 
-use tw_crypto::json_secret::JsonSecret;
+use think_watch_common::json_secret::JsonSecret;
 
 /// Encrypt `plaintext` and return a value suitable for storing inside
 /// `providers.config_json`. Thin wrapper over [`JsonSecret::encrypt`]
@@ -40,9 +41,7 @@ pub(crate) fn decrypt_secret_from_json(
     value: &serde_json::Value,
     encryption_key: &str,
 ) -> Result<String, AppError> {
-    // `?` on both halves so `From<SecretError>` applies — a bare tail
-    // expression would hand back core's error type instead of ours.
-    Ok(JsonSecret::from_json(value)?.decrypt(encryption_key)?)
+    JsonSecret::from_json(value)?.decrypt(encryption_key)
 }
 
 /// Take a header list as supplied in a request and return a JSON array
@@ -221,11 +220,7 @@ pub async fn list_providers(
     auth_user
         .require_global_permission(&state.db, "providers:read")
         .await?;
-    let mut providers = sqlx::query_as::<_, Provider>(
-        "SELECT * FROM providers WHERE deleted_at IS NULL ORDER BY created_at DESC",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let mut providers = repo::list_live(&state.db).await?;
     providers.iter_mut().for_each(redact_provider_secrets);
 
     Ok(Json(providers))
@@ -267,16 +262,14 @@ pub async fn create_provider(
     encrypt_aws_secret_in_config(&mut config, &state.config.encryption_key)?;
     config["headers"] = encrypt_headers_for_storage(&req.headers, &state.config.encryption_key)?;
 
-    let mut provider = sqlx::query_as::<_, Provider>(
-        r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json)
-           VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+    let mut provider = repo::insert(
+        &state.db,
+        &req.name,
+        &req.display_name,
+        &req.provider_type,
+        &req.base_url,
+        &config,
     )
-    .bind(&req.name)
-    .bind(&req.display_name)
-    .bind(&req.provider_type)
-    .bind(&req.base_url)
-    .bind(&config)
-    .fetch_one(&state.db)
     .await?;
 
     state.audit.log(
@@ -326,13 +319,9 @@ pub async fn update_provider(
     auth_user
         .require_global_permission(&state.db, "providers:update")
         .await?;
-    let existing = sqlx::query_as::<_, Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("Provider not found".into()))?;
+    let existing = repo::find_live(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("Provider not found".into()))?;
 
     let display_name = req
         .display_name
@@ -364,16 +353,7 @@ pub async fn update_provider(
         config
     };
 
-    let mut updated = sqlx::query_as::<_, Provider>(
-        r#"UPDATE providers SET display_name = $2, base_url = $3, config_json = $4
-           WHERE id = $1 RETURNING *"#,
-    )
-    .bind(id)
-    .bind(display_name)
-    .bind(base_url)
-    .bind(&config_json)
-    .fetch_one(&state.db)
-    .await?;
+    let mut updated = repo::update(&state.db, id, display_name, base_url, &config_json).await?;
 
     // A new base URL or credential can mean an entirely different
     // upstream, so every dialect we learned for this provider's routes
@@ -381,14 +361,7 @@ pub async fn update_provider(
     // them and let the runtime relearn on first use — stale beats
     // wrong, and the relearn is invisible to the caller.
     if req.base_url.is_some() || req.headers.is_some() {
-        let cleared: u64 = sqlx::query(
-            "UPDATE model_routes SET upstream_protocol = NULL
-             WHERE provider_id = $1 AND upstream_protocol IS NOT NULL",
-        )
-        .bind(id)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
+        let cleared = repo::clear_learned_protocols(&state.db, id).await?;
         // Same reasoning for the probe cache: "this upstream refuses
         // model X" described the old endpoint. Dropping it is also the
         // path back for an operator who fixed access upstream and
@@ -440,13 +413,9 @@ pub async fn get_provider(
     auth_user
         .require_global_permission(&state.db, "providers:read")
         .await?;
-    let mut provider = sqlx::query_as::<_, Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("Provider not found".into()))?;
+    let mut provider = repo::find_live(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("Provider not found".into()))?;
     redact_provider_secrets(&mut provider);
 
     Ok(Json(provider))
@@ -474,27 +443,8 @@ pub async fn delete_provider(
     auth_user
         .require_global_permission(&state.db, "providers:delete")
         .await?;
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
-
-    // Soft-delete + drop routes in one transaction. The `model_routes`
-    // FK is `ON DELETE CASCADE`, but since we only flip `deleted_at`
-    // the cascade doesn't fire — hence the explicit DELETE below.
-    // Orphaned routes would otherwise show up in the Models page with
-    // a raw provider UUID and no way to edit them.
-    let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE providers SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    let routes_deleted = sqlx::query("DELETE FROM model_routes WHERE provider_id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    tx.commit().await?;
+    let name = repo::name_of(&state.db, id).await?;
+    let routes_deleted = repo::soft_delete(&state.db, id).await?;
 
     state.audit.log(
         auth_user
@@ -571,13 +521,9 @@ pub async fn test_provider(
 
     let mut req = req;
     if let Some(provider_id) = req.provider_id {
-        let provider = sqlx::query_as::<_, Provider>(
-            "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(provider_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound("Provider not found".into()))?;
+        let provider = repo::find_live(&state.db, provider_id)
+            .await?
+            .ok_or(AppError::NotFound("Provider not found".into()))?;
         let stored = decrypt_headers_from_config(
             &provider.config_json,
             &state.config.encryption_key,
@@ -611,12 +557,12 @@ pub(crate) async fn run_provider_test(
 
     // Provider-specific probe URL. We always hit a cheap, read-only
     // endpoint that requires auth so a wrong key is detected too.
-    let url = match req.provider_type.as_str() {
-        "anthropic" => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
-        "google" => format!("{}/v1beta/models", req.base_url.trim_end_matches('/')),
-        // openai / azure / custom — all OpenAI-compatible /v1/models
-        _ => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
+    let path = match req.provider_type.as_str() {
+        "google" => "/v1beta/models",
+        // anthropic / openai / azure / custom — all answer /v1/models
+        _ => "/v1/models",
     };
+    let url = tw_dialect::url::upstream_url(&req.base_url, path, None);
 
     // `client` is now passed in from `test_provider` — uses the
     // shared http_client so this endpoint inherits the central

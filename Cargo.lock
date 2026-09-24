@@ -3060,7 +3060,6 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4035,7 +4034,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "think-watch-auth"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4060,14 +4059,14 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
- "tw-crypto",
  "uuid",
 ]
 
 [[package]]
 name = "think-watch-common"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "aws-credential-types",
@@ -4083,7 +4082,6 @@ dependencies = [
  "http 1.4.0",
  "metrics",
  "rand 0.10.0",
- "regex",
  "reqwest 0.13.2",
  "rust_decimal",
  "serde",
@@ -4095,7 +4093,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tw-breaker",
- "tw-crypto",
  "tw-guard",
  "url",
  "utoipa",
@@ -4104,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-gateway"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4112,6 +4109,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-eventstream",
+ "aws-smithy-types",
  "axum",
  "bytes",
  "chrono",
@@ -4138,9 +4136,6 @@ dependencies = [
  "tw-breaker",
  "tw-dialect",
  "tw-guard",
- "tw-types",
- "tw-upstream",
- "tw-wire",
  "utoipa",
  "uuid",
  "xxhash-rust",
@@ -4148,7 +4143,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-mcp-gateway"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4171,14 +4166,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tw-breaker",
- "tw-crypto",
  "uuid",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "think-watch-server"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4217,10 +4211,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tw-breaker",
- "tw-crypto",
  "tw-dialect",
  "tw-guard",
- "tw-types",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -4230,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-test-support"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4245,6 +4237,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.13.0",
+ "jsonwebtoken",
  "once_cell",
  "p256",
  "rand 0.10.0",
@@ -4266,7 +4259,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "tw-crypto",
  "url",
  "uuid",
  "wiremock",
@@ -4679,29 +4671,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+version = "0.43.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.43.0#caec54c6e515ab7991dfb583923e9c156308ccaa"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "tw-crypto"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "hex",
- "rand 0.10.0",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "tw-dialect"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+version = "0.43.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.43.0#caec54c6e515ab7991dfb583923e9c156308ccaa"
 dependencies = [
  "serde",
  "serde_json",
@@ -4709,8 +4688,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+version = "0.43.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.43.0#caec54c6e515ab7991dfb583923e9c156308ccaa"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -4719,47 +4698,6 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.18",
  "tw-dialect",
- "tw-secret",
-]
-
-[[package]]
-name = "tw-secret"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "tw-types"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "tw-upstream"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
-dependencies = [
- "aws-credential-types",
- "aws-sigv4",
- "aws-smithy-eventstream",
- "bytes",
- "http 1.4.0",
- "reqwest 0.13.2",
- "serde_json",
-]
-
-[[package]]
-name = "tw-wire"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
-dependencies = [
- "serde_json",
 ]
 
 [[package]]

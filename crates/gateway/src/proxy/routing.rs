@@ -6,10 +6,11 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use super::GatewayState;
+use crate::call_ctx::CallCtx;
+use crate::error::GatewayError;
 use crate::health::{CircuitBreakerConfig, RouteHealth};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
-use tw_types::{CallCtx, GatewayError};
 
 /// What the affinity layer can pin a session to.
 #[derive(Debug, Clone, Copy)]
@@ -269,35 +270,47 @@ pub(crate) async fn finalize_health(state: &GatewayState, sel: &SelectionRecord,
         .await;
 }
 
-/// Returns true if the error is retryable.
+/// Did the upstream fail, as opposed to refusing this request?
 ///
-/// Retry-eligible:
-///   * NetworkError, ProviderTimeout — request didn't complete; the
-///     same upstream might succeed on a second try.
-///   * ProviderError, UpstreamRateLimited — historical catch-alls.
-///   * ProviderHttpError 5xx — upstream had a transient issue.
+/// Only a failure moves on to the next route and counts against the
+/// route's circuit breaker:
+///   * 5xx and 408 — the upstream had a problem answering.
+///   * 429 — this upstream's quota; another route has its own.
+///   * Timeouts, broken connections, an unreadable body — no usable
+///     answer arrived.
+///   * 401/403 (`UpstreamAuthError`) — the gateway's credential for this
+///     route was refused. Nothing the caller did; another route carries
+///     another credential.
 ///
-/// Not retryable:
-///   * ProviderHttpError 4xx (except 429) — the request itself is
-///     poison; same upstream will reject again.
-///   * ProviderInvalidResponse — upstream succeeded but the body is
-///     unparseable; retrying the same upstream is pointless. Failover
-///     to a different provider is still triggered upstream of this.
-fn is_retryable(err: &GatewayError) -> bool {
-    match err {
-        GatewayError::NetworkError(_)
-        | GatewayError::ProviderError(_)
-        | GatewayError::ProviderTimeout(_)
-        | GatewayError::UpstreamRateLimited { .. } => true,
-        GatewayError::ProviderHttpError { status, .. } => *status >= 500 || *status == 408,
-        _ => false,
+/// Any other 4xx is the upstream refusing the request itself — a bad
+/// parameter, a context too long. Every route would refuse it the same
+/// way, so it goes straight back to the caller, and the route is not
+/// held responsible: one caller's malformed requests would otherwise
+/// walk every route and trip every breaker for the model. The desktop
+/// gateway draws the same line.
+///
+/// Refusals by the gateway itself (`TransformError`, `PolicyBlocked`,
+/// local limits) are not the upstream's doing either.
+pub(crate) fn is_upstream_failure(err: &GatewayError) -> bool {
+    fails(err.error_tag(), err.status_code())
+}
+
+/// [`is_upstream_failure`] from what a stream records of its error: the
+/// error's tag and status (see `StreamOutcome::UpstreamError`). A stream
+/// broken off in transit is tagged `transport` and counts as a failure.
+pub(crate) fn fails(error_tag: &str, status: i64) -> bool {
+    match error_tag {
+        "ProviderHttpError" => status >= 500 || status == 408,
+        "TransformError" | "PolicyBlocked" | "LocalRateLimited" => false,
+        _ => true,
     }
 }
 
 /// Non-streaming selection + failover. All routes are peers (no
 /// priority tier in v2): `pick_with_strategy` picks one healthy
-/// candidate, the proxy calls it, and on retryable error tries
-/// another candidate from the remaining set until exhausted.
+/// candidate, the proxy calls it, and when the upstream fails (see
+/// [`is_upstream_failure`]) tries another candidate from the remaining
+/// set until exhausted.
 pub(super) async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
     outbound: &super::generate::Outbound,
@@ -329,7 +342,10 @@ pub(super) async fn select_route_with_failover<'a>(
             match super::generate::send(entry, outbound, call_ctx, &ctx.state.db, upstream_model)
                 .await
             {
-                Ok((resp, wire)) => super::generate::read_whole(resp, &wire, caller_model).await,
+                Ok((resp, wire)) => {
+                    super::generate::read_whole(resp, &wire, caller_model, outbound.input_estimate)
+                        .await
+                }
                 Err(e) => Err(e),
             };
 
@@ -359,7 +375,7 @@ pub(super) async fn select_route_with_failover<'a>(
                     },
                 ));
             }
-            Err(e) if is_retryable(&e) => {
+            Err(e) if is_upstream_failure(&e) => {
                 tracing::warn!(
                     provider = %entry.provider_name,
                     provider_id = %entry.provider_id,
@@ -382,13 +398,18 @@ pub(super) async fn select_route_with_failover<'a>(
                 continue;
             }
             Err(e) => {
-                // Non-retryable — record health then bail. Sibling
-                // providers will reject the same poison request.
-                let _ = ctx
-                    .state
-                    .health
-                    .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
-                    .await;
+                // The request itself was refused. Sibling routes would
+                // refuse it the same way, so it goes back to the caller.
+                // An upstream that answered with a refusal is working:
+                // it counts as a success for the route, as it does on
+                // the desktop.
+                if matches!(e, GatewayError::ProviderHttpError { .. }) {
+                    let _ = ctx
+                        .state
+                        .health
+                        .record(entry.route_id, attempt_latency_ms, false, ctx.breaker)
+                        .await;
+                }
                 return Err(e);
             }
         }

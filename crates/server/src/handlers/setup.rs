@@ -9,6 +9,7 @@ use think_watch_common::validation::{normalize_email, validate_email, validate_p
 use utoipa::ToSchema;
 
 use crate::app::AppState;
+use crate::services::setup_repository::{self as repo, FirstAdmin};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SetupStatusResponse {
@@ -123,14 +124,9 @@ pub async fn setup_initialize(
     let mut tx = state.db.begin().await?;
 
     // Acquire an advisory lock (key = 1 for setup). This blocks concurrent setup attempts.
-    sqlx::query("SELECT pg_advisory_xact_lock(1)")
-        .execute(&mut *tx)
-        .await?;
+    repo::lock_setup(&mut tx).await?;
 
-    let db_initialized: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT value FROM system_settings WHERE key = 'setup.initialized'")
-            .fetch_optional(&mut *tx)
-            .await?;
+    let db_initialized = repo::initialized_flag(&mut tx).await?;
 
     if db_initialized
         .as_ref()
@@ -147,57 +143,24 @@ pub async fn setup_initialize(
     let admin_email = normalize_email(&req.admin.email);
     validate_email(&admin_email)?;
 
-    // 1. Create super_admin user
+    // Create the super_admin user with the first API key, and mark
+    // setup done.
     let password_hash = password::hash_password(&req.admin.password)?;
-    let admin_user = sqlx::query_as::<_, (uuid::Uuid, String)>(
-        r#"INSERT INTO users (email, display_name, password_hash)
-           VALUES ($1, $2, $3) RETURNING id, email"#,
-    )
-    .bind(&admin_email)
-    .bind(&req.admin.display_name)
-    .bind(&password_hash)
-    .fetch_one(&mut *tx)
-    .await?;
-    // sqlx unique-violations now map to `AppError::Conflict` globally
-    // via `From<sqlx::Error>`. No per-site string-sniffing needed.
-
-    // Assign super_admin role.
-    sqlx::query(
-        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'super_admin'"#,
-    )
-    .bind(admin_user.0)
-    .execute(&mut *tx)
-    .await?;
-
-    // 2. Generate first API key for admin user
     let generated = api_key::generate_api_key();
-    sqlx::query(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces)
-           VALUES ($1, $2, $3, $4, $5)"#,
-    )
-    .bind(&generated.prefix)
-    .bind(&generated.hash)
-    .bind("Default Admin Key")
-    .bind(admin_user.0)
-    .bind(super::api_keys::ALLOWED_SURFACES)
-    .execute(&mut *tx)
-    .await?;
-
-    // 3. Mark as initialized
     let site_name = req.site_name.as_deref().unwrap_or("ThinkWatch");
-    sqlx::query(
-        "UPDATE system_settings SET value = $1, updated_at = now() WHERE key = 'setup.initialized'",
+    let admin_user = repo::create_first_admin(
+        &mut tx,
+        &FirstAdmin {
+            email: &admin_email,
+            display_name: &req.admin.display_name,
+            password_hash: &password_hash,
+            key_prefix: &generated.prefix,
+            key_hash: &generated.hash,
+            key_name: "Default Admin Key",
+            key_surfaces: super::api_keys::ALLOWED_SURFACES,
+            site_name,
+        },
     )
-    .bind(serde_json::json!(true))
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "UPDATE system_settings SET value = $1, updated_at = now() WHERE key = 'setup.site_name'",
-    )
-    .bind(serde_json::json!(site_name))
-    .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;

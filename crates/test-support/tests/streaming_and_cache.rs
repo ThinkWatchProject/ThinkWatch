@@ -184,7 +184,10 @@ async fn streaming_cache_hit_replays_assembled_sse() {
     // the response body. Wait briefly for it to land before firing the
     // second request. 50 * 50ms = 2.5s upper bound; in practice the
     // callback runs in single-digit ms after the [DONE] token.
-    for _ in 0..50 {
+    //
+    // A probe that lands before the write is itself a MISS and calls the
+    // upstream; those are counted, so only the HIT has to skip it.
+    for misses in 0..50 {
         let probe = gw.post("/v1/chat/completions", body.clone()).await.unwrap();
         if probe.headers.get("x-cache").and_then(|v| v.to_str().ok()) == Some("HIT") {
             // Found a HIT — assert the rest of the contract on this response.
@@ -197,14 +200,15 @@ async fn streaming_cache_hit_replays_assembled_sse() {
                 txt.contains("\"object\":\"chat.completion\""),
                 "HIT replay should carry the assembled chat completion: {txt}"
             );
-            // Upstream got exactly ONE call across all client requests.
+            // One upstream call per MISS, none for the HIT.
             // (The MockProvider wraps the SSE upstream — count its hits.)
             let received = upstream.received_requests().await;
             assert_eq!(
                 received.len(),
-                1,
-                "streaming cache hit must skip upstream — got {} upstream calls",
-                received.len()
+                1 + misses,
+                "streaming cache hit must skip upstream — got {} upstream calls, expected {}",
+                received.len(),
+                1 + misses
             );
             return;
         }
@@ -223,11 +227,12 @@ async fn streaming_client_disconnect_emits_cancelled_gateway_log() {
     //
     // Recipe: an upstream that holds the response open (long initial
     // delay) so the gateway's SSE body stream is parked waiting on
-    // the first chunk when the client times out.
+    // the first chunk when the client goes.
     let app = TestApp::spawn_with_clickhouse().await;
     let user = fixtures::create_random_user(&app.db).await.unwrap();
 
-    // Slow upstream — 5s delay before any chunk; we'll drop after ~150ms.
+    // An upstream that does not answer within the test: the stream is
+    // still waiting on it when the client leaves.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -237,7 +242,7 @@ async fn streaming_client_disconnect_emits_cancelled_gateway_log() {
                     b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
                     "text/event-stream",
                 )
-                .set_delay(std::time::Duration::from_secs(5)),
+                .set_delay(std::time::Duration::from_secs(60)),
         )
         .mount(&server)
         .await;
@@ -266,15 +271,17 @@ async fn streaming_client_disconnect_emits_cancelled_gateway_log() {
     .await
     .unwrap();
 
-    // Raw reqwest with an aggressive total-request timeout — when it
-    // fires, the in-flight request future is dropped, which closes
-    // the gateway-side TCP connection. The gateway's SSE body future
-    // is dropped, which drops `done_tx`, which the spawned on_done
-    // task picks up as ClientCancelled.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(150))
-        .build()
-        .unwrap();
+    // The client leaves once the stream has started: the response
+    // headers are back (the gateway sends them before calling the
+    // upstream), and dropping the response closes the connection. The
+    // gateway's SSE body future is dropped, which drops `done_tx`, which
+    // the spawned tail picks up as ClientCancelled.
+    //
+    // This used to be a 150 ms client timeout, which raced the handler:
+    // when auth, limits and routing took longer than that under load, the
+    // client left before the stream existed, hyper dropped the handler,
+    // and no row was ever written.
+    let client = reqwest::Client::new();
     let url = format!("{}/v1/chat/completions", app.gateway_url);
     let body = serde_json::json!({
         "model": "cancel-stream",
@@ -282,15 +289,15 @@ async fn streaming_client_disconnect_emits_cancelled_gateway_log() {
         "stream": true,
         "temperature": 0.7
     });
-    let result = client
+    let resp = client
         .post(&url)
         .bearer_auth(&key.plaintext)
         .json(&body)
         .send()
-        .await;
-    // Either we time out (expected) or we got a partial response that
-    // we now drop. Both end with the gateway seeing a disconnect.
-    drop(result);
+        .await
+        .expect("the stream starts");
+    assert_eq!(resp.status(), 200);
+    drop(resp);
 
     // Wait for the cancelled row to land in ClickHouse. The audit
     // pipeline batches with a small flush interval; give it a few

@@ -15,6 +15,7 @@ use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::settings_repository;
 
 use super::retention::{MAX_RETENTION_DAYS, apply_blob_lifecycle, apply_clickhouse_ttls};
 
@@ -270,17 +271,10 @@ pub async fn update_settings(
     // DB-level validation for settings that reference other entities
     if let Some(role_val) = req.settings.get("auth.default_role") {
         let role_name = role_val.as_str().unwrap_or("");
-        if !role_name.is_empty() {
-            let exists: Option<(String,)> =
-                sqlx::query_as("SELECT name FROM rbac_roles WHERE name = $1")
-                    .bind(role_name)
-                    .fetch_optional(&state.db)
-                    .await?;
-            if exists.is_none() {
-                return Err(AppError::BadRequest(format!(
-                    "Role '{role_name}' does not exist"
-                )));
-            }
+        if !role_name.is_empty() && !settings_repository::role_exists(&state.db, role_name).await? {
+            return Err(AppError::BadRequest(format!(
+                "Role '{role_name}' does not exist"
+            )));
         }
     }
 
@@ -492,7 +486,9 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        "auth.allow_registration" | "security.rate_limit_fail_closed" => {
+        "auth.allow_registration"
+        | "security.rate_limit_fail_closed"
+        | "security.totp_required" => {
             if !value.is_boolean() {
                 return Err(AppError::BadRequest(format!("{key} must be a boolean")));
             }
@@ -629,13 +625,6 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "Rule {i}: match_type must be 'contains' or 'regex'"
                     )));
                 }
-                if match_type == "regex"
-                    && think_watch_common::regex_util::compile_bounded(pattern).is_err()
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "Rule {i}: invalid or oversized regex pattern"
-                    )));
-                }
                 let action = item.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
                     AppError::BadRequest(format!("Rule {i}: missing 'action' field"))
                 })?;
@@ -644,10 +633,26 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "Rule {i}: action must be 'block', 'warn', or 'log'"
                     )));
                 }
-                if item.get("name").and_then(|v| v.as_str()).is_none() {
+                let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
                     return Err(AppError::BadRequest(format!(
                         "Rule {i}: missing 'name' field"
                     )));
+                };
+                // The same compile the gateway runs: an empty pattern, a bad
+                // or oversized regex is refused here rather than skipped there.
+                use tw_guard::content::{Action, Match, Rule, RuleInput};
+                if let (Some(matching), Some(action)) =
+                    (Match::from_slug(match_type), Action::from_slug(action))
+                    && let Err(e) = Rule::new(RuleInput {
+                        id: name,
+                        name,
+                        custom: true,
+                        pattern,
+                        matching,
+                        action,
+                    })
+                {
+                    return Err(AppError::BadRequest(format!("Rule {i}: {}", e.detail)));
                 }
             }
         }

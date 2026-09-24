@@ -1,26 +1,12 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
-
-#[derive(Debug, Serialize, FromRow, utoipa::ToSchema)]
-pub struct McpToolRow {
-    #[schema(value_type = String, format = Uuid)]
-    pub id: uuid::Uuid,
-    #[schema(value_type = String, format = Uuid)]
-    pub server_id: uuid::Uuid,
-    pub server_name: String,
-    pub name: String,
-    pub namespaced_name: String,
-    pub description: Option<String>,
-    #[schema(value_type = Object)]
-    pub input_schema: Option<serde_json::Value>,
-}
+use crate::services::mcp_tool_repository::{self as repo, CatalogQuery, McpToolRow};
 
 #[derive(Debug, Deserialize)]
 pub struct McpToolListQuery {
@@ -83,97 +69,16 @@ pub async fn list_tools(
         None
     };
 
-    // Pre-namespace the per-user catalog the same way mcp_tools does
-    // (`<prefix>__<tool>`) and union the two sources. `mcp_user_tools`
-    // doesn't carry an `id` column — synthesize a stable v5-style UUID
-    // from `(server_id, user_id, tool_name)` so the frontend's keying
-    // (`tool.id`) keeps working without a schema change.
-    let total: i64 = sqlx::query_scalar(
-        r#"WITH catalog AS (
-              SELECT t.id,
-                     t.server_id,
-                     s.name AS server_name,
-                     s.namespace_prefix,
-                     t.tool_name,
-                     t.description
-                FROM mcp_tools t
-                JOIN mcp_servers s ON s.id = t.server_id
-                WHERE t.is_active = true
-              UNION ALL
-              SELECT gen_random_uuid() AS id,
-                     u.mcp_server_id AS server_id,
-                     s.name AS server_name,
-                     s.namespace_prefix,
-                     u.tool_name,
-                     u.description
-                FROM mcp_user_tools u
-                JOIN mcp_servers s ON s.id = u.mcp_server_id
-                WHERE $6::uuid IS NOT NULL AND u.user_id = $6::uuid
-            )
-           SELECT COUNT(*) FROM catalog
-            WHERE ($3::uuid IS NULL OR server_id = $3)
-              AND ($1 = ''
-                   OR tool_name ILIKE $2
-                   OR (namespace_prefix || '__' || tool_name) ILIKE $2
-                   OR COALESCE(description, '') ILIKE $2)"#,
-    )
-    .bind(search)
-    .bind(&search_pattern)
-    .bind(query.server_id)
-    .bind(page_size)
-    .bind(offset)
-    .bind(user_filter)
-    .fetch_one(&state.db)
-    .await?;
-
-    let items = sqlx::query_as::<_, McpToolRow>(
-        r#"WITH catalog AS (
-              SELECT t.id,
-                     t.server_id,
-                     s.name AS server_name,
-                     s.namespace_prefix,
-                     t.tool_name,
-                     t.description,
-                     t.input_schema
-                FROM mcp_tools t
-                JOIN mcp_servers s ON s.id = t.server_id
-                WHERE t.is_active = true
-              UNION ALL
-              SELECT gen_random_uuid() AS id,
-                     u.mcp_server_id AS server_id,
-                     s.name AS server_name,
-                     s.namespace_prefix,
-                     u.tool_name,
-                     u.description,
-                     u.input_schema
-                FROM mcp_user_tools u
-                JOIN mcp_servers s ON s.id = u.mcp_server_id
-                WHERE $6::uuid IS NOT NULL AND u.user_id = $6::uuid
-            )
-           SELECT id,
-                  server_id,
-                  server_name,
-                  tool_name AS name,
-                  namespace_prefix || '__' || tool_name AS namespaced_name,
-                  description,
-                  input_schema
-             FROM catalog
-            WHERE ($3::uuid IS NULL OR server_id = $3)
-              AND ($1 = ''
-                   OR tool_name ILIKE $2
-                   OR (namespace_prefix || '__' || tool_name) ILIKE $2
-                   OR COALESCE(description, '') ILIKE $2)
-            ORDER BY server_name, tool_name
-            LIMIT $4 OFFSET $5"#,
-    )
-    .bind(search)
-    .bind(&search_pattern)
-    .bind(query.server_id)
-    .bind(page_size)
-    .bind(offset)
-    .bind(user_filter)
-    .fetch_all(&state.db)
-    .await?;
+    let catalog = CatalogQuery {
+        search,
+        search_pattern: &search_pattern,
+        server_id: query.server_id,
+        page_size,
+        offset,
+        user_id: user_filter,
+    };
+    let total = repo::count_catalog(&state.db, &catalog).await?;
+    let items = repo::list_catalog(&state.db, &catalog).await?;
 
     Ok(Json(McpToolListResponse { items, total }))
 }
@@ -203,13 +108,9 @@ pub async fn discover_tools(
     axum::extract::Path(server_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("mcp_servers:update")?;
-    let server = sqlx::query_as::<_, think_watch_common::models::McpServer>(
-        "SELECT * FROM mcp_servers WHERE id = $1",
-    )
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("MCP Server not found".into()))?;
+    let server = crate::services::mcp_server_repository::find(&state.db, server_id)
+        .await?
+        .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
     use crate::mcp_runtime::SystemDiscoveryOutcome;
     let http = state.http_client.load();

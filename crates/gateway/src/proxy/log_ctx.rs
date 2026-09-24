@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 use super::GatewayRequestIdentity;
 use super::body_capture::BodyCapture;
 use super::gateway_error_status;
-use tw_types::GatewayError;
+use crate::error::GatewayError;
 
 /// Per-handler error-logging context.
 ///

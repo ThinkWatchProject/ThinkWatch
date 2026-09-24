@@ -20,7 +20,7 @@ is `main`, so **the default is not the one you want**. If you've already
 opened against `main`, no need to close anything: click *Edit* next to
 the PR title and change the base to `dev`. A bot will remind you.
 
-Two exceptions, both maintainer-only: the release PR (`dev` → `main`,
+Two exceptions, both maintainer-only: the release PR (`release/X.Y.Z` → `main`,
 titled `release: vX.Y.Z`) and a `hotfix/*` branch when `dev` has
 diverged too far to carry a fix cleanly. The full branch contract is in
 [docs/operations/release.md](docs/operations/release.md).

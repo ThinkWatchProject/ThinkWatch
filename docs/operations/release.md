@@ -21,7 +21,8 @@ nobody (including future-you) has to remember the order.
 Day-to-day target is `dev`. The GitHub UI defaults new PRs to
 `main` (the default branch) — when opening a feature PR by hand
 or via `gh pr create`, **set `--base dev` explicitly**. The only
-PR that goes to `main` is the release PR (see step 5 below).
+PR that goes to `main` is the release PR, from a `release/X.Y.Z`
+branch (see steps 4 and 5 below).
 
 Renovate is pinned to `dev` via `baseBranches` in `renovate.json`
 — it never opens a PR against `main`. Other automation should
@@ -90,22 +91,27 @@ Edit by hand or `sed`-replace `<previous>` → `<new>`:
 
 `make precommit` once more after editing — catches obvious typos.
 
-### 4. Commit on `dev`
+### 4. Commit on a `release/X.Y.Z` branch
 
 ```bash
-git add CHANGELOG.md Cargo.toml web/package.json deploy/helm/think-watch/Chart.yaml
+git checkout -b release/X.Y.Z origin/dev
+git add CHANGELOG.md Cargo.toml Cargo.lock web/package.json deploy/helm/think-watch/Chart.yaml
 git commit -m "chore(release): tag X.Y.Z"
-git push origin dev
+git push -u origin release/X.Y.Z
 ```
 
 The `chore(release):` prefix is what `cliff.toml` skips when
 rendering the NEXT release's CHANGELOG. Don't deviate from that
 prefix.
 
-### 5. PR `dev` → `main`
+The release PR's head must not be `dev` itself. The repository
+deletes a PR's head branch when the PR merges, and `dev` is not
+protected, so merging a `dev` → `main` PR deletes `dev`.
+
+### 5. PR `release/X.Y.Z` → `main`
 
 ```bash
-gh pr create --base main --head dev \
+gh pr create --base main --head release/X.Y.Z \
   --title "release: vX.Y.Z" \
   --body "See CHANGELOG.md [X.Y.Z] for the full notes."
 ```
@@ -115,28 +121,58 @@ The PR description is internal — the user-facing release notes
 live in CHANGELOG.md and are extracted into the GitHub Release
 body automatically. Don't duplicate them.
 
+CI does not run the `#[ignore]` integration tests. Run them locally
+against the release commit before merging (`make test-it`).
+
 ### 6. Squash-merge the PR
 
 The branch protection requires linear history, so merge mode is
 forced to squash or rebase. Squash is the default and the right
 choice — every `dev`-side commit collapses into a single
-`release: vX.Y.Z` commit on `main`. Use the PR title as the
-commit subject; the auto-generated commit list goes in the body.
+`release: vX.Y.Z` commit on `main`.
+
+```bash
+gh pr merge <N> --squash --match-head-commit <release head SHA> \
+  --subject "release: vX.Y.Z" --body "See CHANGELOG.md [X.Y.Z]."
+```
 
 ### 7. Tag the merge commit on `main`
 
 ```bash
-git checkout main && git pull
-git tag -a vX.Y.Z -m "ThinkWatch X.Y.Z
-
-$(awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
+git fetch origin
+{ echo "ThinkWatch X.Y.Z"; echo;
+  awk '/^## \[X\.Y\.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md; } > /tmp/tag-msg
+git tag -a vX.Y.Z --cleanup=verbatim -F /tmp/tag-msg origin/main
 git push origin vX.Y.Z
 ```
+
+`--cleanup=verbatim` matters. By default git strips every line that
+starts with `#` from a tag message as a comment, which removes each
+`### Added` / `### Fixed` heading. The v1.0.2 tag lost all of them.
 
 The annotated tag's message gets attached to the GitHub Release
 under the auto-extracted CHANGELOG body. Keeping the tag message
 in sync with the CHANGELOG section is convention; the workflow
 doesn't enforce it.
+
+### 7a. Merge `main` back into `dev`
+
+The squash commit is not in `dev`'s history. Merge it back so `main`
+stays an ancestor of `dev` and the next release PR lists only new
+work:
+
+```bash
+git checkout -B sync origin/dev
+git merge --no-ff origin/main -m "Merge main (vX.Y.Z) into dev"
+git push origin HEAD:refs/heads/dev
+```
+
+A conflict here means `dev` moved on after the release branch was cut.
+The release commit only touched the files in step 4, so for any other
+file `dev`'s side is the right one (`git checkout --ours`). Check that
+`git diff origin/dev HEAD` is exactly the release commit's change
+before pushing. It is a plain push, not a force push, so a concurrent
+push to `dev` makes it fail rather than get lost.
 
 ### 8. Watch the release workflow
 
@@ -258,16 +294,19 @@ Caveats:
 
 ```bash
 # Release X.Y.Z, full flow (~15 min including ~13 min workflow):
+git checkout -b release/X.Y.Z origin/dev
 make precommit                            # green
 make changelog VERSION=X.Y.Z WRITE=1
 $EDITOR CHANGELOG.md                      # review + polish
 $EDITOR Cargo.toml web/package.json deploy/helm/think-watch/Chart.yaml
-make precommit                            # green again
-git commit -am "chore(release): tag X.Y.Z" && git push origin dev
-gh pr create --base main --head dev --title "release: vX.Y.Z"
-gh pr merge --squash --auto                # waits for CI
-git checkout main && git pull
-git tag -a vX.Y.Z -m "ThinkWatch X.Y.Z" && git push origin vX.Y.Z
+make precommit && make test-it            # green again
+git commit -am "chore(release): tag X.Y.Z" && git push -u origin release/X.Y.Z
+gh pr create --base main --head release/X.Y.Z --title "release: vX.Y.Z"
+gh pr merge <N> --squash --match-head-commit <SHA>   # once CI is green
+git fetch origin                          # tag message → /tmp/tag-msg (step 7)
+git tag -a vX.Y.Z --cleanup=verbatim -F /tmp/tag-msg origin/main
+git push origin vX.Y.Z
+# merge main back into dev (step 7a)
 gh run watch                              # ~13 min
 ```
 

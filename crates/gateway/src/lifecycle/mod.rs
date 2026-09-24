@@ -20,6 +20,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use crate::error::GatewayError;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, header};
 use futures::StreamExt;
@@ -29,10 +30,9 @@ use think_watch_common::lifecycle::Surface;
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord};
 use think_watch_common::limits::{BudgetCap, RateLimitRule};
 use tw_dialect::ir::Dialect;
-use tw_types::GatewayError;
 
 use crate::pii_redactor::PiiRedactor;
-use crate::proxy::generate::{Wire, tokens};
+use crate::proxy::generate::{Wire, priced, tokens};
 use crate::proxy::shaper::{StreamShaper, rewrite_model};
 use crate::proxy::{
     GatewayRequestIdentity, GatewayState, SelectionRecord, emit_gateway_log_with_extra,
@@ -52,8 +52,11 @@ pub struct Completed {
     /// still in place — this is also the form the cache stores, so a
     /// later caller can paint in their own values.
     pub body: Vec<u8>,
-    /// Read off the upstream's bytes, whatever format they were in.
-    pub usage: Option<tw_wire::Usage>,
+    /// Read off the upstream's bytes, whatever format they were in, or
+    /// estimated when they carried none.
+    pub usage: tw_dialect::usage::Usage,
+    /// `usage` is at least partly an estimate (see `crate::usage_estimate`).
+    pub usage_estimated: bool,
 }
 
 /// Either the upstream's answer or a short-circuit from a pipeline stage.
@@ -65,8 +68,11 @@ pub enum ChatCompletionOutcome {
 /// What a finished stream leaves behind for the hooks. Computed once in
 /// the pump's tail so the hooks read it rather than each recomputing.
 pub struct ChatStreamCaptured {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
+    /// What the upstream reported, completed by an estimate where it
+    /// reported nothing or was cut short. Zero when no answer came.
+    pub usage: tw_dialect::usage::Usage,
+    /// `usage` is at least partly an estimate.
+    pub usage_estimated: bool,
     pub cost_usd: Decimal,
     /// The stream assembled into a whole answer, for the cache and the
     /// audit row. `None` when it produced nothing or could not be
@@ -94,6 +100,9 @@ pub(crate) struct ChatRequestSnapshot {
     /// request must not be cached.
     pub cache_fingerprint: Option<Vec<u8>>,
     pub request_started_at: std::time::Instant,
+    /// The request's input in tokens, estimated — billed only when the
+    /// upstream reports no usage.
+    pub input_estimate: u64,
 }
 
 /// Pre-flight rule + cap lists, reused by the post-flight debit.
@@ -154,6 +163,7 @@ pub(crate) fn build_chat_pump(
     open: OpenUpstream,
     mut shaper: StreamShaper,
     client: Dialect,
+    client_sse: bool,
     deps_state: GatewayState,
     request: &ChatRequestSnapshot,
     provider: &str,
@@ -162,7 +172,7 @@ pub(crate) fn build_chat_pump(
     Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
 ) {
     struct Readers {
-        sniffer: Option<tw_wire::Sniffer>,
+        sniffer: Option<tw_dialect::usage::Sniffer>,
         collector: Option<tw_dialect::convert::Collector>,
     }
     let readers = Arc::new(Mutex::new(Readers {
@@ -186,6 +196,16 @@ pub(crate) fn build_chat_pump(
         provider.to_string(),
     );
 
+    // The model's length cap, measured on the same bytes.
+    let mut length = crate::output_guardrails::StreamLimit::new(
+        &deps_state
+            .router
+            .load()
+            .config_for(&request.mapped_model)
+            .output_guardrails,
+        client,
+    );
+
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
 
@@ -195,7 +215,7 @@ pub(crate) fn build_chat_pump(
                 // Headers already went out as 200, so the refusal is said
                 // in the stream — and logged with the upstream's own status,
                 // so a throttled upstream stays 429 on the audit row.
-                let mut out = shaper.process(&error_frame(client, &e.to_string()));
+                let mut out = shaper.process(&error_frame(client, e.status_code(), &e.to_string()));
                 out.extend(shaper.finish());
                 yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(out));
                 if let Some(tx) = done_tx.take() {
@@ -209,7 +229,7 @@ pub(crate) fn build_chat_pump(
             }
         };
         if let Ok(mut r) = readers.lock() {
-            r.sniffer = Some(tw_wire::Sniffer::new());
+            r.sniffer = Some(tw_dialect::usage::Sniffer::new());
             r.collector = Some(wire.collect.collector());
         }
         let mut convert = wire.convert.as_ref().map(|s| s.stream());
@@ -217,7 +237,7 @@ pub(crate) fn build_chat_pump(
         // the door, so the sniffer, the collector and the converter all
         // read the same SSE they read from every other upstream.
         let mut unframe = (wire.dialect == Dialect::Bedrock)
-            .then(tw_upstream::eventstream::Transcoder::new);
+            .then(crate::bedrock::eventstream::Transcoder::new);
         let mut source = upstream.bytes_stream();
         while let Some(item) = source.next().await {
             let item = match item {
@@ -240,7 +260,14 @@ pub(crate) fn build_chat_pump(
                         Some(c) => c.process(&chunk),
                         None => chunk.to_vec(),
                     };
-                    if let Some((err, safe)) = inspector.as_mut().and_then(|i| i.check(&client_bytes)) {
+                    // A tool call the inspection stops, or the answer going
+                    // over the model's length cap: what came before still goes
+                    // out, then the refusal.
+                    let stop = inspector
+                        .as_mut()
+                        .and_then(|i| i.check(&client_bytes))
+                        .or_else(|| length.as_mut().and_then(|l| l.check(&client_bytes)));
+                    if let Some((err, safe)) = stop {
                         yield Ok(Bytes::from(cut(&mut shaper, convert.as_mut(), client, &client_bytes[..safe], &err)));
                         if let Some(tx) = done_tx.take() {
                             let _ = tx.send(StreamOutcome::UpstreamError {
@@ -262,7 +289,7 @@ pub(crate) fn build_chat_pump(
                     tracing::warn!("{message}");
                     let tail = match convert.as_mut() {
                         Some(c) => c.fail(&message),
-                        None => error_frame(client, &message),
+                        None => error_frame(client, 502, &message),
                     };
                     let mut out = shaper.process(&tail);
                     out.extend(shaper.finish());
@@ -281,7 +308,11 @@ pub(crate) fn build_chat_pump(
         let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
         // The converter's last bytes can complete a tool call (the block's
         // stop), so they are inspected too.
-        if let Some((err, safe)) = inspector.as_mut().and_then(|i| i.check(&tail)) {
+        let stop = inspector
+            .as_mut()
+            .and_then(|i| i.check(&tail))
+            .or_else(|| length.as_mut().and_then(|l| l.check(&tail)));
+        if let Some((err, safe)) = stop {
             yield Ok(Bytes::from(cut(&mut shaper, None, client, &tail[..safe], &err)));
             if let Some(tx) = done_tx.take() {
                 let _ = tx.send(StreamOutcome::UpstreamError {
@@ -302,18 +333,22 @@ pub(crate) fn build_chat_pump(
         }
     };
 
-    let mut response = axum::response::Response::new(Body::from_stream(body));
+    // A Gemini caller that did not ask for SSE reads one JSON array.
+    let (body, content_type) = if client_sse {
+        (Body::from_stream(body), "text/event-stream")
+    } else {
+        (Body::from_stream(as_json_array(body)), "application/json")
+    };
+    let mut response = axum::response::Response::new(body);
     let h = response.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream"),
-    );
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 
     let identity = request.identity.clone();
     let trace_id = request.trace_id.clone();
     let started_at = request.request_started_at;
     let mapped_model = request.mapped_model.clone();
+    let input_estimate = request.input_estimate;
 
     let tail = Box::pin(async move {
         let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
@@ -323,21 +358,41 @@ pub(crate) fn build_chat_pump(
         )
         .increment(1);
 
-        let (usage, assembled) = match readers_for_tail.lock() {
-            Ok(mut r) => (
-                r.sniffer.take().and_then(|s| s.finish()),
-                r.collector.take().and_then(|c| c.finish().ok()),
-            ),
-            Err(_) => (None, None),
+        // The sniffer exists once the upstream answered. Without an
+        // answer there is nothing to bill.
+        let (answered, reported, assembled) = match readers_for_tail.lock() {
+            Ok(mut r) => {
+                let sniffer = r.sniffer.take();
+                (
+                    sniffer.is_some(),
+                    sniffer.and_then(|s| s.finish()),
+                    r.collector.take().and_then(|c| c.finish().ok()),
+                )
+            }
+            Err(_) => (false, None, None),
         };
-        let (prompt_tokens, completion_tokens) = usage.as_ref().map(tokens).unwrap_or((0, 0));
+        // A stream that did not run to its end lost the upstream's final
+        // count with it: the caller left, or the upstream broke off.
+        let (usage, usage_estimated) = if answered {
+            crate::usage_estimate::complete(
+                reported,
+                outcome.is_natural(),
+                input_estimate,
+                assembled.as_deref(),
+            )
+        } else {
+            (tw_dialect::usage::Usage::default(), false)
+        };
+        if usage_estimated {
+            metrics::counter!("gateway_usage_estimated_total").increment(1);
+        }
         let cost_usd = deps_state
             .cost_tracker
-            .calculate_cost(&mapped_model, prompt_tokens, completion_tokens)
+            .calculate_cost(&mapped_model, &priced(&usage))
             .await;
         let captured = ChatStreamCaptured {
-            prompt_tokens,
-            completion_tokens,
+            usage,
+            usage_estimated,
             cost_usd,
             // A cache hit hands this back to a caller, so it carries the
             // caller's model name like everything else they receive.
@@ -358,8 +413,28 @@ pub(crate) fn build_chat_pump(
     (response, tail)
 }
 
-/// End a stream at a tool call the inspection stops: what came before it
-/// still goes out, then the refusal, in the caller's format.
+/// Reframe a client-format SSE stream as Gemini's JSON-array stream (see
+/// [`crate::proxy::shaper::JsonArrayFramer`]).
+fn as_json_array(
+    sse: impl futures::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static {
+    async_stream::stream! {
+        let mut framer = crate::proxy::shaper::JsonArrayFramer::default();
+        let mut sse = Box::pin(sse);
+        while let Some(Ok(chunk)) = sse.next().await {
+            let out = framer.process(&chunk);
+            if !out.is_empty() {
+                yield Ok(Bytes::from(out));
+            }
+        }
+        yield Ok(Bytes::from(framer.finish()));
+    }
+}
+
+/// End a stream at a tool call the inspection stops, or at the frame that
+/// takes the answer over its length cap: what came before it still goes
+/// out, then the refusal, in the caller's format. A Gemini caller reading
+/// a JSON array gets the refusal as the array's last element, then `]`.
 ///
 /// An incomplete tool call cannot be executed, so the client is left with
 /// nothing it can run.
@@ -368,29 +443,25 @@ fn cut(
     convert: Option<&mut tw_dialect::convert::StreamConverter>,
     client: Dialect,
     safe: &[u8],
-    err: &tw_types::GatewayError,
+    err: &crate::error::GatewayError,
 ) -> Vec<u8> {
     let message = err.to_string();
     let mut out = shaper.process(safe);
     let refusal = match convert {
         Some(c) => c.fail(&message),
-        None => error_frame(client, &message),
+        None => error_frame(client, err.status_code(), &message),
     };
     out.extend(shaper.process(&refusal));
     out.extend(shaper.finish());
     out
 }
 
-/// An error in the caller's format, for a stream that was forwarded
-/// untouched and so has no converter to write one.
-fn error_frame(client: Dialect, message: &str) -> Vec<u8> {
-    let body = tw_dialect::convert::error_body(client, 502, message);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    match client {
-        Dialect::Chat => tw_dialect::frame::data(&v),
-        _ => tw_dialect::frame::named("error", &v),
-    }
-    .into_bytes()
+/// A standalone error frame in the caller's format, for a stream that has
+/// no converter to write one (forwarded as sent, or never opened). `status`
+/// is what the error would have been as a response, and picks its class.
+fn error_frame(client: Dialect, status: i64, message: &str) -> Vec<u8> {
+    let status = u16::try_from(status).unwrap_or(502);
+    tw_dialect::convert::error_frame(client, status, message).into_bytes()
 }
 
 impl Surface for ChatCompletionSurface {
@@ -464,12 +535,18 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn record_outcome(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        // A client that leaves did nothing wrong to the upstream.
+        // A client that leaves did nothing wrong to the upstream, and
+        // neither did one that refused the request (see
+        // `routing::is_upstream_failure`).
         let success = match &invoked.view {
-            CapturedView::Streaming { outcome, .. } => matches!(
-                outcome,
-                StreamOutcome::Natural | StreamOutcome::ClientCancelled
-            ),
+            CapturedView::Streaming { outcome, .. } => match outcome {
+                StreamOutcome::Natural | StreamOutcome::ClientCancelled => true,
+                StreamOutcome::UpstreamError {
+                    error_type,
+                    status_code,
+                    ..
+                } => !crate::proxy::upstream_failed(error_type, *status_code),
+            },
             CapturedView::Buffered(ChatCompletionOutcome::Success(_)) => true,
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
         };
@@ -486,7 +563,7 @@ impl Surface for ChatCompletionSurface {
         // A stream reaches here only on a natural end — the stage gate
         // already filtered the rest — and its assembled form is exactly
         // what a whole answer would have stored.
-        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        let (prompt_tokens, completion_tokens) = tokens(&extract_usage(&invoked.view));
         let body = match &invoked.view {
             CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => Some(&c.body),
             CapturedView::Streaming { captured, .. } => captured.assembled.as_ref(),
@@ -503,15 +580,13 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn record_usage(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
         post_flight_account(
             deps.state.db.clone(),
             deps.state.redis.clone(),
             deps.state.dynamic_config.clone(),
             deps.state.weight_cache.clone(),
             deps.request.mapped_model.clone(),
-            prompt_tokens,
-            completion_tokens,
+            priced(&extract_usage(&invoked.view)),
             deps.preflight.request_rules.clone(),
             deps.preflight.budget_caps.clone(),
             deps.request.identity.user_id.clone(),
@@ -524,7 +599,8 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn emit_audit(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        let usage = extract_usage(&invoked.view);
+        let (prompt_tokens, completion_tokens) = tokens(&usage);
         let (response_body, cost, logged_status, error_detail) = match &invoked.view {
             CapturedView::Streaming { outcome, captured } => {
                 let (status, detail) = outcome.logged_status_and_detail();
@@ -539,7 +615,7 @@ impl Surface for ChatCompletionSurface {
                 let cost = deps
                     .state
                     .cost_tracker
-                    .calculate_cost(&deps.request.mapped_model, prompt_tokens, completion_tokens)
+                    .calculate_cost(&deps.request.mapped_model, &priced(&usage))
                     .await;
                 (Some(c.body.as_slice()), cost, 200_i64, None)
             }
@@ -579,23 +655,58 @@ impl Surface for ChatCompletionSurface {
             cost,
             deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
-            error_detail,
+            with_usage_detail(error_detail, &usage, usage_estimated(&invoked.view)),
             body_capture,
         );
     }
 }
 
-/// `(prompt, completion)` from a captured view — shared by
-/// `record_usage` and `emit_audit` so the budget and the audit row can
-/// never disagree.
-fn extract_usage_tokens(view: &CapturedView<ChatCompletionSurface>) -> (u32, u32) {
+/// The audit detail, with how the input splits over the prompt cache and
+/// whether the count is an estimate — `input_tokens` on the row is the
+/// whole input, and the cost depends on the split.
+fn with_usage_detail(
+    detail: Option<serde_json::Value>,
+    usage: &tw_dialect::usage::Usage,
+    estimated: bool,
+) -> Option<serde_json::Value> {
+    let mut extra = serde_json::Map::new();
+    if usage.cache_read > 0 {
+        extra.insert("cache_read_tokens".into(), usage.cache_read.into());
+    }
+    if usage.cache_write > 0 {
+        extra.insert("cache_write_tokens".into(), usage.cache_write.into());
+        if usage.cache_1h {
+            extra.insert("cache_write_1h".into(), true.into());
+        }
+    }
+    if estimated {
+        extra.insert("usage_estimated".into(), true.into());
+    }
+    if extra.is_empty() {
+        return detail;
+    }
+    if let Some(serde_json::Value::Object(d)) = detail {
+        extra.extend(d);
+    }
+    Some(serde_json::Value::Object(extra))
+}
+
+/// The usage a captured view bills — shared by `record_usage` and
+/// `emit_audit` so the budget and the audit row can never disagree.
+fn extract_usage(view: &CapturedView<ChatCompletionSurface>) -> tw_dialect::usage::Usage {
     match view {
-        CapturedView::Streaming { captured, .. } => {
-            (captured.prompt_tokens, captured.completion_tokens)
+        CapturedView::Streaming { captured, .. } => captured.usage,
+        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage,
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => {
+            tw_dialect::usage::Usage::default()
         }
-        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => {
-            c.usage.as_ref().map(tokens).unwrap_or((0, 0))
-        }
-        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => (0, 0),
+    }
+}
+
+fn usage_estimated(view: &CapturedView<ChatCompletionSurface>) -> bool {
+    match view {
+        CapturedView::Streaming { captured, .. } => captured.usage_estimated,
+        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage_estimated,
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
     }
 }

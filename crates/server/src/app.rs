@@ -301,8 +301,20 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             "/v1/messages",
             post(gateway_proxy::proxy_anthropic_messages),
         )
-        .route("/v1/responses", post(gateway_proxy::proxy_responses))
+        // GET is the Responses API over a WebSocket (an upgrade).
+        .route(
+            "/v1/responses",
+            post(gateway_proxy::proxy_responses).get(gateway_proxy::proxy_responses_ws),
+        )
         .route("/v1/models", get(gateway_proxy::list_models_handler))
+        // Gemini: `{model}:generateContent` / `:streamGenerateContent`.
+        // Its SDKs call v1beta; some clients call v1.
+        .route(
+            "/v1beta/models",
+            get(gateway_proxy::list_gemini_models_handler),
+        )
+        .route("/v1beta/models/{target}", post(gateway_proxy::proxy_gemini))
+        .route("/v1/models/{target}", post(gateway_proxy::proxy_gemini))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::api_key_auth::require_api_key("ai_gateway"),

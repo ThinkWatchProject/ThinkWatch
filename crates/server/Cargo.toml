@@ -12,13 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 tw-breaker = { workspace = true }
-tw-crypto = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
 tw-dialect = { workspace = true }
-tw-types = { workspace = true }
 tw-guard = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }

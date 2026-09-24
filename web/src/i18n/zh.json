@@ -9,7 +9,8 @@
       "rate_limited": "请求过于频繁，请稍后重试。",
       "conflict": "与已有记录冲突。",
       "service_unavailable": "服务暂时不可用，请稍后重试。",
-      "internal_error": "服务器内部错误，技术团队已收到通知。"
+      "internal_error": "服务器内部错误，技术团队已收到通知。",
+      "totp_enrollment_required": "需要先设置双因素认证才能使用此功能。"
     },
     "byStatus": {
       "401": "登录已失效，请重新登录。",
@@ -239,7 +240,11 @@
     "totpHint": "输入身份验证器中的 6 位数字代码，或使用恢复代码。",
     "totpVerify": "验证并启用",
     "totpCopyCodes": "复制代码",
-    "totpDownloadCodes": "下载 .txt"
+    "totpDownloadCodes": "下载 .txt",
+    "totpRequiredEnabledStatus": "双因素认证已启用。本平台要求启用，因此不可关闭。",
+    "totpEnrollmentTitle": "设置双因素认证",
+    "totpEnrollmentDescription": "本平台要求启用双因素认证，设置完成后即可使用控制台。",
+    "totpEnrollmentSignedInAs": "当前账号：{{email}}"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -442,7 +447,10 @@
       "upstreamModel": "上游模型",
       "health": "健康",
       "healthHint": "实时熔断器状态(基于滚动窗口错误率)。健康 = 正常路由,熔断 = 暂时排除,半开 = 探测中。",
-      "p50": "EWMA 延迟"
+      "p50": "EWMA 延迟",
+      "cacheRead": "缓存读 ×",
+      "cacheWrite": "缓存写 ×",
+      "cacheWrite1h": "1 小时缓存写 ×"
     },
     "status": {
       "all": "全部模型",
@@ -467,7 +475,10 @@
       "affinityMode": "会话黏性",
       "affinityTtlSecs": "黏性 TTL (秒)",
       "rpmCap": "RPM 上限",
-      "tpmCap": "TPM 上限"
+      "tpmCap": "TPM 上限",
+      "cacheReadWeight": "缓存读取权重",
+      "cacheWriteWeight": "缓存写入权重",
+      "cacheWrite1hWeight": "1 小时缓存写入权重"
     },
     "useGlobalDefault": "使用全局默认",
     "unlimited": "不限制",
@@ -519,7 +530,8 @@
     "errors": {
       "weightMustBePositive": "权重必须为正数。",
       "affinityTtlRange": "黏性 TTL 必须在 0 到 86400 秒之间。",
-      "capMustBePositive": "RPM/TPM 上限必须是正整数(留空表示不限制)。"
+      "capMustBePositive": "RPM/TPM 上限必须是正整数(留空表示不限制)。",
+      "cacheWeightNotNegative": "缓存权重不能为负数。"
     },
     "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
     "batchImportWarning": "导入后路由立即在 /v1/models 生效。只勾选你确实想暴露的模型。",
@@ -548,7 +560,9 @@
       "created": "模型已添加。",
       "updated": "模型已更新。",
       "deleted": "模型已删除。"
-    }
+    },
+    "cacheWeightHint": "命中或写入上游提示缓存的输入，按输入基准价计。留空则按输入权重推算：读取 0.1 倍，写入 1.25 倍，1 小时写入 2 倍。",
+    "derivedWeight": "{{value}}（推算）"
   },
   "teams": {
     "title": "团队",
@@ -1395,13 +1409,13 @@
       "presetsTitle": "内置规则预设",
       "presetsDesc": "点击预设可将其规则追加到当前列表，已有规则保留。追加后可随时编辑每条规则。",
       "preset": {
-        "basic": {
-          "name": "基础防御",
-          "description": "拦截最常见的越狱和指令覆盖模式。推荐起步配置。"
+        "injection": {
+          "name": "指令覆盖",
+          "description": "拦截最常见的越狱和指令覆盖说法。推荐起步配置。"
         },
-        "strict": {
-          "name": "严格防御",
-          "description": "在基础防御之上加角色操控、Prompt 提取和 Base64 走私检测。"
+        "persona": {
+          "name": "角色操控与提示词提取",
+          "description": "角色操控、系统提示词提取和 Base64 走私。多数规则只告警、不拦截。"
         },
         "chinese": {
           "name": "中文场景",
@@ -1754,7 +1768,9 @@
     "supportedEndpoints": "支持的端点",
     "openaiEndpoint": "OpenAI 兼容：/v1/chat/completions",
     "anthropicEndpoint": "Anthropic Messages：/v1/messages",
+    "geminiEndpoint": "Gemini：/v1beta/models/{model}:generateContent 与 :streamGenerateContent（密钥放在 x-goog-api-key 或 ?key=）",
     "responsesEndpoint": "OpenAI Responses（新版）：/v1/responses",
+    "responsesWsEndpoint": "OpenAI Responses（WebSocket）：/v1/responses（每轮发一个 response.create 帧）",
     "modelsEndpoint": "模型列表：/v1/models",
     "claudeDesktop": "Claude Desktop",
     "claudeDesktopDesc": "配置 Claude Desktop 通过 ThinkWatch 使用 MCP 工具。",

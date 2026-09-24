@@ -68,12 +68,15 @@ pub async fn test_content_filter(
     let matches = filter
         .check_text_all(&req.text)
         .into_iter()
-        .map(|m| ContentFilterTestMatch {
-            name: m.name,
-            pattern: m.pattern,
-            match_type: m.match_type.to_string(),
-            action: m.action.to_string(),
-            matched_snippet: m.matched_snippet,
+        .filter_map(|m| {
+            let rule = filter.rule(&m)?;
+            Some(ContentFilterTestMatch {
+                name: m.name,
+                pattern: rule.pattern.clone(),
+                match_type: rule.matching.slug().to_string(),
+                action: m.action.slug().to_string(),
+                matched_snippet: m.snippet,
+            })
         })
         .collect();
     Ok(Json(ContentFilterTestResponse { matches }))
@@ -86,7 +89,7 @@ pub struct ContentFilterPreset {
 }
 
 /// GET /api/admin/settings/content-filter/presets — return built-in rule groups
-/// (basic / strict / chinese). UI labels are localized on the frontend.
+/// (injection / persona / chinese). UI labels are localized on the frontend.
 #[utoipa::path(
     get,
     path = "/api/admin/settings/content-filter/presets",
@@ -107,7 +110,7 @@ pub async fn list_content_filter_presets(
     let groups = think_watch_gateway::content_filter::presets()
         .into_iter()
         .map(|g| ContentFilterPreset {
-            id: g.id.to_string(),
+            id: g.id,
             rules: g.rules,
         })
         .collect();

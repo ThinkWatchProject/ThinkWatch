@@ -17,13 +17,22 @@ import { RoutingModeSection } from '../routing/RoutingModeSection';
 import { TrafficBar } from '../routing/TrafficBar';
 import { CostPreview } from './CostPreview';
 import {
+  CACHE_WEIGHTS,
+  derivedCacheWeight,
   modelStatus,
+  type CacheWeight,
   type ModelRow,
   type PlatformPricing,
   type RouteHealthEntry,
   type RouteRow,
   type RoutingStrategy,
 } from './types';
+
+const CACHE_COL_LABEL: Record<CacheWeight, string> = {
+  cache_read_weight: 'models.col.cacheRead',
+  cache_write_weight: 'models.col.cacheWrite',
+  cache_write_1h_weight: 'models.col.cacheWrite1h',
+};
 
 /// Right-side drawer with one model's basics (weights, cost preview,
 /// edit/delete actions) and routes list (per-route health,
@@ -146,6 +155,19 @@ export function ModelDetailSheet({
                         <div className="text-muted-foreground">{t('models.col.outputWeight')}</div>
                         <div className="font-mono tabular-nums">{model.output_weight}</div>
                       </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      {CACHE_WEIGHTS.map((k) => (
+                        <div key={k}>
+                          <div className="text-muted-foreground">{t(CACHE_COL_LABEL[k])}</div>
+                          <div className="font-mono tabular-nums">
+                            {model[k] ??
+                              t('models.derivedWeight', {
+                                value: derivedCacheWeight(model.input_weight, k),
+                              })}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                     <CostPreview
                       weight={model.input_weight}

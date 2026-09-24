@@ -13,6 +13,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::handlers::clickhouse_util::{ch_available, ch_client};
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::observability_repository as repo;
 
 use super::scope::resolve_dashboard_user_filter;
 use super::top_users::{TopActiveUsersResponse, fetch_top_active_users};
@@ -128,14 +129,7 @@ async fn ai_breaker_states(
     state: &AppState,
 ) -> std::collections::HashMap<String, tw_breaker::State> {
     use tw_breaker::State;
-    let rows: Vec<(uuid::Uuid, String)> = match sqlx::query_as(
-        "SELECT mr.id, p.name FROM model_routes mr \
-           JOIN providers p ON p.id = mr.provider_id \
-          WHERE p.is_active = true AND p.deleted_at IS NULL",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
+    let rows = match repo::active_provider_routes(&state.db).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("dashboard: route list for breaker states failed: {e}");
@@ -175,20 +169,11 @@ pub(super) async fn build_live_snapshot(
     // Errors propagate so the dashboard surfaces a real failure instead of
     // pretending data is empty when the DB is down.
     //
-    let providers_fut = sqlx::query_as::<_, (String,)>(
-        "SELECT name FROM providers WHERE is_active = true AND deleted_at IS NULL",
-    )
-    .fetch_all(&state.db);
-    let mcp_servers_fut =
-        sqlx::query_as::<_, (String, String)>("SELECT name, status FROM mcp_servers")
-            .fetch_all(&state.db);
+    let providers_fut = repo::active_provider_names(&state.db);
+    let mcp_servers_fut = repo::mcp_server_statuses(&state.db);
     // Highest per-minute RPM limit across all enabled rules — used as
     // a reference line on the request-rate sparkline.
-    let rpm_limit_fut = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(max_count) FROM rate_limit_rules \
-         WHERE metric = 'requests' AND window_secs = 60 AND enabled = true",
-    )
-    .fetch_one(&state.db);
+    let rpm_limit_fut = repo::max_enabled_rpm_limit(&state.db);
 
     let (configured_providers, configured_mcp_servers, max_rpm_raw) =
         tokio::try_join!(providers_fut, mcp_servers_fut, rpm_limit_fut)

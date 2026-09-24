@@ -1,0 +1,13 @@
+# Integration tests (crates/test-support) each boot the whole server
+# against real Postgres, Redis and ClickHouse; see the `integration` job
+# in .github/workflows/ci.yml.
+
+[profile.ci]
+# Report every failure, not just the first.
+fail-fast = false
+# A runner has 4 vCPUs. The harness gives each running test its own
+# Redis logical DB (1 + slot), so this must stay at 15 or below.
+test-threads = 4
+# A hung test fails after 3 minutes instead of holding the runner until
+# the job timeout.
+slow-timeout = { period = "60s", terminate-after = 3 }

@@ -14,6 +14,11 @@ export interface ModelRow {
   /// `platform_pricing.input_price_per_token × input_weight × tokens`.
   input_weight: string;
   output_weight: string;
+  /// Prompt-cache weights as stored; null ⇒ derived from `input_weight`
+  /// (see `effectiveCacheWeight`).
+  cache_read_weight: string | null;
+  cache_write_weight: string | null;
+  cache_write_1h_weight: string | null;
   route_count: number;
   enabled_route_count: number;
   /// Model-level kill switch. FALSE ⇒ all routes are skipped at the
@@ -146,6 +151,10 @@ export interface ModelFormState {
   display_name: string;
   input_weight: string;
   output_weight: string;
+  /// Empty string = derive from the input weight (stored as NULL).
+  cache_read_weight: string;
+  cache_write_weight: string;
+  cache_write_1h_weight: string;
   /// Empty string = inherit global default. Form serializes that
   /// to `null` on submit so the backend stores the override as NULL.
   routing_strategy: '' | RoutingStrategy;
@@ -174,6 +183,9 @@ export const emptyModelForm: ModelFormState = {
   display_name: '',
   input_weight: '1.0',
   output_weight: '1.0',
+  cache_read_weight: '',
+  cache_write_weight: '',
+  cache_write_1h_weight: '',
   routing_strategy: '',
   affinity_mode: '',
   affinity_ttl_secs: '',
@@ -189,3 +201,27 @@ export const emptyRouteForm: RouteFormState = {
   rpm_cap: '',
   tpm_cap: '',
 };
+
+export type CacheWeight = 'cache_read_weight' | 'cache_write_weight' | 'cache_write_1h_weight';
+
+export const CACHE_WEIGHTS: CacheWeight[] = [
+  'cache_read_weight',
+  'cache_write_weight',
+  'cache_write_1h_weight',
+];
+
+/// A cache weight left unset follows the input weight by these ratios.
+/// Mirrors `CACHE_*_RATIO` in `crates/common/src/limits/weight.rs`.
+export const CACHE_WEIGHT_RATIO: Record<CacheWeight, number> = {
+  cache_read_weight: 0.1,
+  cache_write_weight: 1.25,
+  cache_write_1h_weight: 2,
+};
+
+/// The weight derived from `inputWeight` for an unset cache weight, as
+/// text for display; empty when the input weight is not a number.
+export function derivedCacheWeight(inputWeight: string, which: CacheWeight): string {
+  const w = Number(inputWeight);
+  if (!Number.isFinite(w)) return '';
+  return String(Number((w * CACHE_WEIGHT_RATIO[which]).toFixed(4)));
+}

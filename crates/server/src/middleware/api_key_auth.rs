@@ -39,6 +39,40 @@ fn intersect_allowlists(
     }
 }
 
+/// The key a client presented, wherever its SDK puts it.
+///
+/// `Authorization: Bearer` (OpenAI's SDKs, Claude Code with
+/// `ANTHROPIC_AUTH_TOKEN`), `x-api-key` (Anthropic's SDKs),
+/// `x-goog-api-key` or `?key=` (Gemini's). Headers first: a key in the
+/// query ends up in access logs and browser history, and is accepted only
+/// because Gemini's REST form sends it there. The query never reaches an
+/// upstream — requests go out with the paths and queries the gateway
+/// builds.
+fn presented_key<'a>(
+    headers: &'a axum::http::HeaderMap,
+    query: Option<&'a str>,
+) -> Option<&'a str> {
+    let header = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+    };
+    header("x-api-key")
+        .or_else(|| header("x-goog-api-key"))
+        .or_else(|| {
+            header(AUTHORIZATION.as_str())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .filter(|v| !v.is_empty())
+        })
+        .or_else(|| {
+            query?
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("key="))
+                .filter(|v| !v.is_empty())
+        })
+}
+
 /// Future returned by the middleware closure. Boxed because the
 /// generated impl trait isn't nameable; pulled out into a type
 /// alias to keep clippy::type_complexity happy.
@@ -60,15 +94,11 @@ pub fn require_api_key(
 ) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {
     move |State(state): State<AppState>, mut request: Request, next: Next| {
         Box::pin(async move {
-            let auth_header = request
-                .headers()
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or(StatusCode::UNAUTHORIZED)?;
-
-            let token = auth_header
-                .strip_prefix("Bearer ")
-                .ok_or(StatusCode::UNAUTHORIZED)?;
+            let started = std::time::Instant::now();
+            let token = presented_key(request.headers(), request.uri().query())
+                .ok_or(StatusCode::UNAUTHORIZED)?
+                .to_string();
+            let token = token.as_str();
 
             // Reject anything that doesn't look like a `tw-` key. The
             // separate JWT fallback path is gone — gateway data
@@ -147,139 +177,220 @@ pub fn require_api_key(
                 return Err(StatusCode::UNAUTHORIZED);
             }
 
-            // Update last_used_at (best-effort, don't block on failure)
-            let db = state.db.clone();
-            let key_id = row.id;
-            tokio::spawn(async move {
-                if let Err(e) =
-                    sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
-                        .bind(key_id)
-                        .execute(&db)
-                        .await
-                {
-                    tracing::warn!("Failed to update api_key last_used_at: {e}");
-                }
+            // From here on a client that leaves before the handler has a
+            // response still leaves a gateway_logs row (the MCP surface
+            // records its own). Every return below produces a response
+            // or an auth refusal, so the guard is disarmed after all of
+            // them; only a dropped future leaves it armed.
+            let cancel = (surface == "ai_gateway").then(|| {
+                think_watch_gateway::proxy::EarlyCancel::arm(
+                    state.audit.clone(),
+                    GatewayRequestIdentity {
+                        user_id: row.user_id.map(|u| u.to_string()),
+                        api_key_id: Some(row.id.to_string()),
+                        api_key_lineage_id: Some(row.lineage_id.to_string()),
+                        ..Default::default()
+                    },
+                    started,
+                )
             });
+            let result: Result<Response, StatusCode> = async {
+                // Update last_used_at (best-effort, don't block on failure)
+                let db = state.db.clone();
+                let key_id = row.id;
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
+                            .bind(key_id)
+                            .execute(&db)
+                            .await
+                    {
+                        tracing::warn!("Failed to update api_key last_used_at: {e}");
+                    }
+                });
 
-            // Compute the user's role-derived constraints and intersect
-            // with the API-key allow-list. The role union is loaded once
-            // per request — fast enough at our scale.
-            //
-            // We also pull the role NAMES so the MCP access controller
-            // can gate per-tool access without re-querying the DB, and
-            // the aggregated `surface_constraints` JSON so the gateway
-            // hot path has rate limits + budgets without further lookups.
-            let (role_limits, user_roles, surface_constraints) = if let Some(uid) = row.user_id {
-                let limits = rbac::compute_user_resource_limits(&state.db, uid)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                let names = rbac::load_user_role_names(&state.db, uid)
-                    .await
-                    .unwrap_or_default();
-                // Use the api_key-aware variant so per-key
-                // `rate_limit_rules` / `budget_caps` rows fire on the
-                // gateway hot path. Falling back to the user-only
-                // function would silently drop api_key-scope
-                // overrides — the schema supports them but the
-                // gateway would never see them.
-                let constraints =
-                    rbac::compute_effective_surface_constraints(&state.db, uid, row.id)
+                // Compute the user's role-derived constraints and intersect
+                // with the API-key allow-list. The role union is loaded once
+                // per request — fast enough at our scale.
+                //
+                // We also pull the role NAMES so the MCP access controller
+                // can gate per-tool access without re-querying the DB, and
+                // the aggregated `surface_constraints` JSON so the gateway
+                // hot path has rate limits + budgets without further lookups.
+                let (role_limits, user_roles, surface_constraints) = if let Some(uid) = row.user_id {
+                    let limits = rbac::compute_user_resource_limits(&state.db, uid)
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    let names = rbac::load_user_role_names(&state.db, uid)
                         .await
                         .unwrap_or_default();
-                (limits, names, constraints)
-            } else {
-                // Service-account API keys (no user_id) inherit only
-                // the per-key constraints, since there's no user to
-                // resolve roles against. They get an empty role list,
-                // which means the MCP access controller will deny
-                // anything that requires a role match, and an empty
-                // constraint set so no role-inline limits fire.
-                (
-                    rbac::UserResourceLimits {
-                        allowed_models: None,
-                        allowed_mcp_tools: None,
-                    },
-                    Vec::new(),
-                    think_watch_common::limits::SurfaceConstraints::default(),
+                    // Use the api_key-aware variant so per-key
+                    // `rate_limit_rules` / `budget_caps` rows fire on the
+                    // gateway hot path. Falling back to the user-only
+                    // function would silently drop api_key-scope
+                    // overrides — the schema supports them but the
+                    // gateway would never see them.
+                    let constraints =
+                        rbac::compute_effective_surface_constraints(&state.db, uid, row.id)
+                            .await
+                            .unwrap_or_default();
+                    (limits, names, constraints)
+                } else {
+                    // Service-account API keys (no user_id) inherit only
+                    // the per-key constraints, since there's no user to
+                    // resolve roles against. They get an empty role list,
+                    // which means the MCP access controller will deny
+                    // anything that requires a role match, and an empty
+                    // constraint set so no role-inline limits fire.
+                    (
+                        rbac::UserResourceLimits {
+                            allowed_models: None,
+                            allowed_mcp_tools: None,
+                        },
+                        Vec::new(),
+                        think_watch_common::limits::SurfaceConstraints::default(),
+                    )
+                };
+                let merged_models =
+                    intersect_allowlists(row.allowed_models.clone(), role_limits.allowed_models);
+                let merged_mcp_tools =
+                    intersect_allowlists(row.allowed_mcp_tools.clone(), role_limits.allowed_mcp_tools);
+
+                // Load email for template header resolution ({{user_email}})
+                let user_email: Option<String> = if let Some(uid) = row.user_id {
+                    sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+                        .bind(uid)
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+
+                // Resolve client IP once, share across both identities so
+                // gateway_logs and mcp_logs see the same value the rest
+                // of the auth stack uses (honours client_ip_source +
+                // trusted_proxies via auth_guard::extract_client_ip).
+                let client_ip = crate::middleware::auth_guard::extract_client_ip(
+                    &state,
+                    request.headers(),
+                    request.extensions(),
                 )
-            };
-            let merged_models =
-                intersect_allowlists(row.allowed_models.clone(), role_limits.allowed_models);
-            let merged_mcp_tools =
-                intersect_allowlists(row.allowed_mcp_tools.clone(), role_limits.allowed_mcp_tools);
+                .await;
 
-            // Load email for template header resolution ({{user_email}})
-            let user_email: Option<String> = if let Some(uid) = row.user_id {
-                sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-                    .bind(uid)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            };
-
-            // Resolve client IP once, share across both identities so
-            // gateway_logs and mcp_logs see the same value the rest
-            // of the auth stack uses (honours client_ip_source +
-            // trusted_proxies via auth_guard::extract_client_ip).
-            let client_ip = crate::middleware::auth_guard::extract_client_ip(
-                &state,
-                request.headers(),
-                request.extensions(),
-            )
-            .await;
-
-            let gateway_identity = GatewayRequestIdentity {
-                user_id: row.user_id.map(|u| u.to_string()),
-                user_email,
-                api_key_id: Some(row.id.to_string()),
-                api_key_lineage_id: Some(row.lineage_id.to_string()),
-                allowed_models: merged_models.clone(),
-                surface_constraints: surface_constraints.clone(),
-                ip_address: client_ip.clone(),
-            };
-
-            // The MCP transport handlers expect their own typed
-            // extension and require a user_id (sessions are keyed
-            // by user). Service-account keys without a user_id
-            // can't talk to MCP — return 401 here rather than
-            // letting the handler 500 on a missing extension.
-            if surface == "mcp_gateway" {
-                let Some(uid) = row.user_id else {
-                    tracing::warn!(
-                        api_key_id = %row.id,
-                        "MCP gateway requires a user-bound API key (service-account keys are not supported)"
-                    );
-                    return Err(StatusCode::UNAUTHORIZED);
-                };
-                // Reuse the email already loaded for `gateway_identity`
-                // above — same user_id, same row. The MCP branch used
-                // to issue a SECOND `SELECT email` query against PG on
-                // every request which is pure waste; the user-state
-                // gate at the JOIN above guarantees the user still
-                // exists, so an absent email here means the user was
-                // hard-deleted between the JOIN and this point (rare)
-                // and we should 401 rather than serve the request.
-                let Some(user_email) = gateway_identity.user_email.clone() else {
-                    return Err(StatusCode::UNAUTHORIZED);
-                };
-                let mcp_identity = McpRequestIdentity {
-                    user_id: uid,
+                let gateway_identity = GatewayRequestIdentity {
+                    user_id: row.user_id.map(|u| u.to_string()),
                     user_email,
-                    user_roles,
+                    api_key_id: Some(row.id.to_string()),
+                    api_key_lineage_id: Some(row.lineage_id.to_string()),
+                    allowed_models: merged_models.clone(),
                     surface_constraints: surface_constraints.clone(),
-                    allowed_mcp_tools: merged_mcp_tools.clone(),
-                    mcp_account_overrides: row.mcp_account_overrides.clone(),
                     ip_address: client_ip.clone(),
                 };
-                request.extensions_mut().insert(mcp_identity);
+
+                // The MCP transport handlers expect their own typed
+                // extension and require a user_id (sessions are keyed
+                // by user). Service-account keys without a user_id
+                // can't talk to MCP — return 401 here rather than
+                // letting the handler 500 on a missing extension.
+                if surface == "mcp_gateway" {
+                    let Some(uid) = row.user_id else {
+                        tracing::warn!(
+                            api_key_id = %row.id,
+                            "MCP gateway requires a user-bound API key (service-account keys are not supported)"
+                        );
+                        return Err(StatusCode::UNAUTHORIZED);
+                    };
+                    // Reuse the email already loaded for `gateway_identity`
+                    // above — same user_id, same row. The MCP branch used
+                    // to issue a SECOND `SELECT email` query against PG on
+                    // every request which is pure waste; the user-state
+                    // gate at the JOIN above guarantees the user still
+                    // exists, so an absent email here means the user was
+                    // hard-deleted between the JOIN and this point (rare)
+                    // and we should 401 rather than serve the request.
+                    let Some(user_email) = gateway_identity.user_email.clone() else {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    };
+                    let mcp_identity = McpRequestIdentity {
+                        user_id: uid,
+                        user_email,
+                        user_roles,
+                        surface_constraints: surface_constraints.clone(),
+                        allowed_mcp_tools: merged_mcp_tools.clone(),
+                        mcp_account_overrides: row.mcp_account_overrides.clone(),
+                        ip_address: client_ip.clone(),
+                    };
+                    request.extensions_mut().insert(mcp_identity);
+                }
+
+                if let Some(c) = &cancel {
+                    c.identity(&gateway_identity);
+                    request.extensions_mut().insert(c.slot());
+                }
+                request.extensions_mut().insert(gateway_identity);
+                Ok(next.run(request).await)
             }
-
-            request.extensions_mut().insert(gateway_identity);
-
-            Ok(next.run(request).await)
+            .await;
+            if let Some(c) = cancel {
+                c.disarm();
+            }
+            result
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(*k, HeaderValue::from_str(v).unwrap());
+        }
+        m
+    }
+
+    #[test]
+    fn a_key_is_read_where_each_sdk_puts_it() {
+        assert_eq!(
+            presented_key(&h(&[("authorization", "Bearer tw-1")]), None),
+            Some("tw-1")
+        );
+        assert_eq!(
+            presented_key(&h(&[("x-api-key", "tw-2")]), None),
+            Some("tw-2")
+        );
+        assert_eq!(
+            presented_key(&h(&[("x-goog-api-key", "tw-3")]), None),
+            Some("tw-3")
+        );
+        assert_eq!(
+            presented_key(&HeaderMap::new(), Some("alt=sse&key=tw-4")),
+            Some("tw-4")
+        );
+    }
+
+    #[test]
+    fn the_query_is_the_last_resort_and_empty_values_are_no_key() {
+        assert_eq!(
+            presented_key(&h(&[("x-api-key", "tw-h")]), Some("key=tw-q")),
+            Some("tw-h")
+        );
+        assert_eq!(
+            presented_key(
+                &h(&[("x-api-key", ""), ("authorization", "Bearer tw-b")]),
+                None
+            ),
+            Some("tw-b")
+        );
+        assert_eq!(presented_key(&h(&[("authorization", "tw-1")]), None), None);
+        assert_eq!(
+            presented_key(&HeaderMap::new(), Some("key=&monkey=1")),
+            None
+        );
     }
 }

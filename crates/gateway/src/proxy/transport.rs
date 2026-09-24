@@ -12,12 +12,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tw_types::{CallCtx, GatewayError};
-pub use tw_upstream::sigv4::Signer;
-
-/// Sent to an Anthropic upstream when neither the caller nor the provider
-/// row names a version. Without one the API refuses the request.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub use crate::bedrock::sigv4::Signer;
+use crate::call_ctx::CallCtx;
+use crate::error::GatewayError;
 
 /// The HTTP client every upstream call goes through.
 ///
@@ -65,7 +62,7 @@ pub struct Upstream {
     /// Header templates from the provider row, `{{…}}` unresolved.
     pub headers: Vec<(String, String)>,
     pub shape: Shape,
-    /// Shown in error messages, e.g. "Anthropic returned 500".
+    /// Names the upstream in error messages.
     pub label: String,
 }
 
@@ -89,20 +86,7 @@ impl Upstream {
     pub fn is_official(&self) -> bool {
         match &self.shape {
             Shape::Bedrock { .. } | Shape::Azure { .. } => true,
-            Shape::Standard => {
-                let host = self
-                    .base_url
-                    .split("://")
-                    .nth(1)
-                    .unwrap_or(&self.base_url)
-                    .split(['/', ':'])
-                    .next()
-                    .unwrap_or_default();
-                matches!(
-                    host,
-                    "api.openai.com" | "api.anthropic.com" | "generativelanguage.googleapis.com"
-                )
-            }
+            Shape::Standard => tw_dialect::official::is_official_host(&self.base_url),
         }
     }
 
@@ -125,12 +109,13 @@ impl Upstream {
             .post(&url)
             .header("content-type", "application/json");
         for (k, v) in &self.headers {
-            req = req.header(k, tw_types::substitute_template(v, &ctx.attrs));
+            req = req.header(k, crate::call_ctx::substitute_template(v, &ctx.attrs));
         }
         for (k, v) in extra {
             req = req.header(k, v);
         }
-        // Anthropic refuses a request without a version header.
+        // Anthropic refuses a request without a version header. One the
+        // provider row or the caller set wins.
         if dialect == tw_dialect::ir::Dialect::Anthropic
             && !self
                 .headers
@@ -138,7 +123,7 @@ impl Upstream {
                 .chain(extra)
                 .any(|(k, _)| k.eq_ignore_ascii_case("anthropic-version"))
         {
-            req = req.header("anthropic-version", ANTHROPIC_VERSION);
+            req = req.header("anthropic-version", tw_dialect::official::ANTHROPIC_VERSION);
         }
         if let Some(trace) = &ctx.trace_id {
             req = req.header("x-trace-id", trace.as_str());
@@ -153,11 +138,7 @@ impl Upstream {
             }
         }
 
-        let resp = req
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+        let resp = req.body(body).send().await.map_err(transport_error)?;
         check_status(resp, &self.label).await
     }
 
@@ -177,16 +158,35 @@ impl Upstream {
                 signer.region,
                 path.trim_start_matches('/')
             ),
-            _ => tw_upstream::upstream_url(&self.base_url, path, query),
+            _ => tw_dialect::url::upstream_url(&self.base_url, path, query),
         }
+    }
+}
+
+/// A request that never got an answer: the upstream timed out, or the
+/// connection could not be made or broke. Either way it says nothing
+/// about the request, and another route may well answer it.
+pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
+    if e.is_timeout() {
+        GatewayError::ProviderTimeout(e.to_string())
+    } else {
+        GatewayError::NetworkError(e.to_string())
     }
 }
 
 /// Turn a non-2xx upstream answer into the error the caller sees.
 ///
 /// 429 keeps the upstream's `Retry-After` so a client's retry policy does
-/// not hammer the same quota window. 401/403 become an auth error. Any
-/// other failure carries the upstream's body, **truncated**: error bodies
+/// not hammer the same quota window. 401/403 become an auth error: the
+/// gateway's own credential for this upstream was refused, which is
+/// about the route, not the caller.
+///
+/// Every other status is kept as it is, in `ProviderHttpError`. Whether
+/// it is the upstream failing (5xx, 408) or the upstream refusing this
+/// request (any other 4xx) decides failover and the circuit breaker —
+/// see `routing::is_upstream_failure`.
+///
+/// The upstream's body goes to the caller **truncated**: error bodies
 /// have carried stack traces, AWS account ids and full debug strings,
 /// and forwarding them verbatim turns the gateway into a leak. The full
 /// body goes to the log.
@@ -200,7 +200,7 @@ async fn check_status(
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
-            .and_then(tw_types::parse_retry_after_seconds);
+            .and_then(crate::error::parse_retry_after_seconds);
         return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
     }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -220,9 +220,10 @@ async fn check_status(
         } else {
             body
         };
-        return Err(GatewayError::ProviderError(format!(
-            "{label} returned {status}: {shown}"
-        )));
+        return Err(GatewayError::ProviderHttpError {
+            status: status.as_u16(),
+            message: format!("{label}: {shown}"),
+        });
     }
     Ok(resp)
 }
@@ -263,6 +264,19 @@ mod tests {
             ),
             "https://g.example/v1beta/models/m:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn only_the_vendors_own_host_counts_as_official() {
+        assert!(up("https://api.anthropic.com/", Shape::Standard).is_official());
+        assert!(up("https://api.deepseek.com/anthropic", Shape::Standard).is_official());
+        // A relay cannot dress up as the vendor through its path or user info.
+        assert!(!up("https://relay.example/api.openai.com", Shape::Standard).is_official());
+        assert!(!up("https://api.openai.com@relay.example", Shape::Standard).is_official());
+        let azure = Shape::Azure {
+            api_version: "2024-02-01".into(),
+        };
+        assert!(up("https://x.openai.azure.com", azure).is_official());
     }
 
     #[test]

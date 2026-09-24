@@ -9,7 +9,8 @@
       "rate_limited": "Too many requests — wait a moment and try again.",
       "conflict": "That conflicts with an existing record.",
       "service_unavailable": "Service temporarily unavailable — please retry in a few seconds.",
-      "internal_error": "Internal server error. The team has been notified."
+      "internal_error": "Internal server error. The team has been notified.",
+      "totp_enrollment_required": "Two-factor authentication must be set up before this is available."
     },
     "byStatus": {
       "401": "Your session has expired. Please sign in again.",
@@ -239,7 +240,11 @@
     "totpHint": "Enter the 6-digit code from your authenticator app, or a recovery code.",
     "totpVerify": "Verify & Enable",
     "totpCopyCodes": "Copy codes",
-    "totpDownloadCodes": "Download .txt"
+    "totpDownloadCodes": "Download .txt",
+    "totpRequiredEnabledStatus": "Two-factor authentication is enabled. This platform requires it, so it cannot be disabled.",
+    "totpEnrollmentTitle": "Set up two-factor authentication",
+    "totpEnrollmentDescription": "This platform requires two-factor authentication. The console becomes available once it is set up.",
+    "totpEnrollmentSignedInAs": "Signed in as {{email}}"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -442,7 +447,10 @@
       "upstreamModel": "Upstream Model",
       "health": "Health",
       "healthHint": "Live circuit-breaker state from the rolling-window error rate. Closed = passing through, open = excluded from selection, half-open = probing.",
-      "p50": "EWMA latency"
+      "p50": "EWMA latency",
+      "cacheRead": "Cache read ×",
+      "cacheWrite": "Cache write ×",
+      "cacheWrite1h": "1h cache write ×"
     },
     "status": {
       "all": "All models",
@@ -467,7 +475,10 @@
       "affinityMode": "Session affinity",
       "affinityTtlSecs": "Affinity TTL (seconds)",
       "rpmCap": "RPM cap",
-      "tpmCap": "TPM cap"
+      "tpmCap": "TPM cap",
+      "cacheReadWeight": "Cache read weight",
+      "cacheWriteWeight": "Cache write weight",
+      "cacheWrite1hWeight": "1-hour cache write weight"
     },
     "useGlobalDefault": "Use global default",
     "unlimited": "Unlimited",
@@ -519,7 +530,8 @@
     "errors": {
       "weightMustBePositive": "Weights must be positive numbers.",
       "affinityTtlRange": "Affinity TTL must be between 0 and 86400 seconds.",
-      "capMustBePositive": "RPM/TPM caps must be positive integers (or empty for unlimited)."
+      "capMustBePositive": "RPM/TPM caps must be positive integers (or empty for unlimited).",
+      "cacheWeightNotNegative": "Cache weights must not be negative."
     },
     "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
     "batchImportWarning": "Imported routes go live in /v1/models right away. Tick only the models you actually want exposed.",
@@ -548,7 +560,9 @@
       "created": "Model added.",
       "updated": "Model updated.",
       "deleted": "Model removed."
-    }
+    },
+    "cacheWeightHint": "Input read from or written to the upstream's prompt cache, priced against the input baseline. Empty = derived from the input weight: read 0.1×, write 1.25×, 1-hour write 2×.",
+    "derivedWeight": "{{value}} (derived)"
   },
   "teams": {
     "title": "Teams",
@@ -1395,13 +1409,13 @@
       "presetsTitle": "Built-in Rule Presets",
       "presetsDesc": "Click a preset to append its rules to your current list. Existing rules are kept. You can edit each rule afterward.",
       "preset": {
-        "basic": {
-          "name": "Basic defense",
-          "description": "Block the most common jailbreak and instruction-override patterns. Recommended starting point."
+        "injection": {
+          "name": "Instruction override",
+          "description": "Blocks the most common jailbreak and instruction-override phrases. Recommended starting point."
         },
-        "strict": {
-          "name": "Strict defense",
-          "description": "Adds persona manipulation, prompt extraction, and Base64 smuggling detection on top of the basic ruleset."
+        "persona": {
+          "name": "Persona and prompt extraction",
+          "description": "Persona manipulation, system-prompt extraction and Base64 smuggling. Most rules warn rather than block."
         },
         "chinese": {
           "name": "Chinese language",
@@ -1754,7 +1768,9 @@
     "supportedEndpoints": "Supported Endpoints",
     "openaiEndpoint": "OpenAI-compatible: /v1/chat/completions",
     "anthropicEndpoint": "Anthropic Messages: /v1/messages",
+    "geminiEndpoint": "Gemini: /v1beta/models/{model}:generateContent and :streamGenerateContent (key in x-goog-api-key or ?key=)",
     "responsesEndpoint": "OpenAI Responses (new): /v1/responses",
+    "responsesWsEndpoint": "OpenAI Responses over WebSocket: /v1/responses (one response.create frame per turn)",
     "modelsEndpoint": "List models: /v1/models",
     "claudeDesktop": "Claude Desktop",
     "claudeDesktopDesc": "Configure Claude Desktop to use MCP tools through ThinkWatch.",

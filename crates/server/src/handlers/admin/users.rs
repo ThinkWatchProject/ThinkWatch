@@ -16,6 +16,7 @@ use think_watch_common::validation::{normalize_email, validate_email, validate_p
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_user_perms};
+use crate::services::{role_repository, user_repository};
 
 /// Parse a scope string into the `(scope_kind, scope_id)` tuple that
 /// `rbac_role_assignments` stores. Accepted shapes:
@@ -123,26 +124,13 @@ pub async fn list_users(
 
     let (total, users): (i64, Vec<User>) = match owned_teams {
         None => {
-            let total: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM users \
-                  WHERE deleted_at IS NULL \
-                    AND ($1::text IS NULL OR email ILIKE $1 OR display_name ILIKE $1)",
+            user_repository::list(
+                &state.db,
+                search_pattern.as_deref(),
+                per_page as i64,
+                offset as i64,
             )
-            .bind(search_pattern.as_deref())
-            .fetch_one(&state.db)
-            .await?;
-            let users = sqlx::query_as::<_, User>(
-                "SELECT * FROM users \
-                  WHERE deleted_at IS NULL \
-                    AND ($1::text IS NULL OR email ILIKE $1 OR display_name ILIKE $1) \
-                  ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(search_pattern.as_deref())
-            .bind(per_page as i64)
-            .bind(offset as i64)
-            .fetch_all(&state.db)
-            .await?;
-            (total, users)
+            .await?
         }
         Some(team_ids) => {
             let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
@@ -150,46 +138,15 @@ pub async fn list_users(
             // they hold `users:read` for. The self inclusion makes
             // sure a team manager doesn't disappear from their own
             // user list.
-            let total: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM users u \
-                  WHERE u.deleted_at IS NULL \
-                    AND ($3::text IS NULL OR u.email ILIKE $3 OR u.display_name ILIKE $3) \
-                    AND ( \
-                        u.id = $1 \
-                        OR EXISTS ( \
-                            SELECT 1 FROM team_members tm \
-                             WHERE tm.user_id = u.id \
-                               AND tm.team_id = ANY($2) \
-                        ) \
-                    )",
+            user_repository::list_in_teams(
+                &state.db,
+                auth_user.claims.sub,
+                &team_ids_vec,
+                search_pattern.as_deref(),
+                per_page as i64,
+                offset as i64,
             )
-            .bind(auth_user.claims.sub)
-            .bind(&team_ids_vec)
-            .bind(search_pattern.as_deref())
-            .fetch_one(&state.db)
-            .await?;
-            let users = sqlx::query_as::<_, User>(
-                "SELECT u.* FROM users u \
-                  WHERE u.deleted_at IS NULL \
-                    AND ($3::text IS NULL OR u.email ILIKE $3 OR u.display_name ILIKE $3) \
-                    AND ( \
-                        u.id = $1 \
-                        OR EXISTS ( \
-                            SELECT 1 FROM team_members tm \
-                             WHERE tm.user_id = u.id \
-                               AND tm.team_id = ANY($2) \
-                        ) \
-                    ) \
-                  ORDER BY u.created_at DESC LIMIT $4 OFFSET $5",
-            )
-            .bind(auth_user.claims.sub)
-            .bind(&team_ids_vec)
-            .bind(search_pattern.as_deref())
-            .bind(per_page as i64)
-            .bind(offset as i64)
-            .fetch_all(&state.db)
-            .await?;
-            (total, users)
+            .await?
         }
     };
 
@@ -210,25 +167,9 @@ pub async fn list_users(
 
     // Single query: every assignment for every user, joined against
     // `rbac_roles` so we can report system + custom uniformly.
-    type AssignmentRow = (
-        uuid::Uuid,
-        uuid::Uuid,
-        String,
-        bool,
-        String,
-        Option<uuid::Uuid>,
-    );
-    let rows: Vec<AssignmentRow> = sqlx::query_as(
-        "SELECT ra.user_id, r.id, r.name, r.is_system, ra.scope_kind, ra.scope_id \
-           FROM rbac_role_assignments ra \
-           JOIN rbac_roles r ON r.id = ra.role_id \
-          WHERE ra.user_id = ANY($1) \
-          ORDER BY r.is_system DESC, r.name ASC",
-    )
-    .bind(&user_ids)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let rows = user_repository::role_assignments_of(&state.db, &user_ids)
+        .await
+        .unwrap_or_default();
 
     // Pre-size to the page so a 100-row page doesn't bounce through
     // multiple HashMap rehashes while we drain the join rows.
@@ -256,18 +197,9 @@ pub async fn list_users(
     // looking at their merged-team list can tell engineering rows
     // from marketing rows). Joined with `teams` so we can return
     // the human name, not just the UUID.
-    type TeamRow = (uuid::Uuid, uuid::Uuid, String);
-    let team_rows: Vec<TeamRow> = sqlx::query_as(
-        "SELECT tm.user_id, t.id, t.name \
-           FROM team_members tm \
-           JOIN teams t ON t.id = tm.team_id \
-          WHERE tm.user_id = ANY($1) \
-          ORDER BY t.name ASC",
-    )
-    .bind(&user_ids)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let team_rows = user_repository::teams_of(&state.db, &user_ids)
+        .await
+        .unwrap_or_default();
 
     let mut teams_map: std::collections::HashMap<
         uuid::Uuid,
@@ -398,15 +330,12 @@ pub async fn list_super_admin_ids(
 /// inclusion in the response. The caller is responsible for any
 /// escalation checks (super_admin promotion, etc).
 async fn write_user_role_assignments(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut sqlx::PgConnection,
     user_id: uuid::Uuid,
     assignments: &[RoleAssignmentRequest],
     assigned_by: uuid::Uuid,
 ) -> Result<Vec<RoleAssignment>, AppError> {
-    sqlx::query("DELETE FROM rbac_role_assignments WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await?;
+    user_repository::delete_role_assignments(tx, user_id).await?;
 
     let mut out: Vec<RoleAssignment> = Vec::with_capacity(assignments.len());
     for a in assignments {
@@ -414,23 +343,14 @@ async fn write_user_role_assignments(
         let (scope_kind, scope_id) = parse_scope(&raw_scope)?;
         // Insert + return role metadata in one round trip so we can
         // build the UserResponse without a second query.
-        let row: Option<(String, bool)> = sqlx::query_as(
-            "WITH ins AS (\
-                INSERT INTO rbac_role_assignments \
-                    (user_id, role_id, scope_kind, scope_id, assigned_by) \
-                VALUES ($1, $2, $3, $4, $5) \
-                ON CONFLICT DO NOTHING \
-                RETURNING role_id\
-             ) \
-             SELECT r.name, r.is_system FROM rbac_roles r \
-              WHERE r.id = $2",
+        let row = user_repository::insert_role_assignment(
+            tx,
+            user_id,
+            a.role_id,
+            &scope_kind,
+            scope_id,
+            assigned_by,
         )
-        .bind(user_id)
-        .bind(a.role_id)
-        .bind(&scope_kind)
-        .bind(scope_id)
-        .bind(assigned_by)
-        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db)
@@ -518,11 +438,7 @@ pub async fn create_user(
     let caller_has_admin = caller_has_super || caller_roles.iter().any(|r| r == "admin");
     // Look up requested role names in one query to check privilege.
     let role_ids: Vec<uuid::Uuid> = req.role_assignments.iter().map(|a| a.role_id).collect();
-    let requested: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM rbac_roles WHERE id = ANY($1)")
-            .bind(&role_ids)
-            .fetch_all(&state.db)
-            .await?;
+    let requested = role_repository::names_of(&state.db, &role_ids).await?;
     for (name,) in &requested {
         if name == "super_admin" && !caller_has_super {
             return Err(AppError::Forbidden(
@@ -536,11 +452,7 @@ pub async fn create_user(
         }
     }
 
-    let exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
-            .bind(&email)
-            .fetch_one(&state.db)
-            .await?;
+    let exists = user_repository::email_taken(&state.db, &email).await?;
 
     if exists {
         return Err(AppError::Conflict("Email already registered".into()));
@@ -550,15 +462,13 @@ pub async fn create_user(
 
     let mut tx = state.db.begin().await?;
 
-    let user = sqlx::query_as::<_, User>(
-        r#"INSERT INTO users (email, display_name, password_hash, password_change_required)
-           VALUES ($1, $2, $3, $4) RETURNING *"#,
+    let user = user_repository::insert(
+        &mut tx,
+        &email,
+        &req.display_name,
+        &password_hash,
+        force_change,
     )
-    .bind(&email)
-    .bind(&req.display_name)
-    .bind(&password_hash)
-    .bind(force_change)
-    .fetch_one(&mut *tx)
     .await?;
 
     let role_assignments = write_user_role_assignments(
@@ -737,12 +647,7 @@ pub async fn update_user(
         ));
     }
 
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await?;
+    let exists = user_repository::exists(&state.db, user_id).await?;
     if !exists {
         return Err(AppError::NotFound("User not found".into()));
     }
@@ -762,11 +667,7 @@ pub async fn update_user(
         let caller_has_admin = caller_has_super || caller_roles.iter().any(|r| r == "admin");
 
         let role_ids: Vec<uuid::Uuid> = assignments.iter().map(|a| a.role_id).collect();
-        let requested: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM rbac_roles WHERE id = ANY($1)")
-                .bind(&role_ids)
-                .fetch_all(&state.db)
-                .await?;
+        let requested = role_repository::names_of(&state.db, &role_ids).await?;
         let requested_names: std::collections::HashSet<&String> =
             requested.iter().map(|(n,)| n).collect();
 
@@ -814,19 +715,11 @@ pub async fn update_user(
         if name.trim().is_empty() {
             return Err(AppError::BadRequest("Display name cannot be empty".into()));
         }
-        sqlx::query("UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2")
-            .bind(name.trim())
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
+        user_repository::set_display_name(&mut tx, user_id, name.trim()).await?;
     }
 
     if let Some(active) = req.is_active {
-        sqlx::query("UPDATE users SET is_active = $1, updated_at = now() WHERE id = $2")
-            .bind(active)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
+        user_repository::set_active(&mut tx, user_id, active).await?;
     }
 
     if let Some(assignments) = authorized_role_assignments {
@@ -867,14 +760,7 @@ pub async fn update_user(
         // "user deleted." Failure is logged but doesn't abort —
         // the gateway-side users-join (api_key_auth.rs) is the
         // ultimate guarantee.
-        if let Err(e) = sqlx::query(
-            "UPDATE api_keys \
-             SET is_active = false, deleted_at = now(), disabled_reason = 'user_disabled' \
-             WHERE user_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(user_id)
-        .execute(&state.db)
-        .await
+        if let Err(e) = user_repository::disable_api_keys_of_disabled_user(&state.db, user_id).await
         {
             tracing::warn!(%user_id, "failed to cascade api_keys disable on user deactivation: {e}");
         }
@@ -943,13 +829,7 @@ pub async fn delete_user(
     let mut tx = state.db.begin().await?;
     acquire_super_admin_guard_lock(&mut tx).await?;
 
-    let rows = sqlx::query(
-        "UPDATE users SET deleted_at = now(), is_active = false, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let rows = user_repository::soft_delete(&mut tx, user_id).await?;
 
     if rows == 0 {
         return Err(AppError::NotFound("User not found".into()));
@@ -962,13 +842,7 @@ pub async fn delete_user(
     // letting them keep authenticating against the gateway. Pull it
     // into the TX so a failure rolls back the user delete too — both
     // succeed or neither does.
-    sqlx::query(
-        "UPDATE api_keys SET is_active = false, deleted_at = now(), disabled_reason = 'user_deleted' \
-         WHERE user_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
+    user_repository::disable_api_keys_of_deleted_user(&mut tx, user_id).await?;
     // Validate the post-mutation invariant. If this delete took out the
     // last active super admin, we haven't committed yet — the Err short-
     // circuits and the tx rolls back on drop.
@@ -1041,14 +915,14 @@ pub async fn reset_user_password(
     auth_user
         .assert_scope_for_user(&state.db, "users:update", user_id)
         .await?;
-    if !crate::services::user_repository::exists(&state.db, user_id).await? {
+    if !user_repository::exists(&state.db, user_id).await? {
         return Err(AppError::NotFound("User not found".into()));
     }
 
     let new_password = password::generate_random_password();
     let hash = password::hash_password(&new_password)?;
 
-    crate::services::user_repository::update_password_hash(&state.db, user_id, &hash, true).await?;
+    user_repository::update_password_hash(&state.db, user_id, &hash, true).await?;
 
     // Invalidate signing public key to force re-login
     let _: () =

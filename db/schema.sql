@@ -335,6 +335,14 @@ CREATE TABLE IF NOT EXISTS models (
     display_name      VARCHAR(255) NOT NULL,
     input_weight      DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (input_weight  > 0),
     output_weight     DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (output_weight > 0),
+    -- Input read from / written to the upstream's prompt cache, against
+    -- the same input baseline. NULL ⇒ derived from input_weight:
+    -- read 0.1×, write 1.25×, 1-hour write 2× (Anthropic's ratios; see
+    -- crates/common/src/limits/weight.rs). Set them for an upstream
+    -- that prices its cache differently.
+    cache_read_weight     DECIMAL(8, 4) CHECK (cache_read_weight     >= 0),
+    cache_write_weight    DECIMAL(8, 4) CHECK (cache_write_weight    >= 0),
+    cache_write_1h_weight DECIMAL(8, 4) CHECK (cache_write_1h_weight >= 0),
     -- Per-model overrides. NULL ⇒ "fall through to gateway.default_*".
     -- Strategy semantics — see crates/gateway/src/strategy.rs:
     --   weighted       — operator-set weight = traffic ratio (manual)
@@ -371,6 +379,14 @@ CREATE TABLE IF NOT EXISTS models (
     output_guardrails JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Added after first boot; see the note above `model_routes`'s ALTER.
+ALTER TABLE models ADD COLUMN IF NOT EXISTS cache_read_weight
+    DECIMAL(8, 4) CHECK (cache_read_weight >= 0);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS cache_write_weight
+    DECIMAL(8, 4) CHECK (cache_write_weight >= 0);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS cache_write_1h_weight
+    DECIMAL(8, 4) CHECK (cache_write_1h_weight >= 0);
 
 -- Platform-wide per-token pricing baseline. Single-row singleton
 -- (PK pinned to 1 via CHECK). `cost($) = tokens × weight × baseline`.

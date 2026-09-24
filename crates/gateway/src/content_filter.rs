@@ -1,95 +1,19 @@
-use regex::Regex;
+//! Content filter: the operator's deny rules over what the caller sends.
+//!
+//! The engine is thinkwatch-core's (`tw_guard::content`), shared with the
+//! desktop gateway: how a rule matches (case-insensitive substring or a
+//! size-bounded, case-insensitive regex), which text is read (the caller's
+//! messages and the tool results inside them — not the system prompt, not
+//! the model's own turns), and the built-in rules the presets are cut from.
+//!
+//! What stays here is where the rules come from — `security.content_filter_patterns`
+//! in `system_settings`, as [`DenyRuleConfig`] — and what a hit does.
 
-/// What to do when a rule matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// Reject the request with an error.
-    Block,
-    /// Allow the request, but flag it in audit logs.
-    Warn,
-    /// Allow the request silently, only record in audit logs.
-    Log,
-}
+use tw_guard::content::{self, Rule, RuleInput, Rules};
 
-impl std::fmt::Display for Action {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Action::Block => write!(f, "block"),
-            Action::Warn => write!(f, "warn"),
-            Action::Log => write!(f, "log"),
-        }
-    }
-}
+pub use tw_guard::content::{Action, Hit, Match};
 
-/// How a rule's `pattern` field is interpreted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchType {
-    /// Case-insensitive substring match (default, no special characters).
-    Contains,
-    /// Case-insensitive regular expression.
-    Regex,
-}
-
-impl std::fmt::Display for MatchType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MatchType::Contains => write!(f, "contains"),
-            MatchType::Regex => write!(f, "regex"),
-        }
-    }
-}
-
-/// A compiled deny rule.
-#[derive(Debug, Clone)]
-struct DenyRule {
-    name: String,
-    pattern: String,
-    /// Lowercased pattern for `Contains` matching.
-    pattern_lower: String,
-    compiled_regex: Option<Regex>,
-    match_type: MatchType,
-    action: Action,
-}
-
-/// Result of a content filter check when a rule matches.
-#[derive(Debug, Clone)]
-pub struct ContentFilterMatch {
-    pub name: String,
-    pub pattern: String,
-    pub match_type: MatchType,
-    pub action: Action,
-    pub matched_snippet: String,
-}
-
-impl std::fmt::Display for ContentFilterMatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // INCLUDES the matched snippet — designed for the client-
-        // facing 400 response so the caller can see what triggered
-        // the rule and fix their prompt. Do NOT use this in tracing
-        // logs: the snippet is user prompt content and we have no
-        // business shipping it to centralized log aggregators by
-        // default. Use `log_summary()` instead at log sites.
-        write!(
-            f,
-            "[{}] rule '{}' ({}) matched: \"{}\"",
-            self.action, self.name, self.match_type, self.matched_snippet,
-        )
-    }
-}
-
-impl ContentFilterMatch {
-    /// Log-safe summary that omits the matched user-text snippet.
-    /// Use this in `tracing::*!` calls; reserve the full `Display`
-    /// form for the response body the matched user explicitly sees.
-    pub fn log_summary(&self) -> String {
-        format!(
-            "[{}] rule '{}' ({}) matched (snippet redacted)",
-            self.action, self.name, self.match_type
-        )
-    }
-}
-
-/// Serializable rule for storage in `system_settings`.
+/// A rule as `system_settings` stores it and the admin API sends it.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DenyRuleConfig {
     /// Human-readable rule name (e.g. "Jailbreak", "DAN attack").
@@ -105,310 +29,132 @@ pub struct DenyRuleConfig {
     pub action: String,
 }
 
-fn parse_action(s: &str) -> Action {
-    match s.to_ascii_lowercase().as_str() {
-        "block" => Action::Block,
-        "warn" => Action::Warn,
-        "log" => Action::Log,
-        _ => Action::Block,
-    }
-}
-
-fn parse_match_type(s: &str) -> MatchType {
-    match s.to_ascii_lowercase().as_str() {
-        "regex" => MatchType::Regex,
-        _ => MatchType::Contains,
-    }
-}
-
-/// Rule-based prompt injection detector.
+/// The compiled rule set the proxy runs.
+#[derive(Debug, Default)]
 pub struct ContentFilter {
-    rules: Vec<DenyRule>,
-}
-
-impl Default for ContentFilter {
-    fn default() -> Self {
-        Self::from_config(&[])
-    }
+    rules: Rules,
 }
 
 impl ContentFilter {
-    /// Create a content filter from a list of rule configs.
-    /// Invalid regex patterns are skipped with a warning.
+    /// Compile the stored rules. **A rule that does not compile is skipped
+    /// with a warning** and the rest still run: the settings validator
+    /// rejects bad rules on save, so one reaching here was stored some
+    /// other way, and dropping the whole set would switch the filter off.
+    ///
+    /// Each rule is keyed by its position, so two rules with the same name
+    /// both report.
     pub fn from_config(configs: &[DenyRuleConfig]) -> Self {
         let rules = configs
             .iter()
-            .filter_map(|c| {
-                let match_type = parse_match_type(&c.match_type);
-                // Operator-supplied regex — compile through the bounded
-                // helper so a pathological pattern (e.g. `(a|aa){200}`)
-                // can't DOS every gateway request that touches the rule.
-                let compiled_regex = match match_type {
-                    MatchType::Regex => {
-                        match think_watch_common::regex_util::compile_bounded_ci(&c.pattern) {
-                            Ok(re) => Some(re),
-                            Err(e) => {
-                                tracing::warn!("Invalid content filter regex '{}': {e}", c.pattern);
-                                return None;
-                            }
-                        }
-                    }
-                    MatchType::Contains => None,
-                };
-                Some(DenyRule {
-                    name: if c.name.is_empty() {
-                        c.pattern.clone()
-                    } else {
-                        c.name.clone()
-                    },
-                    pattern: c.pattern.clone(),
-                    pattern_lower: c.pattern.to_lowercase(),
-                    compiled_regex,
-                    match_type,
-                    action: parse_action(&c.action),
-                })
+            .enumerate()
+            .filter_map(|(i, c)| match compile(i, c) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::warn!("Skipping content filter rule '{}': {e}", c.name);
+                    None
+                }
             })
             .collect();
-        Self { rules }
+        Self {
+            rules: Rules { rules },
+        }
     }
 
-    /// Check all user messages against the rules.
-    /// Returns the highest-priority match found, if any.
-    /// Priority: Block > Warn > Log.
-    ///
-    /// Check the caller's text in a request.
-    ///
-    /// Reads the decoded form, where the structure is known. The earlier
-    /// version guessed at a `serde_json::Value` — a string, or array
-    /// elements with a `text` field — and so never saw text inside a tool
-    /// result, which is exactly where an injected instruction can sit.
-    pub fn check_request(&self, request: &tw_dialect::ir::Request) -> Option<ContentFilterMatch> {
-        use tw_dialect::ir::{Part, Role};
-
-        fn texts(parts: &[Part], out: &mut Vec<String>) {
-            for p in parts {
-                match p {
-                    Part::Text(t) => out.push(t.clone()),
-                    // A tool result is text the model reads too.
-                    Part::ToolResult(r) => texts(&r.content, out),
-                    _ => {}
-                }
-            }
-        }
-
-        let mut best: Option<ContentFilterMatch> = None;
-        for msg in &request.messages {
-            if msg.role != Role::User {
-                continue;
-            }
-            let mut collected = Vec::new();
-            texts(&msg.parts, &mut collected);
-            let text = collected.join("\n");
-            if text.is_empty() {
-                continue;
-            }
-            if let Some(m) = self.check_text(&text)
-                && match &best {
-                    None => true,
-                    Some(b) => action_priority(m.action) > action_priority(b.action),
-                }
-            {
-                best = Some(m);
-            }
-        }
-        best
+    /// The most severe hit in the caller's text, tool results included.
+    pub fn check_request(&self, request: &tw_dialect::ir::Request) -> Option<Hit> {
+        content::worst(&self.rules.scan_request(request)).cloned()
     }
 
-    /// Check a single text string against all rules. Used by the test sandbox.
-    /// Returns the highest-priority match.
-    pub fn check_text(&self, text: &str) -> Option<ContentFilterMatch> {
-        let lower = text.to_lowercase();
-        let mut best: Option<ContentFilterMatch> = None;
-
-        for rule in &self.rules {
-            let hit = match rule.match_type {
-                MatchType::Contains => {
-                    lower
-                        .find(&rule.pattern_lower)
-                        .map(|pos| ContentFilterMatch {
-                            name: rule.name.clone(),
-                            pattern: rule.pattern.clone(),
-                            match_type: rule.match_type,
-                            action: rule.action,
-                            matched_snippet: snippet(text, pos, rule.pattern_lower.len() + 40),
-                        })
-                }
-                MatchType::Regex => rule.compiled_regex.as_ref().and_then(|re| {
-                    re.find(text).map(|m| ContentFilterMatch {
-                        name: rule.name.clone(),
-                        pattern: rule.pattern.clone(),
-                        match_type: rule.match_type,
-                        action: rule.action,
-                        matched_snippet: snippet(text, m.start(), m.end() - m.start() + 40),
-                    })
-                }),
-            };
-
-            if let Some(m) = hit
-                && match &best {
-                    None => true,
-                    Some(b) => action_priority(m.action) > action_priority(b.action),
-                }
-            {
-                best = Some(m);
-            }
-        }
-
-        best
+    /// Every rule that fires on `text`, each with its first match. The
+    /// test sandbox shows them all.
+    pub fn check_text_all(&self, text: &str) -> Vec<Hit> {
+        self.rules.scan_text(text)
     }
 
-    /// Run check against text and return *all* matches (not just the worst one).
-    /// Used by the test sandbox UI to show every rule that fires.
-    pub fn check_text_all(&self, text: &str) -> Vec<ContentFilterMatch> {
-        let lower = text.to_lowercase();
-        let mut matches = Vec::new();
-
-        for rule in &self.rules {
-            match rule.match_type {
-                MatchType::Contains => {
-                    if let Some(pos) = lower.find(&rule.pattern_lower) {
-                        matches.push(ContentFilterMatch {
-                            name: rule.name.clone(),
-                            pattern: rule.pattern.clone(),
-                            match_type: rule.match_type,
-                            action: rule.action,
-                            matched_snippet: snippet(text, pos, rule.pattern_lower.len() + 40),
-                        });
-                    }
-                }
-                MatchType::Regex => {
-                    if let Some(re) = &rule.compiled_regex
-                        && let Some(m) = re.find(text)
-                    {
-                        matches.push(ContentFilterMatch {
-                            name: rule.name.clone(),
-                            pattern: rule.pattern.clone(),
-                            match_type: rule.match_type,
-                            action: rule.action,
-                            matched_snippet: snippet(text, m.start(), m.end() - m.start() + 40),
-                        });
-                    }
-                }
-            }
-        }
-
-        matches
+    /// The compiled rule a hit came from.
+    pub fn rule(&self, hit: &Hit) -> Option<&Rule> {
+        self.rules.rules.iter().find(|r| r.id == hit.rule)
     }
 }
 
-fn action_priority(a: Action) -> u8 {
-    match a {
-        Action::Log => 1,
-        Action::Warn => 2,
-        Action::Block => 3,
-    }
+fn compile(i: usize, c: &DenyRuleConfig) -> Result<Rule, String> {
+    let matching = Match::from_slug(&c.match_type.to_ascii_lowercase())
+        .ok_or_else(|| format!("unknown match_type '{}'", c.match_type))?;
+    let action = Action::from_slug(&c.action.to_ascii_lowercase())
+        .ok_or_else(|| format!("unknown action '{}'", c.action))?;
+    let id = i.to_string();
+    Rule::new(RuleInput {
+        id: &id,
+        name: if c.name.is_empty() {
+            &c.pattern
+        } else {
+            &c.name
+        },
+        custom: true,
+        pattern: &c.pattern,
+        matching,
+        action,
+    })
+    .map_err(|e| e.detail)
 }
 
-fn snippet(text: &str, pos: usize, max_len: usize) -> String {
-    let start = pos.saturating_sub(10);
-    let end = (pos + max_len).min(text.len());
-    let start = text.floor_char_boundary(start);
-    let end = text.ceil_char_boundary(end);
-    let s = &text[start..end];
-    if start > 0 || end < text.len() {
-        format!("...{s}...")
-    } else {
-        s.to_string()
-    }
+/// What the caller is told when a rule blocks the request. **Includes the
+/// matched snippet** — it is the caller's own text, and they need it to
+/// fix the prompt. Never log this; log [`log_summary`].
+pub fn refusal(hit: &Hit) -> String {
+    format!(
+        "Request blocked by content filter: rule '{}' matched{}: \"{}\"",
+        hit.name,
+        if hit.in_tool_result {
+            " in a tool result"
+        } else {
+            ""
+        },
+        hit.snippet
+    )
 }
 
-/// Built-in preset rule groups returned by the presets API.
+/// A log line for a hit, without the caller's text.
+pub fn log_summary(hit: &Hit) -> String {
+    format!(
+        "[{}] rule '{}' matched{} (snippet redacted)",
+        hit.action.slug(),
+        hit.name,
+        if hit.in_tool_result {
+            " in a tool result"
+        } else {
+            ""
+        },
+    )
+}
+
+/// A built-in preset group, as the presets API returns it.
 pub struct PresetGroup {
-    pub id: &'static str,
+    /// `injection`, `persona` or `chinese` — the UI localises by it.
+    pub id: String,
     pub rules: Vec<DenyRuleConfig>,
 }
 
-/// Get all built-in preset groups. UI labels are localized on the frontend.
+/// thinkwatch-core's built-in rules, grouped. Adding a group appends its
+/// rules to the operator's list as ordinary rules they can edit.
 pub fn presets() -> Vec<PresetGroup> {
-    fn rule(name: &str, pattern: &str, mt: &str, action: &str) -> DenyRuleConfig {
-        DenyRuleConfig {
-            name: name.to_string(),
-            pattern: pattern.to_string(),
-            match_type: mt.to_string(),
-            action: action.to_string(),
+    let mut groups: Vec<PresetGroup> = Vec::new();
+    for b in content::builtins() {
+        let rule = DenyRuleConfig {
+            name: b.name.clone(),
+            pattern: b.pattern.clone(),
+            match_type: b.matching.slug().to_string(),
+            action: b.action.slug().to_string(),
+        };
+        match groups.iter_mut().find(|g| g.id == b.group) {
+            Some(g) => g.rules.push(rule),
+            None => groups.push(PresetGroup {
+                id: b.group.clone(),
+                rules: vec![rule],
+            }),
         }
     }
-
-    vec![
-        PresetGroup {
-            id: "basic",
-            rules: vec![
-                rule(
-                    "Ignore Previous Instructions",
-                    "ignore previous instructions",
-                    "contains",
-                    "block",
-                ),
-                rule(
-                    "Ignore All Previous",
-                    "ignore all previous",
-                    "contains",
-                    "block",
-                ),
-                rule(
-                    "Disregard Instructions",
-                    "disregard your instructions",
-                    "contains",
-                    "block",
-                ),
-                rule("Jailbreak", "jailbreak", "contains", "block"),
-                rule("DAN", " dan ", "contains", "block"),
-                rule("Developer Mode", "developer mode", "contains", "block"),
-            ],
-        },
-        PresetGroup {
-            id: "strict",
-            rules: vec![
-                rule("Persona Manipulation", "you are now", "contains", "block"),
-                rule("New Persona", "new persona", "contains", "warn"),
-                rule("Act As", "act as", "contains", "warn"),
-                rule("Pretend To Be", "pretend to be", "contains", "warn"),
-                rule(
-                    "System Prompt Extraction",
-                    "system prompt",
-                    "contains",
-                    "warn",
-                ),
-                rule(
-                    "Reveal Instructions",
-                    "reveal your instructions",
-                    "contains",
-                    "warn",
-                ),
-                rule(
-                    "What Are Your Rules",
-                    "what are your rules",
-                    "contains",
-                    "log",
-                ),
-                // Base64 walls of text — common smuggling vector
-                rule("Base64 Smuggling", r"[A-Za-z0-9+/=]{50,}", "regex", "warn"),
-            ],
-        },
-        PresetGroup {
-            id: "chinese",
-            rules: vec![
-                rule("忽略之前指令", "忽略之前", "contains", "block"),
-                rule("忘记你的指令", "忘记你", "contains", "block"),
-                rule("不要遵循", "不要遵循", "contains", "block"),
-                rule("现在你是", "现在你是", "contains", "block"),
-                rule("扮演", "扮演", "contains", "warn"),
-                rule("透露你的", "透露你的", "contains", "warn"),
-                rule("系统提示词", "系统提示词", "contains", "warn"),
-                rule("越狱模式", "越狱", "contains", "block"),
-            ],
-        },
-    ]
+    groups
 }
 
 #[cfg(test)]
@@ -439,18 +185,19 @@ mod tests {
     #[test]
     fn contains_match_blocks() {
         let f = ContentFilter::from_config(&[cfg("Jailbreak", "jailbreak", "contains", "block")]);
-        let m = f.check_request(&user_req("attempt jailbreak now"));
+        let m = f.check_request(&user_req("attempt JAILBREAK now"));
         let m = m.expect("should match");
         assert_eq!(m.action, Action::Block);
         assert_eq!(m.name, "Jailbreak");
+        assert!(refusal(&m).contains("JAILBREAK"), "{}", refusal(&m));
+        assert!(!log_summary(&m).contains("JAILBREAK"));
     }
 
     #[test]
     fn regex_match_works() {
         let f = ContentFilter::from_config(&[cfg("Number", r"\d{4}-\d{4}", "regex", "warn")]);
         let m = f.check_request(&user_req("code is 1234-5678 here"));
-        let m = m.expect("should match");
-        assert_eq!(m.action, Action::Warn);
+        assert_eq!(m.expect("should match").action, Action::Warn);
     }
 
     #[test]
@@ -466,24 +213,32 @@ mod tests {
     }
 
     #[test]
-    fn check_text_all_returns_every_match() {
+    fn check_text_all_returns_every_match_even_with_the_same_name() {
         let f = ContentFilter::from_config(&[
             cfg("A", "foo", "contains", "block"),
-            cfg("B", "bar", "contains", "warn"),
+            cfg("A", "bar", "contains", "warn"),
             cfg("C", "baz", "contains", "log"),
         ]);
         let matches = f.check_text_all("foo and bar and baz");
         assert_eq!(matches.len(), 3);
+        assert_eq!(f.rule(&matches[1]).unwrap().pattern, "bar");
     }
 
     #[test]
-    fn invalid_regex_skipped() {
+    fn a_bad_rule_is_skipped_and_the_rest_still_run() {
         let f = ContentFilter::from_config(&[
             cfg("bad", "[invalid((", "regex", "block"),
+            cfg("unknown action", "test", "contains", "shout"),
             cfg("good", "test", "contains", "block"),
         ]);
-        // Bad rule is dropped, good rule still works.
-        assert!(f.check_request(&user_req("test message")).is_some());
+        let m = f.check_request(&user_req("test message")).unwrap();
+        assert_eq!(m.name, "good");
+    }
+
+    #[test]
+    fn an_unnamed_rule_is_called_by_its_pattern() {
+        let f = ContentFilter::from_config(&[cfg("", "jailbreak", "contains", "warn")]);
+        assert_eq!(f.check_text_all("jailbreak")[0].name, "jailbreak");
     }
 
     #[test]
@@ -503,8 +258,6 @@ mod tests {
 
     #[test]
     fn text_inside_a_tool_result_is_checked() {
-        // The guessing version looked for `text` fields on array
-        // elements and never reached a tool result's content.
         let f = ContentFilter::from_config(&[cfg("J", "jailbreak", "contains", "block")]);
         let r = Request {
             messages: vec![Message {
@@ -517,18 +270,28 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(
-            f.check_request(&r).expect("should match").action,
-            Action::Block
-        );
+        let m = f.check_request(&r).expect("should match");
+        assert_eq!(m.action, Action::Block);
+        assert!(m.in_tool_result);
+        assert!(refusal(&m).contains("tool result"));
     }
 
     #[test]
-    fn presets_load_without_panic() {
-        for group in presets() {
-            let f = ContentFilter::from_config(&group.rules);
-            // Each preset should produce a working filter
-            let _ = f.check_request(&user_req("hello world"));
+    fn presets_are_cores_builtins_in_three_groups() {
+        let groups = presets();
+        let ids: Vec<&str> = groups.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["injection", "persona", "chinese"]);
+        for g in &groups {
+            // Every preset rule passes the same compile the proxy runs.
+            let f = ContentFilter::from_config(&g.rules);
+            assert_eq!(f.rules.rules.len(), g.rules.len(), "{}", g.id);
         }
+        let f = ContentFilter::from_config(&groups[0].rules);
+        assert_eq!(
+            f.check_request(&user_req("Ignore previous instructions."))
+                .unwrap()
+                .action,
+            Action::Block
+        );
     }
 }

@@ -4,6 +4,7 @@ import {
   api,
   apiPost,
   broadcastLogout,
+  TOTP_ENROLLMENT_REQUIRED_EVENT,
   clearCachedPermissions,
   registerKeyPair,
   setCachedPermissions,
@@ -88,6 +89,23 @@ export function useAuth() {
     return () => window.removeEventListener('thinkwatch:logged-out', handler);
   }, [queryClient]);
 
+  // A request refused with `totp_enrollment_required` means the platform
+  // started requiring TOTP mid-session: reload the user so the console
+  // switches to the enrollment screen.
+  useEffect(() => {
+    const handler = () => {
+      void queryClient.refetchQueries({ queryKey: ME_KEY });
+    };
+    window.addEventListener(TOTP_ENROLLMENT_REQUIRED_EVENT, handler);
+    return () => window.removeEventListener(TOTP_ENROLLMENT_REQUIRED_EVENT, handler);
+  }, [queryClient]);
+
+  /// Enrolling lifted the hold on this session; reload the user to leave
+  /// the enrollment screen.
+  const handleTotpEnrolled = useCallback(async () => {
+    await queryClient.refetchQueries({ queryKey: ME_KEY });
+  }, [queryClient]);
+
   const login = async (
     email: string,
     password: string,
@@ -139,5 +157,5 @@ export function useAuth() {
     await queryClient.refetchQueries({ queryKey: ME_KEY });
   }, [queryClient]);
 
-  return { user, loading, login, logout, handleSsoCallback };
+  return { user, loading, login, logout, handleSsoCallback, handleTotpEnrolled };
 }
