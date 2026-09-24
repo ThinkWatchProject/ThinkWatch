@@ -7,9 +7,9 @@ use subtle::ConstantTimeEq;
 
 use think_watch_common::audit::AuditActor;
 use think_watch_common::config::AppConfig;
+use think_watch_common::crypto::parse_encryption_key;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
-use tw_crypto::crypto::parse_encryption_key;
 
 use crate::app::AppState;
 

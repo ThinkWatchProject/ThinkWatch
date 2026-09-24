@@ -131,21 +131,6 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<tw_crypto::json_secret::SecretError> for AppError {
-    /// The shared layer must not know this crate's error taxonomy — that
-    /// is why `tw-crypto` carries its own `SecretError` rather than
-    /// returning `AppError` directly.
-    ///
-    /// A secret that will not decrypt is always `Internal`: the caller
-    /// supplied a well-formed request, and the failure is either a wrong
-    /// key or a corrupted ciphertext — both of which are ours to fix, not
-    /// theirs. Mapping it to `BadRequest` would tell a user to change
-    /// something they never controlled.
-    fn from(err: tw_crypto::json_secret::SecretError) -> Self {
-        AppError::Internal(anyhow::anyhow!("{err}"))
-    }
-}
-
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
         // A genuine schema bug is still `Internal`; transient

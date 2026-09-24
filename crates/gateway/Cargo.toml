@@ -6,10 +6,7 @@ edition.workspace = true
 [dependencies]
 tw-breaker = { workspace = true }
 tw-guard = { workspace = true }
-tw-types = { workspace = true }
 tw-dialect = { workspace = true }
-tw-upstream = { workspace = true, features = ["bedrock"] }
-tw-wire = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 sqlx = { workspace = true }
@@ -43,3 +40,7 @@ aws-smithy-eventstream = { workspace = true }
 arc-swap = { workspace = true }
 http_1x = { package = "http", version = "1" }
 rust_decimal = { workspace = true }
+
+[dev-dependencies]
+# Builds eventstream frames for the Bedrock unframing tests
+aws-smithy-types = { workspace = true }

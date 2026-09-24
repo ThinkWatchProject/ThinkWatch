@@ -25,8 +25,9 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
+use think_watch_gateway::call_ctx::CallCtx;
+use think_watch_gateway::error::GatewayError;
 use think_watch_gateway::protocol::UpstreamProtocol;
-use tw_types::{CallCtx, GatewayError};
 use uuid::Uuid;
 
 use crate::gateway_adapters::{ProviderMaterials, build_upstream};

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use think_watch_auth::oidc::OidcConfig;
 use think_watch_common::config::AppConfig;
+use think_watch_common::crypto;
 use think_watch_common::dynamic_config::DynamicConfig;
-use tw_crypto::crypto;
 
 /// Decrypt a hex-encoded AES-256-GCM client secret using the app's
 /// master encryption key. Returns an empty string when no secret is

@@ -28,6 +28,8 @@
 
 use std::convert::Infallible;
 
+use crate::call_ctx::CallCtx;
+use crate::error::GatewayError;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, header};
@@ -36,7 +38,6 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use tw_dialect::convert::Session;
 use tw_dialect::ir::{Dialect, Target};
-use tw_types::{CallCtx, GatewayError};
 
 use super::body_capture::prepare_body_capture;
 use super::headers::{request_id_header, resolve_session_id, resolve_trace_id};
@@ -332,7 +333,7 @@ pub(crate) async fn read_whole(
         .await
         .map_err(super::transport::transport_error)?;
 
-    let mut sniffer = tw_wire::Sniffer::new();
+    let mut sniffer = tw_dialect::usage::Sniffer::new();
     sniffer.feed(&upstream);
     let (usage, usage_estimated) =
         crate::usage_estimate::complete(sniffer.finish(), true, input_estimate, Some(&upstream));
@@ -776,7 +777,7 @@ async fn generate(
 /// reported before. Anthropic's own `input_tokens` excludes the cached
 /// part; counting it the same way everywhere keeps one route from
 /// looking cheaper than another for the same work.
-pub(crate) fn tokens(u: &tw_wire::Usage) -> (u32, u32) {
+pub(crate) fn tokens(u: &tw_dialect::usage::Usage) -> (u32, u32) {
     let prompt = u.input + u.cache_read + u.cache_write;
     (
         u32::try_from(prompt).unwrap_or(u32::MAX),
@@ -786,7 +787,7 @@ pub(crate) fn tokens(u: &tw_wire::Usage) -> (u32, u32) {
 
 /// The same usage split the way it is priced: cache reads and writes
 /// apart from plain input (see `cost_tracker`).
-pub(crate) fn priced(u: &tw_wire::Usage) -> TokenCounts {
+pub(crate) fn priced(u: &tw_dialect::usage::Usage) -> TokenCounts {
     let n = |x: u64| i64::try_from(x).unwrap_or(i64::MAX);
     TokenCounts {
         input: n(u.input),

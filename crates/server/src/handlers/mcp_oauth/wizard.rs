@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use think_watch_auth::oauth::pkce::{pkce_challenge, random_token, state_binding};
+use think_watch_common::crypto::{self, parse_encryption_key};
 use think_watch_common::errors::AppError;
-use tw_crypto::crypto::{self, parse_encryption_key};
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;

@@ -12,8 +12,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tw_types::{CallCtx, GatewayError};
-pub use tw_upstream::sigv4::Signer;
+pub use crate::bedrock::sigv4::Signer;
+use crate::call_ctx::CallCtx;
+use crate::error::GatewayError;
 
 /// Sent to an Anthropic upstream when neither the caller nor the provider
 /// row names a version. Without one the API refuses the request.
@@ -125,7 +126,7 @@ impl Upstream {
             .post(&url)
             .header("content-type", "application/json");
         for (k, v) in &self.headers {
-            req = req.header(k, tw_types::substitute_template(v, &ctx.attrs));
+            req = req.header(k, crate::call_ctx::substitute_template(v, &ctx.attrs));
         }
         for (k, v) in extra {
             req = req.header(k, v);
@@ -173,7 +174,7 @@ impl Upstream {
                 signer.region,
                 path.trim_start_matches('/')
             ),
-            _ => tw_upstream::upstream_url(&self.base_url, path, query),
+            _ => tw_dialect::url::upstream_url(&self.base_url, path, query),
         }
     }
 }
@@ -215,7 +216,7 @@ async fn check_status(
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
-            .and_then(tw_types::parse_retry_after_seconds);
+            .and_then(crate::error::parse_retry_after_seconds);
         return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
     }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {

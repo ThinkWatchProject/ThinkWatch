@@ -7,8 +7,8 @@
 //! handlers don't repeat the `parse_encryption_key(...) → encrypt/decrypt`
 //! dance four times.
 
+use think_watch_common::crypto::parse_encryption_key;
 use think_watch_common::errors::AppError;
-use tw_crypto::crypto::parse_encryption_key;
 
 use crate::app::AppState;
 

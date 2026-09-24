@@ -276,9 +276,9 @@ pub fn build_oauth_cfg(
 }
 
 fn decrypt_client_secret(encrypted: &[u8], encryption_key: &str) -> anyhow::Result<String> {
-    let key = tw_crypto::crypto::parse_encryption_key(encryption_key)
+    let key = think_watch_common::crypto::parse_encryption_key(encryption_key)
         .map_err(|e| anyhow::anyhow!("invalid encryption key: {e}"))?;
-    let bytes = tw_crypto::crypto::decrypt(encrypted, &key)
+    let bytes = think_watch_common::crypto::decrypt(encrypted, &key)
         .map_err(|e| anyhow::anyhow!("failed to decrypt client_secret: {e}"))?;
     String::from_utf8(bytes).map_err(|e| anyhow::anyhow!("client_secret is not valid UTF-8: {e}"))
 }

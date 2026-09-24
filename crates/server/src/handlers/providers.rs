@@ -14,14 +14,14 @@ use crate::middleware::auth_guard::AuthUser;
 //
 // Every header `value` and the `aws_secret_access_key` field are wrapped as
 // `{"$enc": "<hex-envelope>"}` before INSERT/UPDATE. The hex payload is the
-// AES-256-GCM versioned envelope produced by `tw_crypto::crypto`
+// AES-256-GCM versioned envelope produced by `think_watch_common::crypto`
 // (same envelope MCP OAuth client_secrets use). Hex (not base64) keeps us
 // dependency-aligned with the OIDC / TOTP storage path which already encodes
 // the envelope as hex.
 //
 // ---------------------------------------------------------------------------
 
-use tw_crypto::json_secret::JsonSecret;
+use think_watch_common::json_secret::JsonSecret;
 
 /// Encrypt `plaintext` and return a value suitable for storing inside
 /// `providers.config_json`. Thin wrapper over [`JsonSecret::encrypt`]
@@ -40,9 +40,7 @@ pub(crate) fn decrypt_secret_from_json(
     value: &serde_json::Value,
     encryption_key: &str,
 ) -> Result<String, AppError> {
-    // `?` on both halves so `From<SecretError>` applies — a bare tail
-    // expression would hand back core's error type instead of ours.
-    Ok(JsonSecret::from_json(value)?.decrypt(encryption_key)?)
+    JsonSecret::from_json(value)?.decrypt(encryption_key)
 }
 
 /// Take a header list as supplied in a request and return a JSON array

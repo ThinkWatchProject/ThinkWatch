@@ -304,12 +304,12 @@ async fn oauth_callback_populates_upstream_subject_via_userinfo() {
     // Build server with OAuth client config pointing at the wiremock
     // provider, including the userinfo URL the resolver will hit
     // after a successful token exchange.
-    let enc_key = tw_crypto::crypto::parse_encryption_key(
+    let enc_key = think_watch_common::crypto::parse_encryption_key(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     )
     .unwrap();
     let client_secret_encrypted =
-        tw_crypto::crypto::encrypt(b"shh-its-a-secret", &enc_key).unwrap();
+        think_watch_common::crypto::encrypt(b"shh-its-a-secret", &enc_key).unwrap();
     let server_id = fixtures::create_mcp_server_with(
         &app.db,
         &unique_name("oauth-userinfo"),

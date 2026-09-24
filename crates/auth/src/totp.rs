@@ -93,14 +93,14 @@ pub fn find_recovery_code(codes: &[String], candidate: &str) -> Option<usize> {
 
 /// Encrypt TOTP secret with AES-256-GCM and return hex-encoded ciphertext.
 pub fn encrypt_secret(secret: &str, key: &[u8; 32]) -> anyhow::Result<String> {
-    let encrypted = tw_crypto::crypto::encrypt(secret.as_bytes(), key)?;
+    let encrypted = think_watch_common::crypto::encrypt(secret.as_bytes(), key)?;
     Ok(hex::encode(encrypted))
 }
 
 /// Decrypt a hex-encoded TOTP secret.
 pub fn decrypt_secret(encrypted_hex: &str, key: &[u8; 32]) -> anyhow::Result<String> {
     let encrypted = hex::decode(encrypted_hex).map_err(|e| anyhow::anyhow!("Invalid hex: {e}"))?;
-    let decrypted = tw_crypto::crypto::decrypt(&encrypted, key)?;
+    let decrypted = think_watch_common::crypto::decrypt(&encrypted, key)?;
     String::from_utf8(decrypted).map_err(|e| anyhow::anyhow!("Invalid UTF-8: {e}"))
 }
 
