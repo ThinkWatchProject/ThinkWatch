@@ -1404,13 +1404,13 @@
       "presetsTitle": "内置规则预设",
       "presetsDesc": "点击预设可将其规则追加到当前列表，已有规则保留。追加后可随时编辑每条规则。",
       "preset": {
-        "basic": {
-          "name": "基础防御",
-          "description": "拦截最常见的越狱和指令覆盖模式。推荐起步配置。"
+        "injection": {
+          "name": "指令覆盖",
+          "description": "拦截最常见的越狱和指令覆盖说法。推荐起步配置。"
         },
-        "strict": {
-          "name": "严格防御",
-          "description": "在基础防御之上加角色操控、Prompt 提取和 Base64 走私检测。"
+        "persona": {
+          "name": "角色操控与提示词提取",
+          "description": "角色操控、系统提示词提取和 Base64 走私。多数规则只告警、不拦截。"
         },
         "chinese": {
           "name": "中文场景",

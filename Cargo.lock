@@ -4082,7 +4082,6 @@ dependencies = [
  "http 1.4.0",
  "metrics",
  "rand 0.10.0",
- "regex",
  "reqwest 0.13.2",
  "rust_decimal",
  "serde",
@@ -4671,16 +4670,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.42.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.42.0#62657fa1d840bff630997168745ef14b33fac128"
+version = "0.43.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.43.0#caec54c6e515ab7991dfb583923e9c156308ccaa"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.42.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.42.0#62657fa1d840bff630997168745ef14b33fac128"
+version = "0.43.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.43.0#caec54c6e515ab7991dfb583923e9c156308ccaa"
 dependencies = [
  "serde",
  "serde_json",
@@ -4688,8 +4687,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.42.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.42.0#62657fa1d840bff630997168745ef14b33fac128"
+version = "0.43.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.43.0#caec54c6e515ab7991dfb583923e9c156308ccaa"
 dependencies = [
  "base64 0.22.1",
  "regex",

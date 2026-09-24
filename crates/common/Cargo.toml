@@ -31,7 +31,6 @@ metrics = { workspace = true }
 clickhouse = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
-regex = "1"
 # S3-compatible body offload (matches the same SigV4 + reqwest pattern
 # the Bedrock provider uses — no aws-sdk-s3 dependency, so the build
 # cost stays a couple hundred LOC for what's effectively GET/PUT/DELETE

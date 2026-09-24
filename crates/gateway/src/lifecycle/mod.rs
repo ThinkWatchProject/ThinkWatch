@@ -196,6 +196,16 @@ pub(crate) fn build_chat_pump(
         provider.to_string(),
     );
 
+    // The model's length cap, measured on the same bytes.
+    let mut length = crate::output_guardrails::StreamLimit::new(
+        &deps_state
+            .router
+            .load()
+            .config_for(&request.mapped_model)
+            .output_guardrails,
+        client,
+    );
+
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
 
@@ -250,7 +260,14 @@ pub(crate) fn build_chat_pump(
                         Some(c) => c.process(&chunk),
                         None => chunk.to_vec(),
                     };
-                    if let Some((err, safe)) = inspector.as_mut().and_then(|i| i.check(&client_bytes)) {
+                    // A tool call the inspection stops, or the answer going
+                    // over the model's length cap: what came before still goes
+                    // out, then the refusal.
+                    let stop = inspector
+                        .as_mut()
+                        .and_then(|i| i.check(&client_bytes))
+                        .or_else(|| length.as_mut().and_then(|l| l.check(&client_bytes)));
+                    if let Some((err, safe)) = stop {
                         yield Ok(Bytes::from(cut(&mut shaper, convert.as_mut(), client, &client_bytes[..safe], &err)));
                         if let Some(tx) = done_tx.take() {
                             let _ = tx.send(StreamOutcome::UpstreamError {
@@ -291,7 +308,11 @@ pub(crate) fn build_chat_pump(
         let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
         // The converter's last bytes can complete a tool call (the block's
         // stop), so they are inspected too.
-        if let Some((err, safe)) = inspector.as_mut().and_then(|i| i.check(&tail)) {
+        let stop = inspector
+            .as_mut()
+            .and_then(|i| i.check(&tail))
+            .or_else(|| length.as_mut().and_then(|l| l.check(&tail)));
+        if let Some((err, safe)) = stop {
             yield Ok(Bytes::from(cut(&mut shaper, None, client, &tail[..safe], &err)));
             if let Some(tx) = done_tx.take() {
                 let _ = tx.send(StreamOutcome::UpstreamError {
@@ -410,8 +431,10 @@ fn as_json_array(
     }
 }
 
-/// End a stream at a tool call the inspection stops: what came before it
-/// still goes out, then the refusal, in the caller's format.
+/// End a stream at a tool call the inspection stops, or at the frame that
+/// takes the answer over its length cap: what came before it still goes
+/// out, then the refusal, in the caller's format. A Gemini caller reading
+/// a JSON array gets the refusal as the array's last element, then `]`.
 ///
 /// An incomplete tool call cannot be executed, so the client is left with
 /// nothing it can run.

@@ -1404,13 +1404,13 @@
       "presetsTitle": "Built-in Rule Presets",
       "presetsDesc": "Click a preset to append its rules to your current list. Existing rules are kept. You can edit each rule afterward.",
       "preset": {
-        "basic": {
-          "name": "Basic defense",
-          "description": "Block the most common jailbreak and instruction-override patterns. Recommended starting point."
+        "injection": {
+          "name": "Instruction override",
+          "description": "Blocks the most common jailbreak and instruction-override phrases. Recommended starting point."
         },
-        "strict": {
-          "name": "Strict defense",
-          "description": "Adds persona manipulation, prompt extraction, and Base64 smuggling detection on top of the basic ruleset."
+        "persona": {
+          "name": "Persona and prompt extraction",
+          "description": "Persona manipulation, system-prompt extraction and Base64 smuggling. Most rules warn rather than block."
         },
         "chinese": {
           "name": "Chinese language",

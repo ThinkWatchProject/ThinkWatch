@@ -100,6 +100,8 @@ async fn warn_is_the_default_and_lets_it_through_with_an_audit_event() {
             let v: Value = serde_json::from_str(d).unwrap();
             assert_eq!(v["found"][0]["kind"], "tag", "{v}");
             assert_eq!(v["found"][0]["in_tool_result"], true, "{v}");
+            // What the tag characters spell, so an operator can judge it.
+            assert_eq!(v["found"][0]["revealed"], "ignore", "{v}");
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -142,4 +144,103 @@ async fn the_setting_refuses_a_word_it_does_not_know() {
         .await
         .unwrap();
     assert_eq!(r.status.as_u16(), 400, "{}", r.text());
+}
+
+/// The smuggled text as a tool result on each of the four HTTP surfaces,
+/// streaming or not.
+fn tool_result_on_every_surface(stream: bool) -> Vec<(String, Value)> {
+    let gemini = if stream {
+        "/v1beta/models/hidden-model:streamGenerateContent?alt=sse"
+    } else {
+        "/v1beta/models/hidden-model:generateContent"
+    };
+    let mut chat = with_tool_result();
+    chat["stream"] = json!(stream);
+    vec![
+        ("/v1/chat/completions".into(), chat),
+        (
+            "/v1/messages".into(),
+            json!({"model": "hidden-model", "stream": stream, "max_tokens": 16, "messages": [
+                {"role": "user", "content": "read the page"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "fetch", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": smuggled()}
+                ]}
+            ]}),
+        ),
+        (
+            "/v1/responses".into(),
+            json!({"model": "hidden-model", "stream": stream, "input": [
+                {"role": "user", "content": "read the page"},
+                {"type": "function_call", "call_id": "c1", "name": "fetch", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": smuggled()}
+            ]}),
+        ),
+        (
+            gemini.into(),
+            json!({"contents": [
+                {"role": "user", "parts": [{"text": "read the page"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "fetch", "args": {}}}]},
+                {"role": "user", "parts": [{"functionResponse": {"name": "fetch",
+                    "response": {"content": smuggled()}}}]}
+            ]}),
+        ),
+    ]
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn block_refuses_it_in_every_callers_format_streaming_or_not() {
+    let app = TestApp::spawn().await;
+    fixtures::set_setting(&app.db, "security.hidden_text", json!("block"))
+        .await
+        .unwrap();
+    app.state.dynamic_config.reload().await.unwrap();
+    let upstream = MockProvider::openai_chat_stream_ok("hidden-model").await;
+    let (key, _) = seed(&app, &upstream.uri()).await;
+
+    for stream in [false, true] {
+        for (path, body) in tool_result_on_every_surface(stream) {
+            let mut req = reqwest::Client::new()
+                .post(format!("{}{path}", app.gateway_url))
+                .json(&body);
+            req = if path.starts_with("/v1beta/") {
+                req.header("x-goog-api-key", &key)
+            } else {
+                req.bearer_auth(&key)
+            };
+            let resp = req.send().await.unwrap();
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap();
+            assert_eq!(status, 403, "{path} stream={stream}: {text}");
+            assert!(text.contains("tool result"), "{path}: {text}");
+        }
+    }
+    assert!(
+        upstream.received_requests().await.is_empty(),
+        "the upstream saw it anyway"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn off_lets_it_through_untouched() {
+    let app = TestApp::spawn().await;
+    fixtures::set_setting(&app.db, "security.hidden_text", json!("off"))
+        .await
+        .unwrap();
+    app.state.dynamic_config.reload().await.unwrap();
+    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
+    let (key, _) = seed(&app, &upstream.uri()).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    gw.post("/v1/chat/completions", with_tool_result())
+        .await
+        .unwrap()
+        .assert_ok();
+    // Nothing is stripped: the upstream gets the characters as sent.
+    let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
+    assert_eq!(sent["messages"][2]["content"], smuggled());
 }
