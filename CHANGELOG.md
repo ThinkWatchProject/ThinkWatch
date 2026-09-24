@@ -11,6 +11,220 @@ target.
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-09-24
+
+Callers now get errors in their own API's format, and an upstream that
+refuses a request no longer takes a model's other routes down with it.
+The gateway also speaks two more client protocols: Gemini, and the
+Responses API over a WebSocket. Cached input is billed at cache prices,
+and a request with no usage report is billed on an estimate instead of
+at zero. The TOTP requirement, which never took effect before, is now
+enforced. This is a major release because error bodies, the
+content-filter preset ids and the TOTP behaviour all change in ways a
+client or a script can notice.
+
+### Read before upgrading
+
+- **Check `security.totp_required` before you upgrade.** In 1.x this
+  setting never took effect: it is stored as a boolean and was read as a
+  string, so it always read as off. From 2.0.0 it is enforced by the
+  server. Find out what it is set to:
+
+  ```sql
+  SELECT value FROM system_settings WHERE key = 'security.totp_required';
+  ```
+
+  If it is `true`, every console user without TOTP, super admins
+  included, is held at a TOTP setup screen on their next request, and
+  sessions that are already open are held too. Until they set up TOTP,
+  every console and admin endpoint answers 403
+  `totp_enrollment_required`, except `/api/auth/me`, logout,
+  `register-key` and the TOTP status/setup/verify-setup calls. Setting
+  up TOTP releases the session straight away. API keys are not affected:
+  gateway, MCP and console `tw-` key traffic keeps working. While the
+  setting is on, `POST /api/auth/totp/disable` is refused with 400. The
+  setting must now be a JSON boolean; a string such as `"true"` is
+  refused on save.
+- **Gateway error bodies follow each client API's own format.** Status
+  codes and `Retry-After` are unchanged. Code that reads the error
+  `type` needs updating:
+  - **Chat Completions and Responses** keep the
+    `{"error": {"message", "type", …}}` shape, but `type` is now
+    OpenAI's value for the status, not a ThinkWatch tag:
+    `authentication_error` (401), `permission_error` (403),
+    `not_found_error` (404), `rate_limit_error` (429),
+    `invalid_request_error` (other 4xx) and `server_error` (5xx). The
+    old tags are gone: `rate_limited`, `policy_blocked`,
+    `provider_http_error`, `provider_error`, `provider_timeout`,
+    `transform_error`, `network_error` and `auth_error`. A policy block
+    is now `permission_error` with status 403.
+  - **Anthropic Messages** clients get Anthropic's body,
+    `{"type": "error", "error": {"type", "message"}}`, with Anthropic's
+    type names (`rate_limit_error`, `overloaded_error`, `api_error`, …).
+  - **Gemini** clients get Google's body,
+    `{"error": {"code", "message", "status"}}`.
+  - **Once a stream has started**, a Responses client gets a
+    `response.failed` event, where before it got a Chat-style error
+    frame that SDKs skip, so the stream just stopped. An Anthropic
+    client gets an `error` event whose type follows the status.
+  - The `error_type` field in `gateway_logs` and the metric labels are
+    unchanged.
+- **Only upstream failures fail over or count against a route's
+  breaker.** In 1.x every non-2xx except 401, 403 and 429 was retried on
+  the model's other routes and counted as a failure on each of them, so
+  one malformed request could open the breakers on all of a model's
+  routes.
+  - **Tried on another route and counted against this one:** 5xx, 408,
+    429, 401 and 403 (the upstream refused the gateway's own
+    credential), timeouts, network errors and unreadable responses.
+  - **Returned to the caller straight away, and counted as the upstream
+    working:** every other 4xx.
+  - **What the caller sees:** such a 4xx comes back with its own status
+    and the upstream's reason. In 1.x it came back as a 502 after every
+    route had been tried.
+  - An upstream 5xx comes back with the upstream's status (500, 503, …)
+    rather than a blanket 502.
+  - An upstream timeout is now 504.
+  - Streams follow the same rule. A stream cut by tool-call inspection
+    no longer counts against the route.
+- **Cached input is billed at cache prices.** In 1.x cache reads and
+  writes were billed, and debited from budgets and weighted rate limits,
+  as full-price input. `models` gains three weights, `cache_read_weight`,
+  `cache_write_weight` and `cache_write_1h_weight`. When a weight is
+  unset, it is `input_weight` times Anthropic's ratio: 0.1× for a read,
+  1.25× for a write and 2× for a one-hour write. What this changes:
+  - Traffic with many cache reads (Claude Code, for instance) costs much
+    less than it did.
+  - Traffic that writes to the cache costs a little more.
+  - Older OpenAI models discount cache reads less (0.5× or 0.25×). Set
+    the weights on those models yourself.
+  - `input_tokens` in the log is still the whole input. The log detail
+    gains `cache_read_tokens`, `cache_write_tokens` and `cache_write_1h`.
+- **Output length limits now apply to streams.** In 1.x, `max_length`
+  output guardrails checked only whole responses, so streamed answers
+  were never checked. Now the frame that would cross the limit is not
+  sent, and the stream ends with an error in the caller's format. A
+  response served from the cache is also checked against the limit in
+  force. If you set a limit, streamed answers that used to go through
+  can now be cut off.
+- **Content-filter preset groups are renamed.** The groups are now
+  `injection`, `persona` and `chinese`; they used to be `basic`,
+  `strict` and `chinese`. This matters only if you call the presets
+  endpoint by group id. Rules you have already added are copies and are
+  not affected. Other changes to the filter:
+  - A rule with an empty pattern is now refused on save.
+  - Each text part of a message is scanned separately, so a pattern no
+    longer matches across two parts.
+  - The engine is now shared with ThinkWatch-Core's `tw-guard`. The
+    stored format and the admin API are unchanged.
+- **Requests with no usage report are billed on an estimate.** In 1.x
+  such a request was billed at zero. This happens when an upstream
+  ignores the request for usage, or when the caller leaves before the
+  final chunk arrives. The estimate is:
+  - input: about four bytes of the request per token, not counting
+    images and files;
+  - output: the answer that actually arrived.
+
+  Estimated rows carry `usage_estimated: true` in their detail and count
+  in `gateway_usage_estimated_total`. A request with no answer at all is
+  still billed at zero.
+- **Clients that leave early are now logged.** In 1.x a client that
+  disconnected before its response existed left no `gateway_logs` row at
+  all. That covers leaving during auth, limits or routing, or while
+  waiting for a whole (not streamed) answer. Such a request now writes
+  one row: status 499, `stream_outcome: client_cancelled`,
+  `cancelled_before: response`, no tokens and no cost. Expect more 499
+  rows in dashboards and log forwarders. A new counter,
+  `gateway_cancelled_before_response_total`, counts them.
+
+### Database changes
+
+Both apply on their own at startup, as every schema change does, and
+both are additive:
+
+- `models` gains three nullable columns: `cache_read_weight`,
+  `cache_write_weight` and `cache_write_1h_weight`
+  (`ALTER TABLE … ADD COLUMN IF NOT EXISTS`, `CHECK (>= 0)`).
+- `system_settings` gets an `auth.default_role` row, seeded empty (no
+  role). Existing rows are left alone (`ON CONFLICT DO NOTHING`).
+
+Neither is irreversible. A 1.1.0 server runs against the upgraded
+database: it ignores the new columns and the new setting. What a 1.1.0
+server cannot do is price cache tokens from the weights.
+
+### Added
+
+- **Gemini clients.** New endpoints:
+  - `POST /v1beta/models/{model}:generateContent` and
+    `:streamGenerateContent`, also served under `/v1/models/…`;
+  - `GET /v1beta/models`, which lists models in Gemini's format.
+
+  These requests get the same limits, budgets, filters, routing with
+  failover, format conversion, inspection, billing and audit as every
+  other endpoint. A Gemini upstream gets the request as it was sent.
+  A stream comes back as SSE with `alt=sse`, and as Gemini's JSON array
+  without it. `:countTokens` and `:embedContent` are refused with 400.
+- **The Responses API over a WebSocket.** Connect to `GET /v1/responses`
+  with `Upgrade: websocket`.
+  - Each `response.create` frame is handled like a streamed
+    `POST /v1/responses`, with its own limits, routing, billing and
+    audit row.
+  - Turns on one connection run in order. A refused turn fails with
+    `response.failed`, and the connection stays open.
+  - The connection keeps its latest response. That lets a turn continue
+    from it with `previous_response_id`, even with `store: false`,
+    which is how Codex works, and against any upstream format.
+  - A new counter, `gateway_responses_ws_connections_total`, counts
+    connections.
+- **More places to put an API key.** Gateway keys are also accepted in
+  `x-api-key` (Anthropic SDKs), `x-goog-api-key` and `?key=` (Gemini
+  SDKs), as well as `Authorization: Bearer`. Headers are checked first.
+  A key given in the query string is never sent upstream.
+- **Hidden-text audit events show what the text says.** Each item in
+  `found` gains `revealed`, the ASCII that the hidden tag characters
+  spell.
+- **`auth.default_role` can be set.** It is the role that newly
+  registered users and SSO users get. In 1.x, setting it through the
+  admin API reported success but changed nothing, because the setting
+  row did not exist.
+- **Model editor** fields for the three cache weights. Each placeholder
+  shows the value used when the field is left empty.
+
+### Changed
+
+- **Default output length for upstreams that require `max_tokens`.** When
+  the caller sets none, the gateway now sends 32000 for Claude models and
+  8192 for other models. It used to send 4096, which cut Claude answers
+  short.
+- **More upstreams count as the vendor's own endpoint.** DeepSeek,
+  Moonshot, Zhipu/Z.ai, DashScope, xAI and `*.amazonaws.com` are now
+  recognised, and the check reads the parsed host. A relay URL such as
+  `https://relay/api.openai.com` no longer passes as official. Official
+  endpoints are stricter about request parameters, so the gateway drops
+  or renames some parameters before sending to them.
+- **Hidden-text scanning uses ThinkWatch-Core's `tw-guard`.** Same
+  scope, same actions, and nothing is stripped.
+- **Requests forwarded in their own format lose ThinkWatch's reasoning
+  signatures.** A `tw1.` signature written by an earlier format
+  conversion is removed, because Anthropic rejects it. The upstream's
+  own signatures are kept.
+- **Core crates: `tw-dialect`, `tw-guard` and `tw-breaker` at
+  ThinkWatch-Core v0.43.0.** The code only this edition used (at-rest
+  crypto, SigV4 signing, the gateway error type) moved into this
+  repository. It works the same, and stored secrets decrypt as before.
+- **The server's SQL moved from the request handlers into repository
+  modules** (catalog, dashboard, limits, log forwarding, identity,
+  access, MCP). Every statement is unchanged. New integration tests cover
+  these endpoints and pass on both the old and the new code.
+- **CI runs on pull requests into `dev`**, including the whole
+  integration suite against Postgres, Redis and ClickHouse.
+
+### Fixed
+
+- **Revoking a user's default MCP connection always failed with a 500**,
+  and the account could not be revoked. The newest remaining account is
+  now made the default.
+
 ## [1.1.0] — 2026-09-24
 
 The gateway stops rebuilding every request as a chat-shaped message. A
@@ -343,7 +557,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.0.0
 [1.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.1.0
 [1.0.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.2
 [1.0.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.1
