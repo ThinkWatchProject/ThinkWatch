@@ -34,6 +34,13 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 
+# Dev and test builds keep only line tables: backtraces still name the
+# file and line, but the full variable-level debug info is gone. Each
+# integration test is its own binary linking the whole workspace, so
+# full debug info filled ~150 GB of target/ in a day.
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 
 # ── thinkwatch-core (MIT) ────────────────────────────────────────────
