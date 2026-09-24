@@ -8,6 +8,7 @@ use think_watch_common::models::LogForwarder;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::log_forwarder_repository as repo;
 
 // --- List all forwarders ---
 
@@ -35,11 +36,7 @@ pub async fn list_forwarders(
     // or test fixture leak that creates thousands of rows would
     // serialize a multi-MB JSON payload synchronously and risk OOM.
     // Add tiebreaker on id so the truncation is at least stable.
-    let forwarders = sqlx::query_as::<_, LogForwarder>(
-        "SELECT * FROM log_forwarders ORDER BY created_at DESC, id DESC LIMIT 500",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let forwarders = repo::list(&state.db).await?;
 
     Ok(Json(forwarders))
 }
@@ -114,16 +111,14 @@ pub async fn create_forwarder(
     }
 
     let enabled = req.enabled.unwrap_or(true);
-    let forwarder = sqlx::query_as::<_, LogForwarder>(
-        r#"INSERT INTO log_forwarders (name, forwarder_type, config, enabled, log_types)
-           VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+    let forwarder = repo::create(
+        &state.db,
+        &req.name,
+        &req.forwarder_type,
+        &req.config,
+        enabled,
+        &log_types,
     )
-    .bind(&req.name)
-    .bind(&req.forwarder_type)
-    .bind(&req.config)
-    .bind(enabled)
-    .bind(&log_types)
-    .fetch_one(&state.db)
     .await?;
 
     state.audit.reload_forwarders().await;
@@ -173,9 +168,7 @@ pub async fn update_forwarder(
     auth_user
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
-    let existing = sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
+    let existing = repo::find(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
@@ -202,17 +195,7 @@ pub async fn update_forwarder(
     let config = req.config.as_ref().unwrap_or(&existing.config);
     let enabled = req.enabled.unwrap_or(existing.enabled);
 
-    let updated = sqlx::query_as::<_, LogForwarder>(
-        r#"UPDATE log_forwarders SET name = $2, config = $3, enabled = $4, log_types = $5, updated_at = now()
-           WHERE id = $1 RETURNING *"#,
-    )
-    .bind(id)
-    .bind(name)
-    .bind(config)
-    .bind(enabled)
-    .bind(&log_types)
-    .fetch_one(&state.db)
-    .await?;
+    let updated = repo::update(&state.db, id, name, config, enabled, &log_types).await?;
 
     state.audit.reload_forwarders().await;
 
@@ -244,12 +227,7 @@ pub async fn delete_forwarder(
     auth_user
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
-    let result = sqlx::query("DELETE FROM log_forwarders WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    if repo::delete(&state.db, id).await? == 0 {
         return Err(AppError::NotFound("Forwarder not found".into()));
     }
 
@@ -306,15 +284,9 @@ pub async fn toggle_forwarder(
     // Idempotent: SET enabled = $2, not NOT enabled. A retry of the
     // same request leaves the row in the same final state and emits
     // the same audit action.
-    let updated = sqlx::query_as::<_, LogForwarder>(
-        r#"UPDATE log_forwarders SET enabled = $2, updated_at = now()
-           WHERE id = $1 RETURNING *"#,
-    )
-    .bind(id)
-    .bind(req.enabled)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
+    let updated = repo::set_enabled(&state.db, id, req.enabled)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
     state.audit.reload_forwarders().await;
 
@@ -357,14 +329,9 @@ pub async fn reset_stats(
     auth_user
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
-    let updated = sqlx::query_as::<_, LogForwarder>(
-        r#"UPDATE log_forwarders SET sent_count = 0, error_count = 0, last_error = NULL, updated_at = now()
-           WHERE id = $1 RETURNING *"#,
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
+    let updated = repo::reset_stats(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
     Ok(Json(updated))
 }
@@ -409,9 +376,7 @@ pub async fn test_forwarder(
         "log_forwarder",
     )
     .await?;
-    let forwarder = sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
+    let forwarder = repo::find(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 

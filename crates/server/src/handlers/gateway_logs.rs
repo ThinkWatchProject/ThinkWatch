@@ -8,6 +8,7 @@ use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::analytics_repository;
 
 use super::clickhouse_util::*;
 
@@ -172,13 +173,9 @@ pub async fn list_gateway_logs(
     //     letting the empty result speak for itself.
     if let Some(ref raw) = params.api_key_id {
         let lineage_id = match raw.parse::<uuid::Uuid>() {
-            Ok(id) => {
-                sqlx::query_scalar::<_, uuid::Uuid>("SELECT lineage_id FROM api_keys WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("lineage lookup: {e}")))?
-            }
+            Ok(id) => analytics_repository::api_key_lineage_id(&state.db, id)
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("lineage lookup: {e}")))?,
             Err(_) => None,
         };
         if let Some(lid) = lineage_id {

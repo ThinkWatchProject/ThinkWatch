@@ -11,6 +11,7 @@ use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::observability_repository as repo;
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DashboardLayout {
@@ -35,11 +36,7 @@ pub async fn get_dashboard_layout(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<DashboardLayout>, AppError> {
-    let row: Option<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT name, layout_json FROM user_dashboard_layouts WHERE user_id = $1")
-            .bind(auth_user.claims.sub)
-            .fetch_optional(&state.db)
-            .await?;
+    let row = repo::get_layout(&state.db, auth_user.claims.sub).await?;
 
     let (name, layout_json) = row.unwrap_or_else(|| ("default".into(), serde_json::Value::Null));
     Ok(Json(DashboardLayout { name, layout_json }))
@@ -86,19 +83,7 @@ pub async fn put_dashboard_layout(
         req.name
     };
 
-    sqlx::query(
-        "INSERT INTO user_dashboard_layouts (user_id, name, layout_json, updated_at) \
-         VALUES ($1, $2, $3, now()) \
-         ON CONFLICT (user_id) DO UPDATE \
-           SET name = EXCLUDED.name, \
-               layout_json = EXCLUDED.layout_json, \
-               updated_at = now()",
-    )
-    .bind(auth_user.claims.sub)
-    .bind(&name)
-    .bind(&req.layout_json)
-    .execute(&state.db)
-    .await?;
+    repo::upsert_layout(&state.db, auth_user.claims.sub, &name, &req.layout_json).await?;
 
     Ok(Json(serde_json::json!({ "status": "saved" })))
 }
