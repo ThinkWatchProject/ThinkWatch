@@ -2,14 +2,16 @@
 //!
 //! `verify_signature.rs` checks every mutating request against a
 //! single public key per user, stored in Redis at
-//! `signing_pubkey:{user_id}`. The user's browser rotates this key
-//! on every login by calling `POST /api/auth/register-key`, which
-//! overwrites whatever was there. The contract this test pins:
+//! `signing_pubkey:{user_id}`. The user's browser registers a fresh
+//! key after every login by calling `POST /api/auth/register-key`;
+//! a login clears the slot, and a second registration within the same
+//! session is refused. The contract this test pins:
 //!
-//!   1. After overwriting the public key, signed requests using the
-//!      OLD private key must be rejected with 401.
-//!   2. The new key works for signed requests immediately, no
-//!      session reset required.
+//!   1. Registering a second key without logging in again is a 409,
+//!      and the first key keeps working.
+//!   2. After a fresh login, the new key works for signed requests
+//!      immediately, and signed requests using the OLD private key
+//!      are rejected with 401.
 //!   3. IP binding: when the operator opts into XFF-based IP
 //!      resolution, a request signed with a key registered from
 //!      one IP must be rejected when it arrives from a different
@@ -40,18 +42,19 @@ async fn admin_login(app: &TestApp) -> TestClient {
 #[tokio::test]
 async fn rotation_invalidates_old_signing_key() {
     let app = TestApp::spawn().await;
-    let con = admin_login(&app).await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    let login = || {
+        con.post(
+            "/api/auth/login",
+            json!({"email": admin.user.email, "password": admin.plaintext_password}),
+        )
+    };
+    login().await.unwrap().assert_ok();
 
-    // Pick a mutating endpoint we know an admin is allowed to hit
-    // and that requires signing — provider-test does the job, with
-    // a dummy URL that fails downstream but only AFTER the signature
-    // gate, so a 4xx body still proves the signature was accepted.
-    // Use an admin POST that succeeds end-to-end so we can split
-    // sig-fail (401) from "sig fine, handler said no" (any 2xx/4xx
-    // that's not 401).
-    //
-    // `POST /api/dashboard/ws-ticket` is signed and idempotent —
-    // perfect probe.
+    // `POST /api/dashboard/ws-ticket` is signed and idempotent — a
+    // 401 means the signature was refused, anything else that it
+    // passed.
 
     // 1. Mint key A and register it with the server.
     let key_a = SignedKey::generate();
@@ -73,8 +76,26 @@ async fn rotation_invalidates_old_signing_key() {
         "control: key A must mint a ticket: {body}"
     );
 
-    // 2. Mint key B and register it. This overwrites A in Redis.
+    // 2. Key B within the same session is refused: whoever holds the
+    //    access cookie must not be able to swap the key out.
     let key_b = SignedKey::generate();
+    con.set_signing_key(key_b.clone());
+    let r = con
+        .post(
+            "/api/auth/register-key",
+            json!({"public_key": key_b.public_jwk()}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 409, "silent overwrite: {}", r.text());
+    con.set_signing_key(key_a.clone());
+    con.post_empty("/api/dashboard/ws-ticket")
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // 3. A fresh login clears the slot; B registers and works at once.
+    login().await.unwrap().assert_ok();
     con.set_signing_key(key_b.clone());
     con.post(
         "/api/auth/register-key",
@@ -83,16 +104,12 @@ async fn rotation_invalidates_old_signing_key() {
     .await
     .unwrap()
     .assert_ok();
-
-    // Signed request with key B — must also succeed (no session
-    // reset required between rotation and use).
     con.post_empty("/api/dashboard/ws-ticket")
         .await
         .unwrap()
         .assert_ok();
 
-    // 3. Restore client to key A and try again. Redis no longer
-    //    holds A's pubkey, so the verifier must reject.
+    // 4. Back to key A: the server no longer holds its public key.
     con.set_signing_key(key_a);
     let r = con.post_empty("/api/dashboard/ws-ticket").await.unwrap();
     assert_eq!(

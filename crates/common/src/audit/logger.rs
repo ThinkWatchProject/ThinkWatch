@@ -8,11 +8,12 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 
 use sqlx::PgPool;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, mpsc};
 
 use super::clickhouse::flush_to_clickhouse;
 use super::forwarders::{
-    ForwarderRegistry, ForwarderRuntime, send_kafka, send_tcp_syslog, send_udp_syslog, send_webhook,
+    ForwarderRegistry, ForwarderRuntime, Registry, send_kafka, send_tcp_syslog, send_udp_syslog,
+    send_webhook,
 };
 use super::outbox::{drain_once, webhook_outbox_drain_loop};
 use super::types::AuditEntry;
@@ -101,7 +102,7 @@ impl AuditLogger {
         Self {
             tx,
             db: None,
-            registry: Arc::new(RwLock::new(HashMap::new())),
+            registry: Arc::new(Registry::new()),
             sample_rate_bps: Arc::new(std::sync::atomic::AtomicU32::new(10_000)),
         }
     }
@@ -136,7 +137,7 @@ impl AuditLogger {
         dynamic_config: Option<Arc<crate::dynamic_config::DynamicConfig>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(AUDIT_CHANNEL_CAPACITY);
-        let registry: ForwarderRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let registry: ForwarderRegistry = Arc::new(Registry::new());
         let sample_rate_bps = Arc::new(std::sync::atomic::AtomicU32::new(10_000));
 
         // Populate the forwarder registry BEFORE the worker starts
@@ -321,6 +322,12 @@ impl AuditLogger {
         }
     }
 
+    /// Replace the URL check every webhook / Kafka delivery goes through.
+    /// The server hands it the same validator it uses everywhere else.
+    pub fn set_url_validator(&self, v: crate::validation::UrlValidator) {
+        self.registry.set_url_check(v);
+    }
+
     /// Force-reload forwarder configs from DB (called after CRUD ops).
     pub async fn reload_forwarders(&self) {
         if let Some(ref db) = self.db {
@@ -367,7 +374,7 @@ async fn reload_forwarders(db: &PgPool, registry: &ForwarderRegistry) {
         );
     }
 
-    let mut guard = registry.write().await;
+    let mut guard = registry.forwarders.write().await;
     *guard = map;
 }
 
@@ -445,7 +452,8 @@ pub(super) async fn forward_to_all(
     entry: &AuditEntry,
 ) {
     let log_type_str = entry.log_type.as_str();
-    let guard = registry.read().await;
+    let check = registry.url_check();
+    let guard = registry.forwarders.read().await;
     for (id, runtime) in guard.iter() {
         if !runtime.config.enabled {
             continue;
@@ -457,8 +465,8 @@ pub(super) async fn forward_to_all(
         let result = match runtime.config.forwarder_type.as_str() {
             "udp_syslog" => send_udp_syslog(runtime, entry),
             "tcp_syslog" => send_tcp_syslog(runtime, entry).await,
-            "kafka" => send_kafka(http_client, &runtime.config, entry).await,
-            "webhook" => send_webhook(http_client, &runtime.config, entry).await,
+            "kafka" => send_kafka(http_client, &check, &runtime.config, entry).await,
+            "webhook" => send_webhook(http_client, &check, &runtime.config, entry).await,
             other => {
                 tracing::warn!("Unknown forwarder type: {other}");
                 Err(format!("Unknown forwarder type: {other}"))

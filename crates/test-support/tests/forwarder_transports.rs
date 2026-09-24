@@ -222,7 +222,7 @@ async fn tcp_syslog_forwarder_writes_newline_terminated_message() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn kafka_forwarder_posts_records_envelope_to_topic_url() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let server = MockServer::start().await;
 
     let topic = "audit-test-topic";

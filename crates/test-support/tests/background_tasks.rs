@@ -250,7 +250,7 @@ async fn data_retention_keeps_recent_soft_deletes() {
 async fn webhook_outbox_drain_delivers_and_clears() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let admin = fixtures::create_admin_user(&app.db).await.unwrap();
 
     // 1. Stand up a 200-OK webhook receiver.

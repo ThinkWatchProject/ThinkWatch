@@ -169,7 +169,7 @@ pub async fn init_state(
         gateway_router,
         weight_cache,
         user_token_resolver,
-        url_validator: crate::app::production_url_validator(),
+        url_validator: think_watch_common::validation::production_url_validator(),
         cost_tracker,
         blob_store,
         blob_redactor,

@@ -76,7 +76,7 @@ pub struct SpawnOptions {
     /// the server is about to fetch — keep it tight (e.g. still
     /// reject `169.254.169.254`) so the test surface area mirrors
     /// production semantics outside the loopback carve-out.
-    pub url_validator: Option<think_watch_server::app::UrlValidator>,
+    pub url_validator: Option<think_watch_common::validation::UrlValidator>,
     /// Override the body-offload store. `None` = whatever
     /// `init::init_state` builds from env (typically [`InlineStore`]
     /// in test envs because S3_* vars aren't set). Tests that need
@@ -85,11 +85,40 @@ pub struct SpawnOptions {
     pub blob_store: Option<std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>>,
 }
 
+/// An SSRF guard that lets a `wiremock` on `127.0.0.1` through and still
+/// refuses the cloud metadata service — the real-world target the guard
+/// exists for.
+pub fn permissive_url_validator() -> think_watch_common::validation::UrlValidator {
+    use think_watch_common::errors::AppError;
+    std::sync::Arc::new(|u: &str| {
+        if !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err(AppError::BadRequest("URL must use http or https".into()));
+        }
+        if u.contains("169.254.169.254") || u.contains("metadata.google.internal") {
+            return Err(AppError::BadRequest("URL points to blocked address".into()));
+        }
+        Ok(())
+    })
+}
+
 impl TestApp {
     /// Boot a fresh `TestApp`. Panics on failure — fail-fast in tests
     /// is the right call.
     pub async fn spawn() -> Self {
         Self::try_spawn().await.expect("TestApp::spawn failed")
+    }
+
+    /// Same as [`spawn`], with [`permissive_url_validator`]: for tests whose
+    /// server has to reach a mock on loopback (webhook and Kafka
+    /// receivers, OAuth discovery, provider probes), and for tests that
+    /// save a public URL but must not depend on resolving it.
+    pub async fn spawn_reaching_loopback() -> Self {
+        Self::try_spawn_with(SpawnOptions {
+            url_validator: Some(permissive_url_validator()),
+            ..Default::default()
+        })
+        .await
+        .expect("TestApp::spawn_reaching_loopback failed")
     }
 
     /// Same as [`spawn`] but opts the test into a per-test ClickHouse
@@ -198,6 +227,9 @@ impl TestApp {
 
         let mut state = init::init_state(config.clone(), db.clone(), redis, ch_client).await?;
         if let Some(v) = opts.url_validator {
+            // Every outbound fetch goes through it — webhook and Kafka
+            // deliveries included, not only the admin handlers.
+            state.audit.set_url_validator(v.clone());
             state.url_validator = v;
         }
         if let Some(store) = opts.blob_store {
@@ -272,6 +304,20 @@ impl TestApp {
         TestClient::new(self.gateway_url.clone())
     }
 
+    /// Write a system setting and reload the in-memory config, the way
+    /// the admin API does. `fixtures::set_setting` alone only writes the
+    /// row: the running server keeps reading the old value.
+    pub async fn set_setting(&self, key: &str, value: serde_json::Value) {
+        fixtures::set_setting(&self.db, key, value)
+            .await
+            .expect("write system setting");
+        self.state
+            .dynamic_config
+            .reload()
+            .await
+            .expect("reload dynamic config");
+    }
+
     /// Force a reload of the gateway model router. Call after
     /// inserting / mutating providers or model_routes via the test
     /// fixture helpers so the in-memory router sees them.
@@ -332,6 +378,7 @@ pub mod prelude {
     pub use crate::client::{SignedKey, TestClient};
     pub use crate::fixtures;
     pub use crate::mock_provider::MockProvider;
+    pub use crate::permissive_url_validator;
     pub use serde_json::{Value as Json, json};
     pub use uuid::Uuid;
 

@@ -2,8 +2,8 @@
 //!
 //! Three storage shapes hold AES-256-GCM-encrypted secrets reachable
 //! through handlers covered here:
-//!   - `system_settings.value` for `oidc.client_secret_encrypted`
-//!     (hex-encoded ciphertext stored in the JSON value)
+//!   - `system_settings.value` for the OIDC setup draft's
+//!     `client_secret_encrypted` (hex-encoded ciphertext in the JSON)
 //!   - `users.totp_secret` (hex-encoded ciphertext)
 //!   - `providers.config_json` — every header `value` and the
 //!     `aws_secret_access_key` are stored as `{"$enc": "<hex>"}`
@@ -29,18 +29,17 @@ use think_watch_test_support::prelude::*;
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn oidc_client_secret_round_trips_through_admin_patch() {
-    let app = TestApp::spawn().await;
+async fn oidc_client_secret_lands_encrypted_in_the_draft() {
+    // The setup wizard keeps an in-progress config as a draft; the
+    // secret is encrypted the moment it arrives, before any test login
+    // or activation.
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_session(&app).await;
 
     let secret = "oidc_super_secret_4tw";
     con.patch(
-        "/api/admin/settings/oidc",
+        "/api/admin/settings/oidc/draft",
         json!({
-            "enabled": true,
-            // Real public hostname so the SSRF guard's DNS resolve
-            // step passes — we only care about the encryption
-            // round-trip, not actual OIDC discovery.
             "issuer_url": "https://accounts.google.com",
             "client_id": "tw-client",
             "client_secret": secret,
@@ -51,21 +50,21 @@ async fn oidc_client_secret_round_trips_through_admin_patch() {
     .unwrap()
     .assert_ok();
 
-    // The setting key for the encrypted secret. Stored as hex of
-    // the raw envelope so it fits inside the `system_settings.value`
-    // JSONB. Decrypt it here and confirm the plaintext.
-    let stored: Value = sqlx::query_scalar(
-        "SELECT value FROM system_settings WHERE key = 'oidc.client_secret_encrypted'",
-    )
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
-    let hex_text = stored.as_str().expect("hex string in JSONB value");
-    assert!(!hex_text.is_empty(), "client_secret was not persisted");
+    // Stored as hex of the raw envelope inside the draft's JSONB.
+    // Decrypt it here and confirm the plaintext.
+    let draft: Value =
+        sqlx::query_scalar("SELECT value FROM system_settings WHERE key = 'oidc.draft'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
     assert!(
-        !hex_text.contains(secret),
-        "plaintext secret leaked into the system_settings hex value"
+        !draft.to_string().contains(secret),
+        "plaintext secret leaked into the stored draft"
     );
+    let hex_text = draft["client_secret_encrypted"]
+        .as_str()
+        .expect("hex string in the draft");
+    assert!(!hex_text.is_empty(), "client_secret was not persisted");
 
     let key = tw_crypto::crypto::parse_encryption_key(&app.state.config.encryption_key).unwrap();
     let raw = hex::decode(hex_text).expect("hex decode");
@@ -193,7 +192,7 @@ async fn provider_create_encrypts_header_values_at_rest() {
     //   - every header value lands as `{"$enc": "<hex>"}` in the DB row
     //   - plaintext never appears anywhere in `config_json`
     //   - the gateway router reload decrypts back to the original
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_session(&app).await;
 
     let secret_value = "sk-test-rotated-1234567890";
@@ -257,7 +256,7 @@ async fn provider_create_encrypts_aws_bedrock_secret() {
     // Bedrock secrets are stored as `aws_secret_access_key` directly
     // under `config_json`, not in the headers array. The handler must
     // wrap those too.
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_session(&app).await;
 
     let aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -314,7 +313,7 @@ async fn provider_loader_decrypts_envelopes_back_to_headers() {
     // value (not the $enc wrapper). This is the gateway-side
     // observability check — if the loader regressed and stored the
     // ciphertext verbatim, upstream calls would fail with 401.
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_session(&app).await;
 
     let upstream_secret = "test-bearer-for-loader-roundtrip";
@@ -365,7 +364,7 @@ async fn provider_read_redacts_headers_and_blank_patch_keeps_secret() {
     // "[object Object]" and saved that back as the provider's new
     // secret. Reads must redact, and a header PATCHed with an empty
     // value must keep whatever is stored.
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_session(&app).await;
 
     let secret_value = "sk-redaction-9876543210";

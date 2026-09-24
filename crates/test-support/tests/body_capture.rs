@@ -160,9 +160,8 @@ async fn body_capture_records_request_and_response_by_default() {
 #[tokio::test]
 async fn body_capture_disabled_toggle_writes_null_request() {
     let app = TestApp::spawn_with_clickhouse().await;
-    fixtures::set_setting(&app.db, "audit.capture_request_bodies", Value::Bool(false))
-        .await
-        .unwrap();
+    app.set_setting("audit.capture_request_bodies", Value::Bool(false))
+        .await;
     let (api_key, user_id) = seed_runtime(&app).await;
     drive_one_call(&app, &api_key, PROBE_PROMPT).await;
     let ch = app.state.clickhouse.as_ref().unwrap();
@@ -188,12 +187,10 @@ async fn body_capture_disabled_toggle_writes_null_request() {
 #[tokio::test]
 async fn body_capture_truncates_when_over_max_bytes() {
     let app = TestApp::spawn_with_clickhouse().await;
-    // 256 → tiny cap; the JSON-serialized messages array will far
-    // exceed this so we should see the …[truncated] sentinel and
-    // status = "truncated".
-    fixtures::set_setting(&app.db, "audit.body_max_bytes", Value::from(256_i64))
-        .await
-        .unwrap();
+    // The request is captured as the caller sent it — about 100 bytes
+    // here — so the cap has to sit well below that to truncate it.
+    app.set_setting("audit.body_max_bytes", Value::from(64_i64))
+        .await;
     let (api_key, user_id) = seed_runtime(&app).await;
     drive_one_call(&app, &api_key, PROBE_PROMPT).await;
     let ch = app.state.clickhouse.as_ref().unwrap();
@@ -206,10 +203,17 @@ async fn body_capture_truncates_when_over_max_bytes() {
         req_str.ends_with("..."),
         "truncated request should carry the ellipsis sentinel, got: {req_str:?}"
     );
+    assert!(
+        req_str.len() <= 64 + "...".len(),
+        "the stored body must be within the configured cap, got {} bytes",
+        req_str.len()
+    );
+    // The byte count is the body's original size, not the cell's: totals
+    // of captured bytes would otherwise count what was cut off as nothing.
     let r_bytes = row.request_body_bytes.expect("byte count populated");
     assert!(
-        (r_bytes as usize) <= 256,
-        "truncated request must be within the configured cap, got {r_bytes}"
+        (r_bytes as usize) > 64,
+        "the byte count should be the original size, got {r_bytes}"
     );
 }
 

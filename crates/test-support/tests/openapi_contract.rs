@@ -114,7 +114,12 @@ async fn every_documented_path_is_actually_routed() {
             let resp = match method {
                 "get" => con.get(&probe).await,
                 "delete" => con.delete(&probe).await,
-                "post" => con.post(&probe, json!({})).await,
+                // `send`, not `post`: `post` mints proof-of-work for
+                // the login route, which needs an email in the body.
+                "post" => {
+                    con.send(reqwest::Method::POST, &probe, Some(&json!({})))
+                        .await
+                }
                 "put" => con.put(&probe, json!({})).await,
                 "patch" => con.patch(&probe, json!({})).await,
                 _ => unreachable!(),

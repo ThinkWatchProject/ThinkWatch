@@ -109,7 +109,7 @@ async fn mcp_servers_bulk_delete_happy_path() {
                 "/api/mcp/servers",
                 json!({
                     "name": unique_name(&format!("bulk{i}")),
-                    "namespace_prefix": format!("bulk_ns_{}", uuid::Uuid::new_v4().simple()),
+                    "namespace_prefix": format!("bulk_ns_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
                     "endpoint_url": "https://example.com/mcp",
                     "transport_type": "streamable_http"
                 }),
@@ -118,7 +118,12 @@ async fn mcp_servers_bulk_delete_happy_path() {
             .unwrap()
             .json()
             .unwrap();
-        ids.push(created["id"].as_str().unwrap().to_string());
+        ids.push(
+            created["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("create failed: {created}"))
+                .to_string(),
+        );
     }
 
     let resp = con
@@ -154,7 +159,7 @@ async fn mcp_servers_bulk_delete_skips_not_found() {
             "/api/mcp/servers",
             json!({
                 "name": unique_name("present"),
-                "namespace_prefix": format!("present_{}", uuid::Uuid::new_v4().simple()),
+                "namespace_prefix": format!("present_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
                 "endpoint_url": "https://example.com/mcp",
                 "transport_type": "streamable_http"
             }),
@@ -163,7 +168,10 @@ async fn mcp_servers_bulk_delete_skips_not_found() {
         .unwrap()
         .json()
         .unwrap();
-    let real_id = created["id"].as_str().unwrap().to_string();
+    let real_id = created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("create failed: {created}"))
+        .to_string();
     let phantom = uuid::Uuid::new_v4().to_string();
 
     let resp = con

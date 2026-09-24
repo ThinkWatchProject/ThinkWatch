@@ -126,7 +126,7 @@ pub async fn test_mcp_server(
     if req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest("endpoint_url is required".into()));
     }
-    think_watch_common::validation::validate_url(&req.endpoint_url)?;
+    (state.url_validator)(&req.endpoint_url)?;
     if let Some(ref headers) = req.custom_headers {
         think_watch_common::validation::validate_custom_headers(headers)?;
     }
@@ -232,6 +232,7 @@ pub async fn list_servers(
 /// optional URLs by sending `""`, and `validate_url` would otherwise
 /// reject empty input with a confusing message.
 pub(super) fn validate_oauth_endpoint_urls(
+    check: &think_watch_common::validation::UrlValidator,
     authorization: Option<&str>,
     token: Option<&str>,
     revocation: Option<&str>,
@@ -244,7 +245,7 @@ pub(super) fn validate_oauth_endpoint_urls(
         ("oauth_userinfo_endpoint", userinfo),
     ] {
         if let Some(u) = url.filter(|s| !s.is_empty()) {
-            think_watch_common::validation::validate_url(u).map_err(|e| match e {
+            check(u).map_err(|e| match e {
                 AppError::BadRequest(m) => AppError::BadRequest(format!("{field}: {m}")),
                 other => other,
             })?;
@@ -310,12 +311,13 @@ pub async fn create_server(
     // turn the server into an SSRF gadget that carries the AES-decrypted
     // client_secret in the body.
     validate_oauth_endpoint_urls(
+        &state.url_validator,
         req.oauth_authorization_endpoint.as_deref(),
         req.oauth_token_endpoint.as_deref(),
         req.oauth_revocation_endpoint.as_deref(),
         req.oauth_userinfo_endpoint.as_deref(),
     )?;
-    think_watch_common::validation::validate_url(&req.endpoint_url)?;
+    (state.url_validator)(&req.endpoint_url)?;
 
     // Encrypt the OAuth client_secret if one was supplied.
     let oauth_client_secret_encrypted = encrypt_client_secret(
@@ -941,12 +943,13 @@ pub async fn update_server(
     };
 
     if req.endpoint_url.is_some() {
-        think_watch_common::validation::validate_url(endpoint_url)?;
+        (state.url_validator)(endpoint_url)?;
     }
     // SSRF: validate any newly-supplied OAuth endpoint URLs. Absent
     // fields preserve the existing value (already validated when first
     // set), so we only re-check what the caller is changing.
     validate_oauth_endpoint_urls(
+        &state.url_validator,
         req.oauth_authorization_endpoint
             .as_ref()
             .and_then(|o| o.as_deref()),
