@@ -223,7 +223,7 @@ async fn wizard_oauth_admin_shared_full_round_trip() {
     //   5. Status endpoint should now 404 (blob consumed).
     //
     // This pins the round-trip the audit flagged as untested.
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let (con, _admin) = admin_session_with_user(&app).await;
     let provider = wizard_oauth_provider().await;
 

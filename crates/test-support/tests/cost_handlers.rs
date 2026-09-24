@@ -35,6 +35,16 @@ use think_watch_test_support::prelude::*;
 // Cost forecast
 // ---------------------------------------------------------------------------
 
+/// A cost field. Costs are decimal strings on the wire (`"12.3456"`), so
+/// the frontend never sees an f64 approximation.
+fn money(v: &Value) -> Decimal {
+    Decimal::from_str(
+        v.as_str()
+            .unwrap_or_else(|| panic!("cost field is not a string: {v}")),
+    )
+    .expect("cost field is a decimal")
+}
+
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn cost_forecast_returns_full_envelope_on_empty_clickhouse() {
@@ -66,8 +76,8 @@ async fn cost_forecast_returns_full_envelope_on_empty_clickhouse() {
             "field {k} missing from cost-forecast envelope: {body}"
         );
     }
-    assert_eq!(body["month_to_date_usd"].as_f64(), Some(0.0));
-    assert_eq!(body["projected_month_end_usd"].as_f64(), Some(0.0));
+    assert_eq!(money(&body["month_to_date_usd"]), Decimal::ZERO);
+    assert_eq!(money(&body["projected_month_end_usd"]), Decimal::ZERO);
     // Empty prior-month window → null. Without this, the dashboard
     // shows "↑ NaN%" or "↑ Inf%" — both are JSON-invalid and the
     // client crashes anyway.
@@ -160,16 +170,18 @@ async fn cost_forecast_extrapolates_linear_run_rate() {
         .json()
         .unwrap();
 
-    let mtd = body["month_to_date_usd"].as_f64().unwrap();
-    let days_in = body["days_in_month"].as_f64().unwrap();
-    let days_elapsed = body["days_elapsed"].as_f64().unwrap();
-    let projected = body["projected_month_end_usd"].as_f64().unwrap();
+    let mtd = money(&body["month_to_date_usd"]);
+    let days_in = Decimal::from(body["days_in_month"].as_u64().unwrap());
+    let days_elapsed = Decimal::from(body["days_elapsed"].as_u64().unwrap());
+    let projected = money(&body["projected_month_end_usd"]);
 
-    assert!(mtd > 0.0, "MTD should reflect the gateway call: {mtd}");
-    let expected = mtd * days_in / days_elapsed;
-    let _ = Decimal::from_str("0").unwrap(); // keep rust_decimal import live
     assert!(
-        (projected - expected).abs() < 0.0001,
+        mtd > Decimal::ZERO,
+        "MTD should reflect the gateway call: {mtd}"
+    );
+    let expected = mtd * days_in / days_elapsed;
+    assert!(
+        (projected - expected).abs() < Decimal::new(1, 4),
         "projected ({projected}) must equal mtd*days_in/days_elapsed ({expected})"
     );
     assert!(

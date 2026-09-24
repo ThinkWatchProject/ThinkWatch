@@ -33,7 +33,7 @@ async fn install_forwarder(app: &TestApp, url: &str) -> Uuid {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn delivery_failure_enqueues_outbox_row_then_drain_redelivers() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
 
     // Receiver that 500s on the FIRST request, 200s afterwards.
     // wiremock's mock priority makes the more-specific (count-bounded)

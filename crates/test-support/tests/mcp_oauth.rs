@@ -833,30 +833,6 @@ async fn mcp_with_oauth_metadata(want_dcr: bool, public_client: bool) -> MockSer
     server
 }
 
-/// SSRF guard for tests: mirrors production semantics (still rejects
-/// the cloud metadata service, blank URLs, non-http schemes) but
-/// allows the 127.0.0.1 origins our wiremocks bind to. Without this
-/// override the probe rejects every wiremock URL before the chain
-/// even starts.
-fn permissive_validator() -> think_watch_server::app::UrlValidator {
-    use std::sync::Arc;
-    use think_watch_common::errors::AppError;
-    Arc::new(|u: &str| {
-        if u.is_empty() {
-            return Err(AppError::BadRequest("URL must contain a host".into()));
-        }
-        if !u.starts_with("http://") && !u.starts_with("https://") {
-            return Err(AppError::BadRequest("URL must use http or https".into()));
-        }
-        // Still defend against the cloud metadata service even in
-        // tests — the real-world bug we don't want to mask.
-        if u.contains("169.254.169.254") || u.contains("metadata.google.internal") {
-            return Err(AppError::BadRequest("URL points to blocked address".into()));
-        }
-        Ok(())
-    })
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn oauth_probe_full_chain_returns_dcr_credentials() {
@@ -866,7 +842,7 @@ async fn oauth_probe_full_chain_returns_dcr_credentials() {
     let upstream =
         mcp_with_oauth_metadata(/* want_dcr */ true, /* public_client */ false).await;
     let app = TestApp::try_spawn_with(SpawnOptions {
-        url_validator: Some(permissive_validator()),
+        url_validator: Some(permissive_url_validator()),
         ..Default::default()
     })
     .await
@@ -950,7 +926,7 @@ async fn oauth_probe_public_client_omits_client_secret() {
     // (`is_public_client = true`); the UI flip is covered separately.
     let upstream = mcp_with_oauth_metadata(/* want_dcr */ true, /* public_client */ true).await;
     let app = TestApp::try_spawn_with(SpawnOptions {
-        url_validator: Some(permissive_validator()),
+        url_validator: Some(permissive_url_validator()),
         ..Default::default()
     })
     .await
@@ -987,7 +963,7 @@ async fn oauth_probe_partial_when_dcr_unavailable() {
     let upstream =
         mcp_with_oauth_metadata(/* want_dcr */ false, /* public_client */ false).await;
     let app = TestApp::try_spawn_with(SpawnOptions {
-        url_validator: Some(permissive_validator()),
+        url_validator: Some(permissive_url_validator()),
         ..Default::default()
     })
     .await

@@ -172,7 +172,8 @@ pub(super) async fn drain_once(
         return Ok(());
     }
 
-    let registry_guard = registry.read().await;
+    let check = registry.url_check();
+    let registry_guard = registry.forwarders.read().await;
     for row in due {
         // Forwarder may have been deleted (cascade should have removed
         // the row, but races happen) or disabled — skip and let the
@@ -215,8 +216,8 @@ pub(super) async fn drain_once(
         let dispatch_result = match runtime.config.forwarder_type.as_str() {
             "udp_syslog" => send_udp_syslog(runtime, &entry),
             "tcp_syslog" => send_tcp_syslog(runtime, &entry).await,
-            "kafka" => send_kafka(http, &runtime.config, &entry).await,
-            "webhook" => send_webhook(http, &runtime.config, &entry).await,
+            "kafka" => send_kafka(http, &check, &runtime.config, &entry).await,
+            "webhook" => send_webhook(http, &check, &runtime.config, &entry).await,
             other => Err(format!("Unknown forwarder type for outbox replay: {other}")),
         };
         match dispatch_result {

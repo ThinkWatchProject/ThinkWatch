@@ -29,8 +29,34 @@ pub(super) struct ForwarderRuntime {
     pub(super) tcp_stream: Arc<Mutex<Option<tokio::net::TcpStream>>>,
 }
 
-/// Shared forwarder registry, reloaded periodically from the database.
-pub(super) type ForwarderRegistry = Arc<RwLock<HashMap<Uuid, ForwarderRuntime>>>;
+/// Shared forwarder registry, reloaded periodically from the database,
+/// and the URL check every delivery goes through.
+pub(super) type ForwarderRegistry = Arc<Registry>;
+
+pub(super) struct Registry {
+    pub(super) forwarders: RwLock<HashMap<Uuid, ForwarderRuntime>>,
+    url_check: std::sync::RwLock<crate::validation::UrlValidator>,
+}
+
+impl Registry {
+    pub(super) fn new() -> Self {
+        Self {
+            forwarders: RwLock::new(HashMap::new()),
+            url_check: std::sync::RwLock::new(crate::validation::production_url_validator()),
+        }
+    }
+
+    pub(super) fn set_url_check(&self, v: crate::validation::UrlValidator) {
+        *self.url_check.write().unwrap_or_else(|e| e.into_inner()) = v;
+    }
+
+    pub(super) fn url_check(&self) -> crate::validation::UrlValidator {
+        self.url_check
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Syslog (UDP / TCP)
@@ -139,6 +165,7 @@ pub(super) async fn send_tcp_syslog(
 
 pub(super) async fn send_kafka(
     client: &reqwest::Client,
+    check: &crate::validation::UrlValidator,
     config: &LogForwarder,
     entry: &AuditEntry,
 ) -> Result<(), String> {
@@ -155,7 +182,7 @@ pub(super) async fn send_kafka(
         .ok_or("Missing 'topic' in kafka config")?;
 
     // DNS rebind defense — same reasoning as `send_webhook`.
-    crate::validation::validate_url(broker_url).map_err(|e| format!("URL validation: {e}"))?;
+    check(broker_url).map_err(|e| format!("URL validation: {e}"))?;
 
     let payload = serde_json::json!({
         "records": [{
@@ -186,6 +213,7 @@ pub(super) async fn send_kafka(
 
 pub(super) async fn send_webhook(
     client: &reqwest::Client,
+    check: &crate::validation::UrlValidator,
     config: &LogForwarder,
     entry: &AuditEntry,
 ) -> Result<(), String> {
@@ -200,10 +228,10 @@ pub(super) async fn send_webhook(
     // re-resolved on every send — an attacker who controls DNS can
     // flip a benign public A record to 127.0.0.1 / 169.254.169.254
     // between save and any of the up-to-24 retry attempts. Mirrors
-    // the test-endpoint pattern. `validate_url` is a no-op DNS
+    // the test-endpoint pattern. The production check is a no-op DNS
     // hit + CIDR check (sub-ms in steady state) so paying it per
     // delivery is cheap compared to the HTTP round-trip itself.
-    crate::validation::validate_url(url).map_err(|e| format!("URL validation: {e}"))?;
+    check(url).map_err(|e| format!("URL validation: {e}"))?;
 
     // Serialize the body once so the HMAC signs exactly what goes over
     // the wire — avoids any field-ordering or whitespace divergence
@@ -215,16 +243,13 @@ pub(super) async fn send_webhook(
         .into();
 
     // Optional HMAC-SHA256 signature. When `signing_secret` is set on
-    // the forwarder row, every delivery gets an `x-signature` header
-    // with `sha256=<hex>` over the body bytes. Receivers can verify by
-    // recomputing with the same secret; a mismatch means the payload
-    // was tampered with in transit (or arrived via a different sender).
-    // HMAC-SHA256 signature includes a timestamp to prevent replay.
-    // The receiver verifies by recomputing `sha256(timestamp + "." +
-    // body)` with the same secret AND rejecting deliveries where
-    // `|now - timestamp| > N seconds` (5 minutes is the recommended
-    // window). Without the timestamp in the signed input, a captured
-    // payload was replayable forever with the same signature.
+    // the forwarder row, every delivery carries `x-signature:
+    // sha256=<hex>` over `<timestamp>.<body>` and the timestamp as
+    // `x-signature-timestamp`. The receiver recomputes it with the same
+    // secret and rejects deliveries where `|now - timestamp|` exceeds a
+    // window (5 minutes is the recommended one). A mismatch means
+    // tampering or a different sender; without the timestamp in the
+    // signed input, a captured payload was replayable forever.
     let signing_secret = config
         .config
         .get("signing_secret")

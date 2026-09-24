@@ -522,14 +522,18 @@ async fn totp_disable_rejects_sso_account() {
     .unwrap()
     .assert_ok();
 
-    // Enable TOTP first so the `not enabled` guard passes, then strip
-    // the password_hash to simulate an SSO-only account.
+    // Enable TOTP first so the `not enabled` guard passes, then turn it
+    // into an SSO-only account: no password, an OIDC identity instead —
+    // a user row must carry one or the other.
     enable_totp_for(&con, &user.user.email).await;
-    sqlx::query("UPDATE users SET password_hash = NULL WHERE id = $1")
-        .bind(user.user.id)
-        .execute(&app.db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE users SET password_hash = NULL, oidc_issuer = 'https://idp.example', \
+         oidc_subject = id::text WHERE id = $1",
+    )
+    .bind(user.user.id)
+    .execute(&app.db)
+    .await
+    .unwrap();
 
     let resp = con
         .post(

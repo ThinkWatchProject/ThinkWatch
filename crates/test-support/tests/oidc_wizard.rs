@@ -81,7 +81,7 @@ async fn default_state_is_empty_draft_and_disabled_active() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn draft_upsert_persists_then_returns_in_get() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_console(&app).await;
 
     con.patch(
@@ -124,7 +124,7 @@ async fn draft_upsert_persists_then_returns_in_get() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn draft_mutation_invalidates_pending_test_result() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_console(&app).await;
 
     // Seed a draft + a passing test result.
@@ -172,7 +172,7 @@ async fn draft_mutation_invalidates_pending_test_result() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn activate_without_passing_test_returns_400() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_console(&app).await;
 
     con.patch(
@@ -206,7 +206,7 @@ async fn activate_without_passing_test_returns_400() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn delete_draft_clears_draft_and_test_result() {
-    let app = TestApp::spawn().await;
+    let app = TestApp::spawn_reaching_loopback().await;
     let con = admin_console(&app).await;
 
     con.patch(

@@ -5,7 +5,6 @@ use uuid::Uuid;
 use think_watch_common::dto::{CreateProviderRequest, ProviderHeader};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
-use think_watch_common::validation::validate_url;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -259,7 +258,7 @@ pub async fn create_provider(
     }
 
     // SSRF prevention: validate base_url
-    validate_url(&req.base_url)?;
+    (state.url_validator)(&req.base_url)?;
 
     // Store unified headers in config_json, encrypting every header
     // value at rest. AWS bedrock secrets (when nested in `config`) get
@@ -342,7 +341,7 @@ pub async fn update_provider(
     let base_url = req.base_url.as_deref().unwrap_or(&existing.base_url);
 
     if req.base_url.is_some() {
-        validate_url(base_url)?;
+        (state.url_validator)(base_url)?;
     }
 
     // Update headers in config_json if provided. Encrypt every header
@@ -603,7 +602,7 @@ pub(crate) async fn run_provider_test(
     // like the gateway does, so it has to honour the same swappable
     // policy — otherwise the probe paths built on it can't be
     // integration-tested against a loopback mock at all.
-    validate: &crate::app::UrlValidator,
+    validate: &think_watch_common::validation::UrlValidator,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     if req.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));

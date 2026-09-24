@@ -319,7 +319,7 @@ pub async fn oauth_probe(
 /// Step 1 — RFC 9728. Returns the issuer URL the MCP endpoint points to.
 async fn discover_issuer(
     http: &reqwest::Client,
-    validator: &crate::app::UrlValidator,
+    validator: &think_watch_common::validation::UrlValidator,
     endpoint_url: &str,
     diag: &mut Vec<String>,
 ) -> Option<String> {
@@ -436,7 +436,7 @@ fn parse_resource_metadata_hint(header: &str) -> Option<String> {
 
 async fn fetch_protected_resource(
     http: &reqwest::Client,
-    validator: &crate::app::UrlValidator,
+    validator: &think_watch_common::validation::UrlValidator,
     url: &str,
     diag: &mut Vec<String>,
 ) -> Option<String> {
@@ -489,7 +489,7 @@ async fn fetch_protected_resource(
 /// some implementations still use.
 async fn fetch_authz_server_metadata(
     http: &reqwest::Client,
-    validator: &crate::app::UrlValidator,
+    validator: &think_watch_common::validation::UrlValidator,
     issuer: &str,
     diag: &mut Vec<String>,
 ) -> AuthzServerMetadata {

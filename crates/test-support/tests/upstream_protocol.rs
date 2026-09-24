@@ -44,25 +44,6 @@ async fn mount_family_split_upstream(server: &MockServer) {
         .await;
 }
 
-/// The catalog fetch runs the same SSRF guard the gateway does, which
-/// rejects loopback — so a wiremock upstream needs the permissive
-/// variant the harness exposes for exactly this.
-fn permissive_validator() -> think_watch_server::app::UrlValidator {
-    use std::sync::Arc;
-    use think_watch_common::errors::AppError;
-    Arc::new(|u: &str| {
-        if !u.starts_with("http://") && !u.starts_with("https://") {
-            return Err(AppError::BadRequest("URL must use http or https".into()));
-        }
-        // Still defend against the cloud metadata service — the
-        // real-world bug we don't want to mask.
-        if u.contains("169.254.169.254") {
-            return Err(AppError::BadRequest("URL points to blocked address".into()));
-        }
-        Ok(())
-    })
-}
-
 async fn route_protocol(app: &TestApp, model_id: &str) -> Option<String> {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT upstream_protocol FROM model_routes WHERE model_id = $1",
@@ -209,7 +190,7 @@ async fn rechecking_a_provider_revisits_a_previously_refused_model() {
     // action is the only way back for a model that has since been
     // enabled there.
     let app = TestApp::try_spawn_with(SpawnOptions {
-        url_validator: Some(permissive_validator()),
+        url_validator: Some(permissive_url_validator()),
         ..Default::default()
     })
     .await
