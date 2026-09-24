@@ -65,7 +65,7 @@ pub struct Upstream {
     /// Header templates from the provider row, `{{…}}` unresolved.
     pub headers: Vec<(String, String)>,
     pub shape: Shape,
-    /// Shown in error messages, e.g. "Anthropic returned 500".
+    /// Names the upstream in error messages.
     pub label: String,
 }
 
@@ -153,11 +153,7 @@ impl Upstream {
             }
         }
 
-        let resp = req
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+        let resp = req.body(body).send().await.map_err(transport_error)?;
         check_status(resp, &self.label).await
     }
 
@@ -182,11 +178,30 @@ impl Upstream {
     }
 }
 
+/// A request that never got an answer: the upstream timed out, or the
+/// connection could not be made or broke. Either way it says nothing
+/// about the request, and another route may well answer it.
+pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
+    if e.is_timeout() {
+        GatewayError::ProviderTimeout(e.to_string())
+    } else {
+        GatewayError::NetworkError(e.to_string())
+    }
+}
+
 /// Turn a non-2xx upstream answer into the error the caller sees.
 ///
 /// 429 keeps the upstream's `Retry-After` so a client's retry policy does
-/// not hammer the same quota window. 401/403 become an auth error. Any
-/// other failure carries the upstream's body, **truncated**: error bodies
+/// not hammer the same quota window. 401/403 become an auth error: the
+/// gateway's own credential for this upstream was refused, which is
+/// about the route, not the caller.
+///
+/// Every other status is kept as it is, in `ProviderHttpError`. Whether
+/// it is the upstream failing (5xx, 408) or the upstream refusing this
+/// request (any other 4xx) decides failover and the circuit breaker —
+/// see `routing::is_upstream_failure`.
+///
+/// The upstream's body goes to the caller **truncated**: error bodies
 /// have carried stack traces, AWS account ids and full debug strings,
 /// and forwarding them verbatim turns the gateway into a leak. The full
 /// body goes to the log.
@@ -220,9 +235,10 @@ async fn check_status(
         } else {
             body
         };
-        return Err(GatewayError::ProviderError(format!(
-            "{label} returned {status}: {shown}"
-        )));
+        return Err(GatewayError::ProviderHttpError {
+            status: status.as_u16(),
+            message: format!("{label}: {shown}"),
+        });
     }
     Ok(resp)
 }

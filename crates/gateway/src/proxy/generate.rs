@@ -314,7 +314,7 @@ pub(crate) async fn read_whole(
     let upstream = resp
         .bytes()
         .await
-        .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+        .map_err(super::transport::transport_error)?;
 
     let mut sniffer = tw_wire::Sniffer::new();
     sniffer.feed(&upstream);
