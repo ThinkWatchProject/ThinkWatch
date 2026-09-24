@@ -8,6 +8,7 @@ use think_watch_common::models::McpStoreTemplate;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::mcp_store_repository::{self as repo, TemplateUpsert};
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -43,19 +44,13 @@ pub async fn list_templates(
     Query(q): Query<StoreListQuery>,
 ) -> Result<Json<Vec<StoreTemplateResponse>>, AppError> {
     // Fetch all installed template IDs for this instance
-    let installed_ids: Vec<Uuid> = sqlx::query_scalar("SELECT template_id FROM mcp_store_installs")
-        .fetch_all(&state.db)
-        .await?;
+    let installed_ids = repo::installed_template_ids(&state.db).await?;
 
     let installed_set: std::collections::HashSet<Uuid> = installed_ids.into_iter().collect();
 
     // Fetch all templates and filter in Rust — the store catalog is small
     // enough that dynamic SQL bind complexity isn't worth it.
-    let templates = sqlx::query_as::<_, McpStoreTemplate>(
-        "SELECT * FROM mcp_store_templates ORDER BY featured DESC, install_count DESC, name ASC",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let templates = repo::list_templates(&state.db).await?;
 
     let results: Vec<StoreTemplateResponse> = templates
         .into_iter()
@@ -110,12 +105,9 @@ pub async fn get_template(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<McpStoreTemplate>, AppError> {
-    let template =
-        sqlx::query_as::<_, McpStoreTemplate>("SELECT * FROM mcp_store_templates WHERE slug = $1")
-            .bind(&slug)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' not found")))?;
+    let template = repo::find_template_by_slug(&state.db, &slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' not found")))?;
     Ok(Json(template))
 }
 
@@ -127,17 +119,7 @@ pub async fn list_categories(
     _auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CategoryCount>>, AppError> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        category: Option<String>,
-        count: Option<i64>,
-    }
-
-    let rows = sqlx::query_as::<_, Row>(
-        "SELECT category, COUNT(*) as count FROM mcp_store_templates GROUP BY category ORDER BY count DESC",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let rows = repo::category_counts(&state.db).await?;
 
     let categories = rows
         .into_iter()
@@ -339,90 +321,43 @@ pub async fn sync_registry(
             _ => "anonymous".to_string(),
         };
 
-        sqlx::query(
-            r#"INSERT INTO mcp_store_templates
-               (slug, name, description, category, tags, endpoint_template,
-                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
-                oauth_revocation_endpoint, oauth_userinfo_endpoint,
-                oauth_default_scopes,
-                auth_shape, static_token_help_url,
-                auth_header_name, auth_value_template,
-                auth_instructions, deploy_type,
-                deploy_command, deploy_docs_url, homepage_url, repo_url, featured, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                       $16, $17, $18, $19, $20, $21, $22, $23, now())
-               ON CONFLICT (slug) DO UPDATE SET
-                 name = EXCLUDED.name,
-                 description = EXCLUDED.description,
-                 category = EXCLUDED.category,
-                 tags = EXCLUDED.tags,
-                 endpoint_template = EXCLUDED.endpoint_template,
-                 oauth_issuer = EXCLUDED.oauth_issuer,
-                 oauth_authorization_endpoint = EXCLUDED.oauth_authorization_endpoint,
-                 oauth_token_endpoint = EXCLUDED.oauth_token_endpoint,
-                 oauth_revocation_endpoint = EXCLUDED.oauth_revocation_endpoint,
-                 oauth_userinfo_endpoint = EXCLUDED.oauth_userinfo_endpoint,
-                 oauth_default_scopes = EXCLUDED.oauth_default_scopes,
-                 auth_shape = EXCLUDED.auth_shape,
-                 static_token_help_url = EXCLUDED.static_token_help_url,
-                 auth_header_name = EXCLUDED.auth_header_name,
-                 auth_value_template = EXCLUDED.auth_value_template,
-                 auth_instructions = EXCLUDED.auth_instructions,
-                 deploy_type = EXCLUDED.deploy_type,
-                 deploy_command = EXCLUDED.deploy_command,
-                 deploy_docs_url = EXCLUDED.deploy_docs_url,
-                 homepage_url = EXCLUDED.homepage_url,
-                 repo_url = EXCLUDED.repo_url,
-                 featured = EXCLUDED.featured,
-                 updated_at = now()"#,
+        let description = t.description.as_ref().and_then(flatten_i18n);
+        let auth_instructions = t.auth_instructions.as_ref().and_then(flatten_i18n);
+        repo::upsert_template(
+            &mut tx,
+            &TemplateUpsert {
+                slug: &t.slug,
+                name: &t.name,
+                description: description.as_deref(),
+                category: t.category.as_deref(),
+                tags: t.tags.as_deref().unwrap_or(&[]),
+                endpoint_template: t.endpoint_template.as_deref(),
+                oauth_issuer: t.oauth_issuer.as_deref(),
+                oauth_authorization_endpoint: t.oauth_authorization_endpoint.as_deref(),
+                oauth_token_endpoint: t.oauth_token_endpoint.as_deref(),
+                oauth_revocation_endpoint: t.oauth_revocation_endpoint.as_deref(),
+                oauth_userinfo_endpoint: t.oauth_userinfo_endpoint.as_deref(),
+                oauth_default_scopes: t.oauth_default_scopes.as_deref().unwrap_or(&[]),
+                auth_shape: &auth_shape,
+                static_token_help_url: t.static_token_help_url.as_deref(),
+                auth_header_name: &auth_header_name,
+                auth_value_template: &auth_value_template,
+                auth_instructions: auth_instructions.as_deref(),
+                deploy_type: t.deploy_type.as_deref().unwrap_or("hosted"),
+                deploy_command: t.deploy_command.as_deref(),
+                deploy_docs_url: t.deploy_docs_url.as_deref(),
+                homepage_url: t.homepage_url.as_deref(),
+                repo_url: t.repo_url.as_deref(),
+                featured: t.featured.unwrap_or(false),
+            },
         )
-        .bind(&t.slug)
-        .bind(&t.name)
-        .bind(t.description.as_ref().and_then(flatten_i18n).as_deref())
-        .bind(&t.category)
-        .bind(t.tags.as_deref().unwrap_or(&[]))
-        .bind(&t.endpoint_template)
-        .bind(&t.oauth_issuer)
-        .bind(&t.oauth_authorization_endpoint)
-        .bind(&t.oauth_token_endpoint)
-        .bind(&t.oauth_revocation_endpoint)
-        .bind(&t.oauth_userinfo_endpoint)
-        .bind(t.oauth_default_scopes.as_deref().unwrap_or(&[]))
-        .bind(&auth_shape)
-        .bind(&t.static_token_help_url)
-        .bind(&auth_header_name)
-        .bind(&auth_value_template)
-        .bind(
-            t.auth_instructions
-                .as_ref()
-                .and_then(flatten_i18n)
-                .as_deref(),
-        )
-        .bind(t.deploy_type.as_deref().unwrap_or("hosted"))
-        .bind(&t.deploy_command)
-        .bind(&t.deploy_docs_url)
-        .bind(&t.homepage_url)
-        .bind(&t.repo_url)
-        .bind(t.featured.unwrap_or(false))
-        .execute(&mut *tx)
         .await?;
         synced += 1;
     }
 
     // Remove templates that are no longer in the registry (but keep those with active installs)
     let registry_slugs: Vec<&str> = registry.templates.iter().map(|t| t.slug.as_str()).collect();
-    let removed = sqlx::query_scalar::<_, i64>(
-        r#"WITH deleted AS (
-             DELETE FROM mcp_store_templates
-             WHERE slug != ALL($1)
-               AND id NOT IN (SELECT template_id FROM mcp_store_installs)
-             RETURNING 1
-           )
-           SELECT COUNT(*) FROM deleted"#,
-    )
-    .bind(&registry_slugs)
-    .fetch_one(&mut *tx)
-    .await?;
+    let removed = repo::delete_templates_not_in(&mut tx, &registry_slugs).await?;
     tx.commit().await?;
 
     state.audit.log(

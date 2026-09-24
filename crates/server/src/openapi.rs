@@ -27,7 +27,7 @@ use crate::handlers::{
         BulkDeleteMcpServersRequest, BulkDeleteMcpServersResponse, BulkDeleteSkip,
         UpdateMcpServerRequest,
     },
-    mcp_tools::{McpToolListResponse, McpToolRow},
+    mcp_tools::McpToolListResponse,
     models::{
         BatchWeightUpdate, BatchWeightsRequest, CreateModelRequest, RouteHistoryBucket,
         RouteHistoryResponse, UpdateModelRequest,
@@ -46,6 +46,7 @@ use crate::handlers::{
         ResetCounterResponse, UsageDay,
     },
 };
+use crate::services::mcp_tool_repository::McpToolRow;
 use crate::services::model_repository::ModelRow;
 
 /// OpenAPI document covering the ThinkWatch console API (port 3001).
