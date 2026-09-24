@@ -56,7 +56,8 @@ INSERT INTO platform_pricing (id) VALUES (1)
 INSERT INTO system_settings (key, value, category, description) VALUES
 ('auth.jwt_access_ttl_secs',   '900',   'auth', 'JWT access token lifetime in seconds'),
 ('auth.jwt_refresh_ttl_days',  '7',     'auth', 'JWT refresh token lifetime in days'),
-('auth.allow_registration',    'false', 'auth', 'Whether public user self-registration is allowed')
+('auth.allow_registration',    'false', 'auth', 'Whether public user self-registration is allowed'),
+('auth.default_role',          '""',    'auth', 'Role assigned to newly registered and SSO users; empty for none')
 ON CONFLICT (key) DO NOTHING;
 
 -- Gateway

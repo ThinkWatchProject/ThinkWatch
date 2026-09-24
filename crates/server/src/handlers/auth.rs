@@ -1824,12 +1824,7 @@ pub async fn totp_status(
     let enabled = repo::totp_enabled(&state.db, auth_user.claims.sub).await?;
 
     // Check if platform requires TOTP
-    let required: bool = state
-        .dynamic_config
-        .get_string("security.totp_required")
-        .await
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    let required = state.dynamic_config.totp_required().await;
 
     Ok(Json(serde_json::json!({
         "enabled": enabled,
