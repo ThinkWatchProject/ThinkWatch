@@ -184,7 +184,10 @@ async fn streaming_cache_hit_replays_assembled_sse() {
     // the response body. Wait briefly for it to land before firing the
     // second request. 50 * 50ms = 2.5s upper bound; in practice the
     // callback runs in single-digit ms after the [DONE] token.
-    for _ in 0..50 {
+    //
+    // A probe that lands before the write is itself a MISS and calls the
+    // upstream; those are counted, so only the HIT has to skip it.
+    for misses in 0..50 {
         let probe = gw.post("/v1/chat/completions", body.clone()).await.unwrap();
         if probe.headers.get("x-cache").and_then(|v| v.to_str().ok()) == Some("HIT") {
             // Found a HIT — assert the rest of the contract on this response.
@@ -197,14 +200,15 @@ async fn streaming_cache_hit_replays_assembled_sse() {
                 txt.contains("\"object\":\"chat.completion\""),
                 "HIT replay should carry the assembled chat completion: {txt}"
             );
-            // Upstream got exactly ONE call across all client requests.
+            // One upstream call per MISS, none for the HIT.
             // (The MockProvider wraps the SSE upstream — count its hits.)
             let received = upstream.received_requests().await;
             assert_eq!(
                 received.len(),
-                1,
-                "streaming cache hit must skip upstream — got {} upstream calls",
-                received.len()
+                1 + misses,
+                "streaming cache hit must skip upstream — got {} upstream calls, expected {}",
+                received.len(),
+                1 + misses
             );
             return;
         }
