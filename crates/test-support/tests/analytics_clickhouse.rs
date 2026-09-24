@@ -234,3 +234,90 @@ async fn audit_log_endpoint_lists_recent_entries() {
         "expected an auth.* row in audit-logs: {arr:#?}"
     );
 }
+
+/// A Chat stream is billed on the upstream's usage even when the caller
+/// did not ask for the usage chunk, and the caller still does not get
+/// one. Forwarded as sent, such a stream used to reach the upstream
+/// without `stream_options.include_usage`, come back with no usage, and
+/// be recorded as zero tokens.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_chat_stream_is_billed_when_the_caller_did_not_ask_for_usage() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let app = TestApp::spawn_with_clickhouse().await;
+    let chunk = |content: &str| {
+        json!({"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-stream",
+               "choices":[{"index":0,"delta":{"content":content},"finish_reason":null}],"usage":null})
+    };
+    let usage = json!({"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-stream",
+                       "choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}});
+    let sse = format!(
+        "data: {}\n\ndata: {}\n\ndata: {usage}\n\ndata: [DONE]\n\n",
+        chunk("hel"),
+        chunk("lo")
+    );
+    let upstream = MockServer::start().await;
+    // Only a request that asks for usage gets an answer.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(
+            json!({"stream_options": {"include_usage": true}}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(sse, "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let provider = fixtures::create_provider(
+        &app.db,
+        &unique_name("stream-usage"),
+        "openai",
+        &upstream.uri(),
+        None,
+    )
+    .await
+    .unwrap();
+    fixtures::create_model_and_route(&app.db, provider.id, "gpt-stream")
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    let key = fixtures::create_api_key(
+        &app.db,
+        user.user.id,
+        &unique_name("stream-usage-key"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "gpt-stream", "stream": true,
+                   "messages": [{"role": "user", "content": "x"}]}),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let text = resp.text();
+    assert!(text.contains("hel") && text.contains("lo"), "{text}");
+    assert!(
+        !text.contains("usage"),
+        "the caller did not ask for usage and got it: {text}"
+    );
+    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
+    let (_, input_tokens, output_tokens) = wait_for_gateway_log(ch, user.user.id).await;
+    assert_eq!((input_tokens, output_tokens), (5, 2));
+}
