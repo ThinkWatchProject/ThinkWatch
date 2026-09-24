@@ -656,7 +656,9 @@ fn extract_usage(view: &CapturedView<ChatCompletionSurface>) -> tw_dialect::usag
     match view {
         CapturedView::Streaming { captured, .. } => captured.usage,
         CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage,
-        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => tw_dialect::usage::Usage::default(),
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => {
+            tw_dialect::usage::Usage::default()
+        }
     }
 }
 

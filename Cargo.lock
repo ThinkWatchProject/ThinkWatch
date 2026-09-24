@@ -4671,16 +4671,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+version = "0.42.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.42.0#62657fa1d840bff630997168745ef14b33fac128"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+version = "0.42.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.42.0#62657fa1d840bff630997168745ef14b33fac128"
 dependencies = [
  "serde",
  "serde_json",
@@ -4688,8 +4688,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
+version = "0.42.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.42.0#62657fa1d840bff630997168745ef14b33fac128"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -4698,15 +4698,6 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.18",
  "tw-dialect",
- "tw-secret",
-]
-
-[[package]]
-name = "tw-secret"
-version = "0.40.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.40.0#579217ac4addeceb0858c7b744dd9fc38a2a070c"
-dependencies = [
- "thiserror 2.0.18",
 ]
 
 [[package]]
