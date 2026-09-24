@@ -12,6 +12,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::handlers::clickhouse_util::{ch_available, ch_client};
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::observability_repository as repo;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardStats {
@@ -104,18 +105,8 @@ pub async fn get_dashboard_stats(
             // team manager doesn't see analytics rows for accounts that
             // have been removed from the org (those rows linger in CH
             // for the 30-day GDPR retention window).
-            let rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT DISTINCT u.id::text FROM users u \
-                 WHERE u.deleted_at IS NULL AND (u.id = $1 \
-                    OR EXISTS ( \
-                        SELECT 1 FROM team_members tm \
-                         WHERE tm.user_id = u.id AND tm.team_id = ANY($2) \
-                    ))",
-            )
-            .bind(caller_id)
-            .bind(&team_ids_vec)
-            .fetch_all(&state.db)
-            .await?;
+            let rows =
+                repo::caller_and_team_member_ids(&state.db, caller_id, &team_ids_vec).await?;
             Some(rows.into_iter().map(|(s,)| s).collect())
         }
     };
@@ -190,16 +181,9 @@ pub async fn get_dashboard_stats(
     // matches what the limits engine and the gateway router actually
     // see. Without `deleted_at IS NULL` the count silently inflates
     // for 30 days after a delete.
-    let active_providers: Option<i64> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM providers WHERE is_active = true AND deleted_at IS NULL",
-    )
-    .fetch_one(&state.db)
-    .await?;
+    let active_providers = repo::count_active_providers(&state.db).await?;
 
-    let connected_mcp_servers: Option<i64> =
-        sqlx::query_scalar("SELECT COUNT(*) FROM mcp_servers WHERE status = 'connected'")
-            .fetch_one(&state.db)
-            .await?;
+    let connected_mcp_servers = repo::count_connected_mcp_servers(&state.db).await?;
 
     // Active API keys — distinct keys used in the selected window from
     // ClickHouse gateway_logs, plus per-bucket counts for the sparkline.
@@ -226,18 +210,8 @@ pub async fn get_dashboard_stats(
                 // Same soft-delete filter as the usage scope above —
                 // keep the two in lockstep so active-key counts and
                 // usage rollups display a consistent population.
-                let rows: Vec<(String,)> = sqlx::query_as(
-                    "SELECT DISTINCT u.id::text FROM users u \
-                     WHERE u.deleted_at IS NULL AND (u.id = $1 \
-                        OR EXISTS ( \
-                            SELECT 1 FROM team_members tm \
-                             WHERE tm.user_id = u.id AND tm.team_id = ANY($2) \
-                        ))",
-                )
-                .bind(caller_id)
-                .bind(&team_ids_vec)
-                .fetch_all(&state.db)
-                .await?;
+                let rows =
+                    repo::caller_and_team_member_ids(&state.db, caller_id, &team_ids_vec).await?;
                 Some(rows.into_iter().map(|(s,)| s).collect())
             }
         };
@@ -394,14 +368,7 @@ pub async fn get_dashboard_stats(
         (count_result as i64, buckets)
     } else {
         // No ClickHouse — fall back to Postgres last_used_at in the window.
-        let count: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT id) FROM api_keys \
-             WHERE is_active = true AND deleted_at IS NULL \
-               AND last_used_at >= $1",
-        )
-        .bind(window_start)
-        .fetch_one(&state.db)
-        .await?;
+        let count = repo::count_api_keys_used_since(&state.db, window_start).await?;
         (count.unwrap_or(0), vec![0; range.bucket_count()])
     };
 
@@ -439,16 +406,9 @@ pub async fn get_dashboard_stats(
                 .map(|r| r.cnt as i64)
                 .unwrap_or(0)
         } else {
-            sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT COUNT(DISTINCT id) FROM api_keys \
-                 WHERE is_active = true AND deleted_at IS NULL \
-                   AND last_used_at >= $1 AND last_used_at < $2",
-            )
-            .bind(prev_start)
-            .bind(prev_end)
-            .fetch_one(&state.db)
-            .await?
-            .unwrap_or(0)
+            repo::count_api_keys_used_between(&state.db, prev_start, prev_end)
+                .await?
+                .unwrap_or(0)
         };
         (Some(prev_reqs.unwrap_or(0)), Some(prev_keys))
     } else {
@@ -457,7 +417,7 @@ pub async fn get_dashboard_stats(
 
     Ok(Json(DashboardStats {
         total_requests: total_requests.unwrap_or(0),
-        active_providers: active_providers.unwrap_or(0),
+        active_providers,
         active_api_keys,
         connected_mcp_servers: connected_mcp_servers.unwrap_or(0),
         active_keys_buckets,

@@ -26,6 +26,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::handlers::clickhouse_util::ch_client;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::analytics_repository;
 
 #[derive(Debug, Deserialize)]
 pub struct ChargebackQuery {
@@ -122,11 +123,7 @@ pub async fn export_chargeback_csv(
     {
         std::collections::HashMap::new()
     } else {
-        let rows: Vec<(uuid::Uuid, Option<String>)> =
-            sqlx::query_as("SELECT id, cost_center FROM api_keys WHERE id = ANY($1)")
-                .bind(&referenced_keys)
-                .fetch_all(&state.db)
-                .await?;
+        let rows = analytics_repository::cost_centers_of_keys(&state.db, &referenced_keys).await?;
         rows.into_iter()
             .filter_map(|(id, cc)| cc.map(|c| (id, c)))
             .collect()

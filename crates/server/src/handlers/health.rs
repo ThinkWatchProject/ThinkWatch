@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::app::AppState;
+use crate::services::observability_repository as repo;
 
 pub async fn health_check() -> Json<Value> {
     Json(json!({
@@ -31,10 +32,7 @@ pub async fn liveness() -> Json<Value> {
 ///   4. At least one active, non-deleted provider configured
 ///      (without this, every `/v1/*` request would 502 at runtime)
 pub async fn readiness(State(state): State<AppState>) -> Response {
-    let pg_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.db)
-        .await
-        .is_ok();
+    let pg_ok = repo::ping(&state.db).await.is_ok();
 
     let redis_ok: bool = {
         use fred::interfaces::ClientLike;
@@ -54,12 +52,7 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
     // otherwise the lookup itself would fail and we'd double-count
     // the same outage.
     let providers_ready = if pg_ok {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM providers WHERE is_active = true AND deleted_at IS NULL",
-        )
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+        let count: i64 = repo::count_active_providers(&state.db).await.unwrap_or(0);
         count > 0
     } else {
         false
@@ -130,10 +123,7 @@ pub struct ServiceHealth {
 pub async fn api_health_check(State(state): State<AppState>) -> Response {
     // PostgreSQL
     let pg_start = std::time::Instant::now();
-    let pg_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.db)
-        .await
-        .is_ok();
+    let pg_ok = repo::ping(&state.db).await.is_ok();
     let pg_latency = pg_start.elapsed().as_millis() as i64;
 
     // Redis

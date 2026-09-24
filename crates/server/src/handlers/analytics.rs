@@ -11,6 +11,7 @@ use crate::app::AppState;
 use crate::handlers::clickhouse_util::ch_client;
 use crate::handlers::time_range::{RangeQuery, TimeRange};
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::analytics_repository as repo;
 
 /// Resolve the caller's analytics scope as a user-id allowlist that
 /// ClickHouse's `has(?, user_id)` can bind against.
@@ -54,12 +55,7 @@ async fn analytics_user_id_filter(
             && !team_ids.is_empty()
         {
             let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
-            let members: Vec<(String,)> = sqlx::query_as(
-                "SELECT DISTINCT user_id::text FROM team_members WHERE team_id = ANY($1)",
-            )
-            .bind(&team_ids_vec)
-            .fetch_all(pool)
-            .await?;
+            let members = repo::members_of_teams(pool, &team_ids_vec).await?;
             for (uid,) in members {
                 visible.insert(uid);
             }
@@ -73,14 +69,11 @@ async fn analytics_user_id_filter(
     };
 
     // Team filter requested. Resolve membership and intersect.
-    let team_members: std::collections::HashSet<String> =
-        sqlx::query_as::<_, (String,)>("SELECT user_id::text FROM team_members WHERE team_id = $1")
-            .bind(team_id)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(|(s,)| s)
-            .collect();
+    let team_members: std::collections::HashSet<String> = repo::members_of_team(pool, team_id)
+        .await?
+        .into_iter()
+        .map(|(s,)| s)
+        .collect();
 
     let intersected: Vec<String> = match scope {
         None => team_members.into_iter().collect(), // global → just the team
@@ -1078,11 +1071,7 @@ pub async fn get_costs(
         if key_ids.is_empty() {
             std::collections::HashMap::new()
         } else {
-            let rows: Vec<(uuid::Uuid, Option<String>)> =
-                sqlx::query_as("SELECT id, cost_center FROM api_keys WHERE id = ANY($1)")
-                    .bind(&key_ids)
-                    .fetch_all(&state.db)
-                    .await?;
+            let rows = repo::cost_centers_of_keys(&state.db, &key_ids).await?;
             rows.into_iter()
                 .filter_map(|(id, cc)| cc.map(|c| (id, c)))
                 .collect()
@@ -1147,11 +1136,7 @@ pub async fn get_costs(
             if ids.is_empty() {
                 std::collections::HashMap::new()
             } else {
-                let rows: Vec<(uuid::Uuid, String)> =
-                    sqlx::query_as("SELECT id, email FROM users WHERE id = ANY($1)")
-                        .bind(&ids)
-                        .fetch_all(&state.db)
-                        .await?;
+                let rows = repo::emails_of_users(&state.db, &ids).await?;
                 rows.into_iter()
                     .map(|(id, email)| (id.to_string(), email))
                     .collect()

@@ -11,7 +11,6 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -19,27 +18,7 @@ use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
-
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct WebhookOutboxRow {
-    pub id: Uuid,
-    pub forwarder_id: Uuid,
-    /// Looked up at list time so the UI can render a name without a
-    /// second round-trip. `None` means the forwarder was deleted —
-    /// the FK CASCADE should normally clean those up but a row could
-    /// linger if the worker is mid-iteration.
-    pub forwarder_name: Option<String>,
-    /// URL the delivery is targeting, extracted from the forwarder
-    /// config. Lets the operator debug a stuck row without jumping
-    /// to the forwarder-admin page to cross-reference. `None` when
-    /// the forwarder was deleted or the config is somehow missing
-    /// the `url` field (defensive).
-    pub forwarder_url: Option<String>,
-    pub attempts: i32,
-    pub next_attempt_at: DateTime<Utc>,
-    pub last_error: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
+use crate::services::webhook_outbox_repository::{self as repo, WebhookOutboxRow};
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WebhookOutboxListResponse {
@@ -88,32 +67,8 @@ pub async fn list_outbox(
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
 
-    // `$1::uuid IS NULL OR o.forwarder_id = $1` lets one prepared
-    // statement serve both the "show everything" and "only this
-    // forwarder" calls. `->>` returns TEXT for the URL column —
-    // safer than a second materialised column that'd drift from the
-    // forwarder's canonical config.
-    let items: Vec<WebhookOutboxRow> = sqlx::query_as(
-        "SELECT o.id, o.forwarder_id, f.name AS forwarder_name, \
-                (f.config->>'url')::text AS forwarder_url, \
-                o.attempts, o.next_attempt_at, o.last_error, o.created_at \
-           FROM webhook_outbox o \
-           LEFT JOIN log_forwarders f ON f.id = o.forwarder_id \
-          WHERE $1::uuid IS NULL OR o.forwarder_id = $1 \
-          ORDER BY o.next_attempt_at ASC \
-          LIMIT 200",
-    )
-    .bind(q.forwarder_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM webhook_outbox \
-          WHERE $1::uuid IS NULL OR forwarder_id = $1",
-    )
-    .bind(q.forwarder_id)
-    .fetch_one(&state.db)
-    .await?;
+    let items = repo::list(&state.db, q.forwarder_id).await?;
+    let total = repo::count(&state.db, q.forwarder_id).await?;
 
     Ok(Json(WebhookOutboxListResponse { items, total }))
 }
@@ -153,15 +108,7 @@ pub async fn outbox_counts(
     // endpoints can't return a multi-megabyte JSON body. Sorted by
     // backlog desc so operators see the biggest offenders first; the
     // tail (rare in practice) is dropped silently.
-    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-        "SELECT forwarder_id, COUNT(*) AS count \
-           FROM webhook_outbox \
-          GROUP BY forwarder_id \
-          ORDER BY count DESC \
-          LIMIT 500",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let rows = repo::counts_by_forwarder(&state.db).await?;
     Ok(Json(
         rows.into_iter()
             .map(|(forwarder_id, count)| WebhookOutboxCount {
@@ -199,12 +146,7 @@ pub async fn delete_outbox_row(
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
 
-    let result = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    if repo::delete(&state.db, id).await? == 0 {
         return Err(AppError::NotFound("Outbox row not found".into()));
     }
 
@@ -245,12 +187,7 @@ pub async fn retry_outbox_row(
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
 
-    let result = sqlx::query("UPDATE webhook_outbox SET next_attempt_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    if repo::retry_now(&state.db, id).await? == 0 {
         return Err(AppError::NotFound("Outbox row not found".into()));
     }
 
