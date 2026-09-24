@@ -27,6 +27,15 @@ pub struct Model {
     pub input_weight: Decimal,
     /// Relative output-token cost factor.
     pub output_weight: Decimal,
+    /// Cache-read input, against the input baseline. `None` ⇒
+    /// `input_weight × 0.1` (see `limits::weight::Weights::resolve`).
+    pub cache_read_weight: Option<Decimal>,
+    /// Cache-write input (5-minute), against the input baseline.
+    /// `None` ⇒ `input_weight × 1.25`.
+    pub cache_write_weight: Option<Decimal>,
+    /// Cache-write input with a 1-hour lifetime. `None` ⇒
+    /// `input_weight × 2`.
+    pub cache_write_1h_weight: Option<Decimal>,
     /// Per-model routing strategy override.
     /// `None` ⇒ inherit `gateway.default_routing_strategy`.
     /// One of `weighted` / `latency` / `health` / `latency_health`.

@@ -57,6 +57,7 @@ use crate::protocol::UpstreamProtocol;
 use crate::router::RouteEntry;
 
 use think_watch_common::audit::BodyCaptureStatus;
+use think_watch_common::limits::weight::TokenCounts;
 
 /// What a client-facing endpoint speaks.
 #[derive(Clone, Copy)]
@@ -134,6 +135,9 @@ pub(crate) struct Outbound {
     /// converted request leaves them behind; they mean nothing in
     /// another format.
     pub dialect_headers: Vec<(String, String)>,
+    /// The request's input in tokens, estimated — billed only when the
+    /// upstream does not report its own (see `crate::usage_estimate`).
+    pub input_estimate: u64,
 }
 
 /// The request as it goes out to one upstream, and what it takes to read
@@ -201,8 +205,16 @@ impl Outbound {
                 }
             }
             let collect = decode(&body)?.encode(&target(client)).session;
+            let mut bytes = serde_json::to_vec(&body).unwrap_or_default();
+            // Reasoning signatures a conversion wrote earlier in this
+            // conversation (`tw1.`-prefixed) were not issued by this
+            // upstream, and Anthropic refuses the whole request over
+            // them. That reasoning did not come from here anyway.
+            if let Some(stripped) = tw_dialect::convert::strip_carried(client, &bytes) {
+                bytes = stripped;
+            }
             return Ok(Wire {
-                body: serde_json::to_vec(&body).unwrap_or_default(),
+                body: bytes,
                 path: self.surface.path.to_string(),
                 query: None,
                 dialect: client,
@@ -306,10 +318,14 @@ pub(crate) async fn send(
 }
 
 /// Read a whole answer and put it in the caller's format.
+///
+/// When the upstream reports no usage, the count is estimated from the
+/// request (`input_estimate`) and the answer.
 pub(crate) async fn read_whole(
     resp: reqwest::Response,
     wire: &Wire,
     caller_model: &str,
+    input_estimate: u64,
 ) -> Result<Completed, GatewayError> {
     let upstream = resp
         .bytes()
@@ -318,7 +334,11 @@ pub(crate) async fn read_whole(
 
     let mut sniffer = tw_wire::Sniffer::new();
     sniffer.feed(&upstream);
-    let usage = sniffer.finish();
+    let (usage, usage_estimated) =
+        crate::usage_estimate::complete(sniffer.finish(), true, input_estimate, Some(&upstream));
+    if usage_estimated {
+        metrics::counter!("gateway_usage_estimated_total").increment(1);
+    }
 
     let body = match &wire.convert {
         Some(session) => session.response(&upstream).ok_or_else(|| {
@@ -331,6 +351,7 @@ pub(crate) async fn read_whole(
     Ok(Completed {
         body: rewrite_model(&body, caller_model),
         usage,
+        usage_estimated,
     })
 }
 
@@ -581,11 +602,13 @@ async fn generate(
         )))
     })?;
 
+    let input_estimate = crate::usage_estimate::request_tokens(&decoded.request);
     let outbound = Outbound {
         surface,
         body: redacted,
         stream: is_stream,
         dialect_headers: dialect_headers(&headers),
+        input_estimate,
     };
     let snapshot = |route: &RouteEntry, sel_record| crate::lifecycle::ChatPostInvokeDeps {
         state: state.clone(),
@@ -598,6 +621,7 @@ async fn generate(
             request_for_audit: request_for_audit.clone(),
             cache_fingerprint: cache_fingerprint.clone(),
             request_started_at,
+            input_estimate,
         },
         preflight: crate::lifecycle::ChatPreflightLists {
             request_rules: preflight.request_rules.clone(),
@@ -717,11 +741,8 @@ async fn generate(
     let deps = snapshot(entry, sel_record);
     let completed = run_buffered_post_invoke(&deps, completed).await;
 
-    let total = completed
-        .usage
-        .map(|u| tokens(&u))
-        .map(|(p, c)| p + c)
-        .unwrap_or(0);
+    let (prompt, completion) = tokens(&completed.usage);
+    let total = prompt + completion;
     if total > 0
         && let Err(e) = state.quota.consume(&quota_key, total).await
     {
@@ -761,6 +782,19 @@ pub(crate) fn tokens(u: &tw_wire::Usage) -> (u32, u32) {
         u32::try_from(prompt).unwrap_or(u32::MAX),
         u32::try_from(u.output).unwrap_or(u32::MAX),
     )
+}
+
+/// The same usage split the way it is priced: cache reads and writes
+/// apart from plain input (see `cost_tracker`).
+pub(crate) fn priced(u: &tw_wire::Usage) -> TokenCounts {
+    let n = |x: u64| i64::try_from(x).unwrap_or(i64::MAX);
+    TokenCounts {
+        input: n(u.input),
+        cache_read: n(u.cache_read),
+        cache_write: n(u.cache_write),
+        cache_write_1h: u.cache_1h,
+        output: n(u.output),
+    }
 }
 
 /// The caller's `anthropic-*` headers, to go with a request forwarded in

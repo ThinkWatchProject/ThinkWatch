@@ -523,3 +523,76 @@ async fn console_api_key_rejected_after_owner_deactivated() {
         after.status
     );
 }
+
+/// A decimal as the API sends it (a string), as a number.
+fn num(v: &Value) -> Option<f64> {
+    v.as_str().and_then(|s| s.parse().ok())
+}
+
+/// A model's cache weights: set on create, left alone by a PATCH that
+/// does not name them, cleared back to derived by `null`, and listed.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn model_cache_weights_round_trip() {
+    let app = TestApp::spawn().await;
+    let (con, _) = admin_session_with_user(&app).await;
+    let model_id = unique_name("cache-model");
+
+    let created: Value = con
+        .post(
+            "/api/admin/models",
+            json!({"model_id": model_id, "display_name": "Cache", "cache_read_weight": 0.5}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(num(&created["cache_read_weight"]), Some(0.5));
+    assert_eq!(created["cache_write_weight"], Value::Null);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let updated: Value = con
+        .patch(
+            &format!("/api/admin/models/{id}"),
+            json!({"cache_write_weight": 1, "cache_write_1h_weight": 1.5}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(num(&updated["cache_read_weight"]), Some(0.5), "{updated}");
+    assert_eq!(num(&updated["cache_write_weight"]), Some(1.0));
+    assert_eq!(num(&updated["cache_write_1h_weight"]), Some(1.5));
+
+    let cleared: Value = con
+        .patch(
+            &format!("/api/admin/models/{id}"),
+            json!({"cache_read_weight": null}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(cleared["cache_read_weight"], Value::Null, "{cleared}");
+    assert_eq!(num(&cleared["cache_write_weight"]), Some(1.0));
+
+    con.patch(
+        &format!("/api/admin/models/{id}"),
+        json!({"cache_read_weight": -1}),
+    )
+    .await
+    .unwrap()
+    .assert_status(400);
+
+    let list: Value = con
+        .get(&format!("/api/admin/models?q={model_id}"))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        num(&list["items"][0]["cache_write_1h_weight"]),
+        Some(1.5),
+        "{list}"
+    );
+}

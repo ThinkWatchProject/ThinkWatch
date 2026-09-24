@@ -341,7 +341,10 @@ pub(super) async fn select_route_with_failover<'a>(
             match super::generate::send(entry, outbound, call_ctx, &ctx.state.db, upstream_model)
                 .await
             {
-                Ok((resp, wire)) => super::generate::read_whole(resp, &wire, caller_model).await,
+                Ok((resp, wire)) => {
+                    super::generate::read_whole(resp, &wire, caller_model, outbound.input_estimate)
+                        .await
+                }
                 Err(e) => Err(e),
             };
 

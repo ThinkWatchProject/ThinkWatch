@@ -16,3 +16,4 @@ pub mod rate_limiter;
 pub mod router;
 pub mod strategy;
 pub mod tool_inspection;
+pub mod usage_estimate;

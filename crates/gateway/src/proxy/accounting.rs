@@ -1,8 +1,9 @@
 //! Post-flight accounting + token resolution for streaming responses.
 //!
 //! [`post_flight_account`] runs the token-metric sliding rules and
-//! budget caps against the real prompt/completion token counts the
-//! upstream returned. Used from BOTH the non-streaming branch (called
+//! budget caps against the token counts the upstream returned — or the
+//! estimate, when it returned none — with cache reads and writes
+//! weighted apart from plain input. Used from BOTH the non-streaming branch (called
 //! inline after the upstream future resolves) and the streaming branch
 //! (called from the post-invoke pipeline after the SSE stream is
 //! drained).
@@ -25,8 +26,7 @@ pub(crate) async fn post_flight_account(
     _dynamic_config: Arc<DynamicConfig>,
     weight_cache: weight::WeightCache,
     model: String,
-    prompt_tokens: u32,
-    completion_tokens: u32,
+    tokens: weight::TokenCounts,
     request_rules: Vec<limits::RateLimitRule>,
     budget_caps: Vec<BudgetCap>,
     // Actor attribution for `budget.threshold_crossed` audit entries.
@@ -43,7 +43,7 @@ pub(crate) async fn post_flight_account(
     audit: think_watch_common::audit::AuditLogger,
 ) {
     let mult = weight_cache.get(&db, &model).await;
-    let weighted = weight::weighted_tokens(prompt_tokens as i64, completion_tokens as i64, mult);
+    let weighted = weight::weighted_tokens(&tokens, mult);
     if weighted <= 0 {
         return;
     }

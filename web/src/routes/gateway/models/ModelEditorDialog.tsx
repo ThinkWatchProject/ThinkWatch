@@ -27,16 +27,25 @@ import { CostPreview } from './CostPreview';
 import { OutputGuardrailsCard } from './OutputGuardrailsCard';
 import {
   AFFINITY_MODES,
+  CACHE_WEIGHTS,
   MAX_CHARS_CEILING,
   ROUTING_STRATEGIES,
+  derivedCacheWeight,
   emptyModelForm,
   parseGuardrails,
   type AffinityMode,
+  type CacheWeight,
   type ModelFormState,
   type ModelRow,
   type PlatformPricing,
   type RoutingStrategy,
 } from './types';
+
+const CACHE_WEIGHT_LABEL: Record<CacheWeight, string> = {
+  cache_read_weight: 'models.field.cacheReadWeight',
+  cache_write_weight: 'models.field.cacheWriteWeight',
+  cache_write_1h_weight: 'models.field.cacheWrite1hWeight',
+};
 
 /// Create/edit dialog for a Model catalog entry. Owns its own form
 /// state + saving + error UI so the parent route only manages
@@ -74,6 +83,9 @@ export function ModelEditorDialog({
         display_name: model.display_name,
         input_weight: model.input_weight,
         output_weight: model.output_weight,
+        cache_read_weight: model.cache_read_weight ?? '',
+        cache_write_weight: model.cache_write_weight ?? '',
+        cache_write_1h_weight: model.cache_write_1h_weight ?? '',
         routing_strategy: (model.routing_strategy ?? '') as ModelFormState['routing_strategy'],
         affinity_mode: (model.affinity_mode ?? '') as ModelFormState['affinity_mode'],
         affinity_ttl_secs: model.affinity_ttl_secs == null ? '' : String(model.affinity_ttl_secs),
@@ -93,6 +105,17 @@ export function ModelEditorDialog({
     if (!Number.isFinite(inW) || inW <= 0 || !Number.isFinite(outW) || outW <= 0) {
       setError(t('models.errors.weightMustBePositive'));
       return;
+    }
+    // Cache weights: empty ⇒ null ⇒ derived from the input weight.
+    const cacheWeights = {} as Record<CacheWeight, number | null>;
+    for (const k of CACHE_WEIGHTS) {
+      const raw = form[k].trim();
+      const n = raw ? Number(raw) : null;
+      if (n != null && (!Number.isFinite(n) || n < 0)) {
+        setError(t('models.errors.cacheWeightNotNegative'));
+        return;
+      }
+      cacheWeights[k] = n;
     }
     // Routing overrides: empty string in the form ⇒ JSON null on the
     // wire ⇒ "inherit global default" (PATCH semantics).
@@ -117,6 +140,7 @@ export function ModelEditorDialog({
       display_name: form.display_name.trim() || form.model_id.trim(),
       input_weight: inW,
       output_weight: outW,
+      ...cacheWeights,
       routing_strategy: form.routing_strategy === '' ? null : form.routing_strategy,
       affinity_mode: form.affinity_mode === '' ? null : form.affinity_mode,
       affinity_ttl_secs: ttlNum,
@@ -211,6 +235,23 @@ export function ModelEditorDialog({
                   currency={pricing?.currency}
                   side="output"
                 />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">{t('models.cacheWeightHint')}</p>
+              <div className="grid grid-cols-3 gap-3">
+                {CACHE_WEIGHTS.map((k) => (
+                  <div key={k} className="space-y-2">
+                    <Label htmlFor={k}>{t(CACHE_WEIGHT_LABEL[k])}</Label>
+                    <Input
+                      id={k}
+                      value={form[k]}
+                      onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+                      placeholder={derivedCacheWeight(form.input_weight, k)}
+                      inputMode="decimal"
+                    />
+                  </div>
+                ))}
               </div>
             </div>
             {/* Routing strategy + affinity overrides. Empty = inherit

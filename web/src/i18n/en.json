@@ -442,7 +442,10 @@
       "upstreamModel": "Upstream Model",
       "health": "Health",
       "healthHint": "Live circuit-breaker state from the rolling-window error rate. Closed = passing through, open = excluded from selection, half-open = probing.",
-      "p50": "EWMA latency"
+      "p50": "EWMA latency",
+      "cacheRead": "Cache read ×",
+      "cacheWrite": "Cache write ×",
+      "cacheWrite1h": "1h cache write ×"
     },
     "status": {
       "all": "All models",
@@ -467,7 +470,10 @@
       "affinityMode": "Session affinity",
       "affinityTtlSecs": "Affinity TTL (seconds)",
       "rpmCap": "RPM cap",
-      "tpmCap": "TPM cap"
+      "tpmCap": "TPM cap",
+      "cacheReadWeight": "Cache read weight",
+      "cacheWriteWeight": "Cache write weight",
+      "cacheWrite1hWeight": "1-hour cache write weight"
     },
     "useGlobalDefault": "Use global default",
     "unlimited": "Unlimited",
@@ -519,7 +525,8 @@
     "errors": {
       "weightMustBePositive": "Weights must be positive numbers.",
       "affinityTtlRange": "Affinity TTL must be between 0 and 86400 seconds.",
-      "capMustBePositive": "RPM/TPM caps must be positive integers (or empty for unlimited)."
+      "capMustBePositive": "RPM/TPM caps must be positive integers (or empty for unlimited).",
+      "cacheWeightNotNegative": "Cache weights must not be negative."
     },
     "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
     "batchImportWarning": "Imported routes go live in /v1/models right away. Tick only the models you actually want exposed.",
@@ -548,7 +555,9 @@
       "created": "Model added.",
       "updated": "Model updated.",
       "deleted": "Model removed."
-    }
+    },
+    "cacheWeightHint": "Input read from or written to the upstream's prompt cache, priced against the input baseline. Empty = derived from the input weight: read 0.1×, write 1.25×, 1-hour write 2×.",
+    "derivedWeight": "{{value}} (derived)"
   },
   "teams": {
     "title": "Teams",

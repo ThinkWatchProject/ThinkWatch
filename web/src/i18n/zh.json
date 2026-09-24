@@ -442,7 +442,10 @@
       "upstreamModel": "上游模型",
       "health": "健康",
       "healthHint": "实时熔断器状态(基于滚动窗口错误率)。健康 = 正常路由,熔断 = 暂时排除,半开 = 探测中。",
-      "p50": "EWMA 延迟"
+      "p50": "EWMA 延迟",
+      "cacheRead": "缓存读 ×",
+      "cacheWrite": "缓存写 ×",
+      "cacheWrite1h": "1 小时缓存写 ×"
     },
     "status": {
       "all": "全部模型",
@@ -467,7 +470,10 @@
       "affinityMode": "会话黏性",
       "affinityTtlSecs": "黏性 TTL (秒)",
       "rpmCap": "RPM 上限",
-      "tpmCap": "TPM 上限"
+      "tpmCap": "TPM 上限",
+      "cacheReadWeight": "缓存读取权重",
+      "cacheWriteWeight": "缓存写入权重",
+      "cacheWrite1hWeight": "1 小时缓存写入权重"
     },
     "useGlobalDefault": "使用全局默认",
     "unlimited": "不限制",
@@ -519,7 +525,8 @@
     "errors": {
       "weightMustBePositive": "权重必须为正数。",
       "affinityTtlRange": "黏性 TTL 必须在 0 到 86400 秒之间。",
-      "capMustBePositive": "RPM/TPM 上限必须是正整数(留空表示不限制)。"
+      "capMustBePositive": "RPM/TPM 上限必须是正整数(留空表示不限制)。",
+      "cacheWeightNotNegative": "缓存权重不能为负数。"
     },
     "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
     "batchImportWarning": "导入后路由立即在 /v1/models 生效。只勾选你确实想暴露的模型。",
@@ -548,7 +555,9 @@
       "created": "模型已添加。",
       "updated": "模型已更新。",
       "deleted": "模型已删除。"
-    }
+    },
+    "cacheWeightHint": "命中或写入上游提示缓存的输入，按输入基准价计。留空则按输入权重推算：读取 0.1 倍，写入 1.25 倍，1 小时写入 2 倍。",
+    "derivedWeight": "{{value}}（推算）"
   },
   "teams": {
     "title": "团队",
