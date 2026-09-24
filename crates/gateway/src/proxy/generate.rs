@@ -547,24 +547,21 @@ async fn run(
         tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect))
             .map_err(|r| ctx.emit(GatewayError::TransformError(r.0)))?;
 
-    // 4. Content filter. Log lines carry `log_summary()` (no snippet) so
+    // 4. Content filter. Log lines carry `log_summary` (no snippet) so
     //    prompt content stays out of the log pipeline; the caller sees
     //    the full match, since it is their own text.
     if let Some(m) = state.content_filter.load().check_request(&decoded.request) {
+        use crate::content_filter::{log_summary, refusal};
         match m.action {
             Action::Block => {
-                tracing::warn!("Content filter blocked request: {}", m.log_summary());
-                return Err(ctx
-                    .emit(GatewayError::TransformError(format!(
-                        "Request blocked by content filter: {m}"
-                    )))
-                    .into());
+                tracing::warn!("Content filter blocked request: {}", log_summary(&m));
+                return Err(ctx.emit(GatewayError::TransformError(refusal(&m))).into());
             }
             Action::Warn => tracing::warn!(
                 "Content filter warning (request allowed): {}",
-                m.log_summary()
+                log_summary(&m)
             ),
-            Action::Log => tracing::info!("Content filter log: {}", m.log_summary()),
+            Action::Log => tracing::info!("Content filter log: {}", log_summary(&m)),
         }
     }
 
@@ -662,6 +659,18 @@ async fn run(
             &crate::tool_inspection::Caller::of(&identity, &metadata.request_id, &mapped_model),
             "cache",
             &cached.body,
+        ) {
+            return Err(ctx.emit(e).into());
+        }
+        // So is the model's length cap.
+        if let Err(e) = crate::output_guardrails::apply_output_guardrails(
+            &cached.body,
+            surface.dialect,
+            &state
+                .router
+                .load()
+                .config_for(&mapped_model)
+                .output_guardrails,
         ) {
             return Err(ctx.emit(e).into());
         }

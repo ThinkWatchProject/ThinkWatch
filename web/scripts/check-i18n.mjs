@@ -72,8 +72,8 @@ const DYNAMIC_ENUMS = {
   // Tags emitted by the Promise.all loader in src/routes/admin/settings.tsx.
   // Keep in lockstep with the `tag('<name>', ...)` calls there.
   'settingsPage.loadKey.${_}': ['serverInfo', 'auditConfig', 'settings', 'health', 'roles'],
-  'settings.contentFilter.preset.${_}.name': ['basic', 'strict', 'chinese'],
-  'settings.contentFilter.preset.${_}.description': ['basic', 'strict', 'chinese'],
+  'settings.contentFilter.preset.${_}.name': ['injection', 'persona', 'chinese'],
+  'settings.contentFilter.preset.${_}.description': ['injection', 'persona', 'chinese'],
   'mcpStore.category.${_}': [
     'developer', 'database', 'communication', 'cloud',
     'utility', 'knowledge', 'productivity',

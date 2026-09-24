@@ -629,13 +629,6 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "Rule {i}: match_type must be 'contains' or 'regex'"
                     )));
                 }
-                if match_type == "regex"
-                    && think_watch_common::regex_util::compile_bounded(pattern).is_err()
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "Rule {i}: invalid or oversized regex pattern"
-                    )));
-                }
                 let action = item.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
                     AppError::BadRequest(format!("Rule {i}: missing 'action' field"))
                 })?;
@@ -644,10 +637,26 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "Rule {i}: action must be 'block', 'warn', or 'log'"
                     )));
                 }
-                if item.get("name").and_then(|v| v.as_str()).is_none() {
+                let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
                     return Err(AppError::BadRequest(format!(
                         "Rule {i}: missing 'name' field"
                     )));
+                };
+                // The same compile the gateway runs: an empty pattern, a bad
+                // or oversized regex is refused here rather than skipped there.
+                use tw_guard::content::{Action, Match, Rule, RuleInput};
+                if let (Some(matching), Some(action)) =
+                    (Match::from_slug(match_type), Action::from_slug(action))
+                    && let Err(e) = Rule::new(RuleInput {
+                        id: name,
+                        name,
+                        custom: true,
+                        pattern,
+                        matching,
+                        action,
+                    })
+                {
+                    return Err(AppError::BadRequest(format!("Rule {i}: {}", e.detail)));
                 }
             }
         }
