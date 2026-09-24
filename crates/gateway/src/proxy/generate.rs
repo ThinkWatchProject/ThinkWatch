@@ -156,6 +156,16 @@ pub(crate) struct Wire {
 }
 
 impl Outbound {
+    /// A Chat stream whose caller did not ask for the usage chunk. The
+    /// request goes out asking for it anyway — without it the upstream
+    /// reports no usage and the request is billed as zero — and the
+    /// shaper takes it back out of what the caller receives.
+    pub(crate) fn hides_usage(&self) -> bool {
+        self.surface.dialect == Dialect::Chat
+            && self.stream
+            && self.body.pointer("/stream_options/include_usage") != Some(&Value::Bool(true))
+    }
+
     /// Address the request to `protocol`, naming `model` upstream.
     pub(crate) fn address(
         &self,
@@ -175,10 +185,20 @@ impl Outbound {
         };
 
         if protocol.dialect() == client {
-            // Forwarded as sent. Only the model changes.
+            // Forwarded as sent. Only the model changes, and a Chat
+            // stream always asks for its usage (see `hides_usage`).
             let mut body = self.body.clone();
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("model".into(), Value::String(model.to_string()));
+                if self.hides_usage() {
+                    let opts = obj
+                        .entry("stream_options")
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    if !opts.is_object() {
+                        *opts = Value::Object(Default::default());
+                    }
+                    opts["include_usage"] = Value::Bool(true);
+                }
             }
             let collect = decode(&body)?.encode(&target(client)).session;
             return Ok(Wire {
@@ -609,6 +629,7 @@ async fn generate(
         )
         .await;
 
+        let hide_usage = outbound.hides_usage();
         // Started on the stream's first poll — see `build_chat_pump` for
         // why it must not be awaited here.
         let open: crate::lifecycle::OpenUpstream = {
@@ -623,7 +644,8 @@ async fn generate(
         };
 
         let deps = snapshot(entry, sel_record);
-        let shaper = StreamShaper::new(mapped_model.clone(), &redaction, surface.dialect);
+        let shaper = StreamShaper::new(mapped_model.clone(), &redaction, surface.dialect)
+            .hiding_usage(hide_usage);
         return Ok(launch_stream_pump(deps, open, shaper, surface.dialect));
     }
 

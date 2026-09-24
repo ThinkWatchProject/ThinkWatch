@@ -18,6 +18,12 @@
 //! arguments of whichever format this is, with one lane per content block
 //! or tool call — thinkwatch-core's `FrameRestorer`, the same one the
 //! desktop gateway uses.
+//!
+//! **Usage.** A Chat stream is always sent upstream asking for its usage
+//! chunk, or there would be nothing to bill. When the caller did not ask
+//! for it, the shaper takes it back out: the trailing chunk that carries
+//! only `usage`, and the `"usage": null` the upstream adds to every other
+//! chunk once asked.
 
 use serde_json::Value;
 use tw_dialect::frame::{self, Decoder, Frame};
@@ -57,6 +63,7 @@ pub struct StreamShaper {
     decoder: Decoder,
     model: String,
     restorer: Option<FrameRestorer>,
+    hide_usage: bool,
 }
 
 impl StreamShaper {
@@ -66,7 +73,14 @@ impl StreamShaper {
             decoder: Decoder::default(),
             model,
             restorer: (!restorer.is_noop()).then_some(restorer),
+            hide_usage: false,
         }
+    }
+
+    /// Take the usage the caller did not ask for out of a Chat stream.
+    pub fn hiding_usage(mut self, hide: bool) -> Self {
+        self.hide_usage = hide;
+        self
     }
 
     pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
@@ -99,6 +113,17 @@ impl StreamShaper {
             out.push_str(&raw(&f));
             return;
         };
+        if self.hide_usage
+            && let Some(obj) = v.as_object_mut()
+            && obj.remove("usage").is_some()
+            && obj
+                .get("choices")
+                .and_then(Value::as_array)
+                .is_some_and(|c| c.is_empty())
+        {
+            // The usage chunk itself: nothing else in it.
+            return;
+        }
         if let Some(r) = self.restorer.as_mut() {
             for s in r.frame(&mut v).before {
                 self.synth(s, out);
@@ -166,6 +191,34 @@ mod tests {
             "data: {}\n\n",
             serde_json::json!({"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]})
         )
+    }
+
+    #[test]
+    fn usage_the_caller_did_not_ask_for_is_taken_back_out() {
+        let chunk = serde_json::json!({"model":"up","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null});
+        let usage = serde_json::json!({"model":"up","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}});
+        let stream = format!("data: {chunk}\n\ndata: {usage}\n\ndata: [DONE]\n\n");
+
+        let mut s = StreamShaper::new("m".into(), &ctx(None), Dialect::Chat).hiding_usage(true);
+        let mut out = s.process(stream.as_bytes());
+        out.extend(s.finish());
+        let fs = frames(&out);
+        assert_eq!(fs.len(), 1, "{fs:?}");
+        assert_eq!(fs[0]["choices"][0]["delta"]["content"], "hi");
+        assert!(fs[0].get("usage").is_none(), "{}", fs[0]);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .ends_with("data: [DONE]\n\n")
+        );
+
+        // Asked for: left alone.
+        let mut s = StreamShaper::new("m".into(), &ctx(None), Dialect::Chat);
+        let mut out = s.process(stream.as_bytes());
+        out.extend(s.finish());
+        let fs = frames(&out);
+        assert_eq!(fs.len(), 2);
+        assert_eq!(fs[1]["usage"]["total_tokens"], 4);
     }
 
     #[test]
