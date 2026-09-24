@@ -1323,7 +1323,7 @@ pub async fn logout(
 pub async fn me(
     auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<UserResponse>, AppError> {
+) -> Result<Json<MeResponse>, AppError> {
     let user = repo::find_active(&state.db, auth_user.claims.sub)
         .await?
         .ok_or(AppError::NotFound("User not found".into()))?;
@@ -1354,19 +1354,36 @@ pub async fn me(
         .map(|(id, name)| think_watch_common::dto::UserTeamSummary { id, name })
         .collect();
 
-    Ok(Json(UserResponse {
-        id: user.id,
-        email: user.email,
-        display_name: user.display_name,
-        avatar_url: user.avatar_url,
-        is_active: user.is_active,
-        oidc_subject: user.oidc_subject,
-        role_assignments,
-        permissions,
-        denied_permissions,
-        teams,
-        created_at: user.created_at,
+    let totp_enrollment_required = !user.totp_enabled && state.dynamic_config.totp_required().await;
+
+    Ok(Json(MeResponse {
+        user: UserResponse {
+            id: user.id,
+            email: user.email,
+            display_name: user.display_name,
+            avatar_url: user.avatar_url,
+            is_active: user.is_active,
+            oidc_subject: user.oidc_subject,
+            role_assignments,
+            permissions,
+            denied_permissions,
+            teams,
+            created_at: user.created_at,
+        },
+        totp_enrollment_required,
     }))
+}
+
+/// `GET /api/auth/me`: the profile, plus whether the session is held
+/// at TOTP enrollment.
+#[derive(Debug, Serialize)]
+pub struct MeResponse {
+    #[serde(flatten)]
+    pub user: UserResponse,
+    /// The platform requires TOTP and this user has not enrolled: every
+    /// console endpoint other than enrollment answers 403
+    /// `totp_enrollment_required` until they do.
+    pub totp_enrollment_required: bool,
 }
 
 /// Helper: load every role assignment (system + custom) for a single
@@ -1773,7 +1790,7 @@ pub async fn totp_verify_setup(
     request_body = DisableTotpRequest,
     responses(
         (status = 200, description = "TOTP disabled"),
-        (status = 400, description = "TOTP not enabled or SSO account"),
+        (status = 400, description = "TOTP not enabled, required by the platform, or SSO account"),
         (status = 401, description = "Unauthorized or wrong password"),
     ),
 )]
@@ -1788,6 +1805,12 @@ pub async fn totp_disable(
 
     if !user.totp_enabled {
         return Err(AppError::BadRequest("TOTP is not enabled".into()));
+    }
+    // Disabling would only put the session straight back at enrollment.
+    if state.dynamic_config.totp_required().await {
+        return Err(AppError::BadRequest(
+            "TOTP is required on this platform and cannot be disabled".into(),
+        ));
     }
 
     // Verify current password.

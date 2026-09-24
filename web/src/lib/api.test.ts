@@ -192,4 +192,42 @@ describe('write notifications', () => {
 
     expect(listener).not.toHaveBeenCalled()
   })
+
+  it('sends a session held at TOTP enrollment to enrollment', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: () => Promise.resolve({
+        error: { type: 'totp_enrollment_required', message: 'Two-factor authentication must be set up before continuing' },
+      }),
+    }))
+    const listener = vi.fn()
+    window.addEventListener(apiModule.TOTP_ENROLLMENT_REQUIRED_EVENT, listener)
+    try {
+      const err = await apiModule.api('/api/keys').catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(apiModule.ApiError)
+      expect((err as InstanceType<typeof apiModule.ApiError>).type).toBe('totp_enrollment_required')
+      expect(listener).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener(apiModule.TOTP_ENROLLMENT_REQUIRED_EVENT, listener)
+    }
+  })
+
+  it('leaves an ordinary 403 alone', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: () => Promise.resolve({ error: { type: 'forbidden', message: 'Missing permission' } }),
+    }))
+    const listener = vi.fn()
+    window.addEventListener(apiModule.TOTP_ENROLLMENT_REQUIRED_EVENT, listener)
+    try {
+      await expect(apiModule.api('/api/keys')).rejects.toThrow('Missing permission')
+      expect(listener).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener(apiModule.TOTP_ENROLLMENT_REQUIRED_EVENT, listener)
+    }
+  })
 })

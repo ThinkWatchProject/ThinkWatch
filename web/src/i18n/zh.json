@@ -9,7 +9,8 @@
       "rate_limited": "请求过于频繁，请稍后重试。",
       "conflict": "与已有记录冲突。",
       "service_unavailable": "服务暂时不可用，请稍后重试。",
-      "internal_error": "服务器内部错误，技术团队已收到通知。"
+      "internal_error": "服务器内部错误，技术团队已收到通知。",
+      "totp_enrollment_required": "需要先设置双因素认证才能使用此功能。"
     },
     "byStatus": {
       "401": "登录已失效，请重新登录。",
@@ -239,7 +240,11 @@
     "totpHint": "输入身份验证器中的 6 位数字代码，或使用恢复代码。",
     "totpVerify": "验证并启用",
     "totpCopyCodes": "复制代码",
-    "totpDownloadCodes": "下载 .txt"
+    "totpDownloadCodes": "下载 .txt",
+    "totpRequiredEnabledStatus": "双因素认证已启用。本平台要求启用，因此不可关闭。",
+    "totpEnrollmentTitle": "设置双因素认证",
+    "totpEnrollmentDescription": "本平台要求启用双因素认证，设置完成后即可使用控制台。",
+    "totpEnrollmentSignedInAs": "当前账号：{{email}}"
   },
   "dashboard": {
     "title": "仪表盘",
