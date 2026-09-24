@@ -669,6 +669,77 @@ async fn accounts_are_listed_switched_and_revoked() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
+async fn revoking_the_default_account_promotes_the_newest_one() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+    let upstream = mcp_ok().await;
+    let id = fixtures::create_mcp_server_with(
+        &app.db,
+        &unique_name("promote"),
+        &prefix(),
+        &format!("{}/mcp", upstream.uri()),
+        fixtures::McpServerOpts {
+            auth_shape: "static".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    for label in ["first", "second", "third"] {
+        con.put(
+            &format!("/api/mcp/connections/{id}/{label}/static-token"),
+            json!({"token": format!("tok-{label}")}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+        // created_at decides who is promoted; keep them apart.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let defaults = || async {
+        let rows: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT account_label, is_default FROM mcp_user_credentials
+             WHERE mcp_server_id = $1 ORDER BY account_label",
+        )
+        .bind(id)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        rows
+    };
+    assert_eq!(
+        defaults().await,
+        vec![
+            ("first".to_string(), true),
+            ("second".to_string(), false),
+            ("third".to_string(), false)
+        ]
+    );
+
+    con.delete(&format!("/api/mcp/connections/{id}/first"))
+        .await
+        .unwrap()
+        .assert_ok();
+    assert_eq!(
+        defaults().await,
+        vec![("second".to_string(), false), ("third".to_string(), true)]
+    );
+
+    // The last account goes too; nothing is left to promote.
+    con.delete(&format!("/api/mcp/connections/{id}/third"))
+        .await
+        .unwrap()
+        .assert_ok();
+    assert_eq!(defaults().await, vec![("second".to_string(), true)]);
+    con.delete(&format!("/api/mcp/connections/{id}/second"))
+        .await
+        .unwrap()
+        .assert_ok();
+    assert_eq!(defaults().await, vec![]);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
 async fn connections_list_only_per_user_servers_that_need_a_credential() {
     let app = TestApp::spawn().await;
     let con = admin_session(&app).await;
