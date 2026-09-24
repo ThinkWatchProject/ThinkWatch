@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.2"
+version = "1.1.0"
 edition = "2024"
 # Pin the MSRV to the first stable rustc that ships edition 2024 (1.85,
 # released 2025-02-20). Without this, contributors on older toolchains
