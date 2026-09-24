@@ -16,10 +16,6 @@ pub use crate::bedrock::sigv4::Signer;
 use crate::call_ctx::CallCtx;
 use crate::error::GatewayError;
 
-/// Sent to an Anthropic upstream when neither the caller nor the provider
-/// row names a version. Without one the API refuses the request.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-
 /// The HTTP client every upstream call goes through.
 ///
 /// **Different from the desktop gateway on purpose.** Desktop sets no
@@ -90,20 +86,7 @@ impl Upstream {
     pub fn is_official(&self) -> bool {
         match &self.shape {
             Shape::Bedrock { .. } | Shape::Azure { .. } => true,
-            Shape::Standard => {
-                let host = self
-                    .base_url
-                    .split("://")
-                    .nth(1)
-                    .unwrap_or(&self.base_url)
-                    .split(['/', ':'])
-                    .next()
-                    .unwrap_or_default();
-                matches!(
-                    host,
-                    "api.openai.com" | "api.anthropic.com" | "generativelanguage.googleapis.com"
-                )
-            }
+            Shape::Standard => tw_dialect::official::is_official_host(&self.base_url),
         }
     }
 
@@ -131,7 +114,8 @@ impl Upstream {
         for (k, v) in extra {
             req = req.header(k, v);
         }
-        // Anthropic refuses a request without a version header.
+        // Anthropic refuses a request without a version header. One the
+        // provider row or the caller set wins.
         if dialect == tw_dialect::ir::Dialect::Anthropic
             && !self
                 .headers
@@ -139,7 +123,7 @@ impl Upstream {
                 .chain(extra)
                 .any(|(k, _)| k.eq_ignore_ascii_case("anthropic-version"))
         {
-            req = req.header("anthropic-version", ANTHROPIC_VERSION);
+            req = req.header("anthropic-version", tw_dialect::official::ANTHROPIC_VERSION);
         }
         if let Some(trace) = &ctx.trace_id {
             req = req.header("x-trace-id", trace.as_str());
@@ -280,6 +264,19 @@ mod tests {
             ),
             "https://g.example/v1beta/models/m:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn only_the_vendors_own_host_counts_as_official() {
+        assert!(up("https://api.anthropic.com/", Shape::Standard).is_official());
+        assert!(up("https://api.deepseek.com/anthropic", Shape::Standard).is_official());
+        // A relay cannot dress up as the vendor through its path or user info.
+        assert!(!up("https://relay.example/api.openai.com", Shape::Standard).is_official());
+        assert!(!up("https://api.openai.com@relay.example", Shape::Standard).is_official());
+        let azure = Shape::Azure {
+            api_version: "2024-02-01".into(),
+        };
+        assert!(up("https://x.openai.azure.com", azure).is_official());
     }
 
     #[test]

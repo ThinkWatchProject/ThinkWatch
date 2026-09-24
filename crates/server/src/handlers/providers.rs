@@ -609,12 +609,12 @@ pub(crate) async fn run_provider_test(
 
     // Provider-specific probe URL. We always hit a cheap, read-only
     // endpoint that requires auth so a wrong key is detected too.
-    let url = match req.provider_type.as_str() {
-        "anthropic" => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
-        "google" => format!("{}/v1beta/models", req.base_url.trim_end_matches('/')),
-        // openai / azure / custom — all OpenAI-compatible /v1/models
-        _ => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
+    let path = match req.provider_type.as_str() {
+        "google" => "/v1beta/models",
+        // anthropic / openai / azure / custom — all answer /v1/models
+        _ => "/v1/models",
     };
+    let url = tw_dialect::url::upstream_url(&req.base_url, path, None);
 
     // `client` is now passed in from `test_provider` — uses the
     // shared http_client so this endpoint inherits the central
