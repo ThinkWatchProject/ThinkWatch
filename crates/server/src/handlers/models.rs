@@ -25,51 +25,11 @@ use think_watch_gateway::output_guardrails::{MAX_LENGTH_CAP_CEILING, OutputGuard
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
-
-/// Row shape returned by `GET /api/admin/models`. Route counts are
-/// joined in so the UI can show "active / draft / unrouted" status
-/// without a second round-trip.
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct ModelRow {
-    pub id: Uuid,
-    pub model_id: String,
-    pub display_name: String,
-    #[schema(value_type = f64)]
-    pub input_weight: Decimal,
-    #[schema(value_type = f64)]
-    pub output_weight: Decimal,
-    /// Cache weights as stored. `None` ⇒ derived from `input_weight`.
-    #[schema(value_type = Option<f64>)]
-    pub cache_read_weight: Option<Decimal>,
-    #[schema(value_type = Option<f64>)]
-    pub cache_write_weight: Option<Decimal>,
-    #[schema(value_type = Option<f64>)]
-    pub cache_write_1h_weight: Option<Decimal>,
-    pub route_count: i64,
-    pub enabled_route_count: i64,
-    /// Model-level kill switch. FALSE ⇒ all routes are skipped at
-    /// router-bootstrap (gateway behaves as if the model has no routes).
-    /// Independent of per-route `enabled` so flipping back restores the
-    /// previous traffic split exactly.
-    pub enabled: bool,
-    /// Provider display names (or `name` if display_name is null) for
-    /// every route attached to the model, ordered by weight DESC. Lets
-    /// the list table show "who serves this?" without an extra fetch.
-    pub providers: Vec<String>,
-    /// Per-model routing override. `None` ⇒ inherit
-    /// `gateway.default_routing_strategy`. The detail drawer reads this
-    /// to label the strategy picker — without it, refetch-after-PATCH
-    /// can't reflect the new value.
-    pub routing_strategy: Option<String>,
-    pub affinity_mode: Option<String>,
-    pub affinity_ttl_secs: Option<i32>,
-    /// Output guardrails as stored in JSONB. The list endpoint returns
-    /// the raw `Value` (rather than `Vec<OutputGuardrail>`) so the UI
-    /// can render unrecognised future variants without breaking. The
-    /// shape is `[{ "type": "max_length", "max_chars": N }, ...]`.
-    #[schema(value_type = serde_json::Value)]
-    pub output_guardrails: serde_json::Value,
-}
+use crate::services::model_repository::{
+    self as repo, ModelFields, ModelIdRow, ModelRouteRow, ModelRow, NewRoute, RouteImport,
+    RouteUpdate,
+};
+use crate::services::provider_repository;
 
 /// `status` filter accepted by `GET /api/admin/models`:
 ///
@@ -119,84 +79,9 @@ pub async fn list_models(
     let page = query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * page_size;
     let search = query.q.as_deref().unwrap_or("").trim();
-    let search_pattern = format!("%{search}%");
     let status = query.status.as_deref().unwrap_or("");
-
-    // Unified query with `$1='' OR ...` to combine optional search +
-    // status filter. `status_filter`:
-    //   'active'    — m.enabled = true AND enabled_route_count > 0
-    //   'disabled'  — m.enabled = false, OR
-    //                 (m.enabled = true AND route_count > 0 AND enabled_route_count = 0)
-    //   'unrouted'  — route_count = 0
-    //   otherwise   — no filter
-    //
-    // We compute `route_count` / `enabled_route_count` via `LATERAL`
-    // subquery so the filter happens on the joined shape; PG rewrites
-    // this to a HashAggregate over `model_routes`.
-    let status_filter_sql = match status {
-        "active" => "AND m.enabled = true AND rc.enabled_route_count > 0",
-        "disabled" => {
-            "AND (m.enabled = false OR (rc.route_count > 0 AND rc.enabled_route_count = 0))"
-        }
-        "unrouted" => "AND rc.route_count = 0",
-        _ => "",
-    };
-
-    let total_sql = format!(
-        r#"SELECT COUNT(*) FROM models m
-           LEFT JOIN LATERAL (
-             SELECT COUNT(*)                                 AS route_count,
-                    COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count
-             FROM model_routes mr
-             JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
-             WHERE mr.model_id = m.model_id
-           ) rc ON true
-           WHERE ($1 = '' OR m.model_id ILIKE $2 OR m.display_name ILIKE $2)
-             {status_filter_sql}"#,
-    );
-    let list_sql = format!(
-        r#"SELECT m.id, m.model_id, m.display_name,
-                  m.input_weight, m.output_weight,
-                  m.cache_read_weight, m.cache_write_weight, m.cache_write_1h_weight,
-                  COALESCE(rc.route_count, 0)         AS route_count,
-                  COALESCE(rc.enabled_route_count, 0) AS enabled_route_count,
-                  m.enabled,
-                  COALESCE(rc.providers, '{{}}'::text[]) AS providers,
-                  m.routing_strategy, m.affinity_mode, m.affinity_ttl_secs,
-                  m.output_guardrails
-           FROM models m
-           LEFT JOIN LATERAL (
-             SELECT COUNT(*)                                 AS route_count,
-                    COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count,
-                    array_agg(COALESCE(p.display_name, p.name)
-                              ORDER BY mr.weight DESC, p.name) AS providers
-             FROM model_routes mr
-             JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
-             WHERE mr.model_id = m.model_id
-           ) rc ON true
-           WHERE ($1 = '' OR m.model_id ILIKE $2 OR m.display_name ILIKE $2)
-             {status_filter_sql}
-           ORDER BY m.model_id
-           LIMIT $3 OFFSET $4"#,
-    );
-
-    let total: Option<i64> = sqlx::query_scalar(&total_sql)
-        .bind(search)
-        .bind(&search_pattern)
-        .fetch_one(&state.db)
-        .await?;
-    let rows = sqlx::query_as::<_, ModelRow>(&list_sql)
-        .bind(search)
-        .bind(&search_pattern)
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?;
-
-    Ok(Json(ModelListResponse {
-        items: rows,
-        total: total.unwrap_or(0),
-    }))
+    let (total, items) = repo::list(&state.db, search, status, page_size, offset).await?;
+    Ok(Json(ModelListResponse { items, total }))
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -291,31 +176,21 @@ pub async fn create_model(
     let guardrails_json = serde_json::to_value(&guardrails)
         .map_err(|e| AppError::BadRequest(format!("failed to serialize output_guardrails: {e}")))?;
 
-    let model = sqlx::query_as::<_, Model>(
-        r#"INSERT INTO models
-              (model_id, display_name, input_weight, output_weight,
-               routing_strategy, affinity_mode, affinity_ttl_secs, tags,
-               output_guardrails,
-               cache_read_weight, cache_write_weight, cache_write_1h_weight)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-           RETURNING id, model_id, display_name, input_weight, output_weight,
-                     cache_read_weight, cache_write_weight, cache_write_1h_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
-                     output_guardrails"#,
+    let model = repo::insert(
+        &state.db,
+        &req.model_id,
+        &ModelFields {
+            display_name: &req.display_name,
+            input_weight: in_w,
+            output_weight: out_w,
+            routing_strategy: req.routing_strategy.as_deref(),
+            affinity_mode: req.affinity_mode.as_deref(),
+            affinity_ttl_secs: req.affinity_ttl_secs,
+            tags: req.tags.as_deref(),
+            output_guardrails: &guardrails_json,
+            cache_weights: cache,
+        },
     )
-    .bind(&req.model_id)
-    .bind(&req.display_name)
-    .bind(in_w)
-    .bind(out_w)
-    .bind(&req.routing_strategy)
-    .bind(&req.affinity_mode)
-    .bind(req.affinity_ttl_secs)
-    .bind(req.tags.as_deref())
-    .bind(&guardrails_json)
-    .bind(cache[0])
-    .bind(cache[1])
-    .bind(cache[2])
-    .fetch_one(&state.db)
     .await?;
 
     state.audit.log(
@@ -467,17 +342,9 @@ pub async fn update_model(
     auth_user
         .require_global_permission(&state.db, "models:write")
         .await?;
-    let existing = sqlx::query_as::<_, Model>(
-        r#"SELECT id, model_id, display_name, input_weight, output_weight,
-                  cache_read_weight, cache_write_weight, cache_write_1h_weight,
-                  routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
-                  output_guardrails
-           FROM models WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Model not found".into()))?;
+    let existing = repo::find(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Model not found".into()))?;
 
     let new_in_w = req.input_weight.unwrap_or(existing.input_weight);
     let new_out_w = req.output_weight.unwrap_or(existing.output_weight);
@@ -530,44 +397,25 @@ pub async fn update_model(
         new_affinity_ttl,
     )?;
 
-    let updated = sqlx::query_as::<_, Model>(
-        r#"UPDATE models SET
-              display_name      = $2,
-              input_weight      = $3,
-              output_weight     = $4,
-              routing_strategy  = $5,
-              affinity_mode     = $6,
-              affinity_ttl_secs = $7,
-              tags              = $8,
-              enabled           = $9,
-              output_guardrails = $10,
-              cache_read_weight     = $11,
-              cache_write_weight    = $12,
-              cache_write_1h_weight = $13
-           WHERE id = $1
-           RETURNING id, model_id, display_name, input_weight, output_weight,
-                     cache_read_weight, cache_write_weight, cache_write_1h_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
-                     output_guardrails"#,
+    let updated = repo::update(
+        &state.db,
+        id,
+        &ModelFields {
+            display_name: req
+                .display_name
+                .as_deref()
+                .unwrap_or(&existing.display_name),
+            input_weight: new_in_w,
+            output_weight: new_out_w,
+            routing_strategy: new_strategy.as_deref(),
+            affinity_mode: new_affinity_mode.as_deref(),
+            affinity_ttl_secs: new_affinity_ttl,
+            tags: new_tags.as_deref(),
+            output_guardrails: &new_guardrails_json,
+            cache_weights: cache,
+        },
+        req.enabled.unwrap_or(existing.enabled),
     )
-    .bind(id)
-    .bind(
-        req.display_name
-            .as_deref()
-            .unwrap_or(&existing.display_name),
-    )
-    .bind(new_in_w)
-    .bind(new_out_w)
-    .bind(&new_strategy)
-    .bind(&new_affinity_mode)
-    .bind(new_affinity_ttl)
-    .bind(new_tags.as_deref())
-    .bind(req.enabled.unwrap_or(existing.enabled))
-    .bind(&new_guardrails_json)
-    .bind(cache[0])
-    .bind(cache[1])
-    .bind(cache[2])
-    .fetch_one(&state.db)
     .await?;
 
     state.audit.log(
@@ -612,14 +460,8 @@ pub async fn delete_model(
     auth_user
         .require_global_permission(&state.db, "models:write")
         .await?;
-    let model_id: Option<String> = sqlx::query_scalar("SELECT model_id FROM models WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
-    sqlx::query("DELETE FROM models WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    let model_id = repo::model_id_of(&state.db, id).await?;
+    repo::delete(&state.db, id).await?;
     state.audit.log(
         auth_user
             .audit("model.deleted")
@@ -634,12 +476,6 @@ pub async fn delete_model(
 // ---------------------------------------------------------------------------
 // Lightweight list of every exposed model_id
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct ModelIdRow {
-    pub model_id: String,
-    pub display_name: String,
-}
 
 /// GET /api/admin/models/ids
 ///
@@ -656,12 +492,7 @@ pub async fn list_model_ids(
         .require_global_permission(&state.db, "models:read")
         .await?;
 
-    let rows = sqlx::query_as::<_, ModelIdRow>(
-        "SELECT model_id, display_name FROM models ORDER BY model_id",
-    )
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(rows))
+    Ok(Json(repo::list_ids(&state.db).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -685,18 +516,7 @@ pub async fn delete_unrouted_models(
         .require_global_permission(&state.db, "models:write")
         .await?;
 
-    let result = sqlx::query(
-        r#"DELETE FROM models
-           WHERE model_id NOT IN (
-             SELECT DISTINCT mr.model_id
-             FROM model_routes mr
-             JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
-           )"#,
-    )
-    .execute(&state.db)
-    .await?;
-
-    let deleted = result.rows_affected() as i64;
+    let deleted = repo::delete_unrouted(&state.db).await? as i64;
 
     state.audit.log(
         auth_user
@@ -733,12 +553,7 @@ pub async fn bulk_delete_models(
         return Err(AppError::BadRequest("ids is empty".into()));
     }
 
-    let result = sqlx::query("DELETE FROM models WHERE id = ANY($1)")
-        .bind(&req.ids)
-        .execute(&state.db)
-        .await?;
-
-    let deleted = result.rows_affected() as i64;
+    let deleted = repo::delete_many(&state.db, &req.ids).await? as i64;
 
     state.audit.log(
         auth_user
@@ -783,18 +598,7 @@ pub async fn bulk_set_enabled_models(
         return Err(AppError::BadRequest("ids is empty".into()));
     }
 
-    let result = sqlx::query(
-        r#"UPDATE models
-              SET enabled = $2
-            WHERE id = ANY($1)
-              AND enabled IS DISTINCT FROM $2"#,
-    )
-    .bind(&req.ids)
-    .bind(req.enabled)
-    .execute(&state.db)
-    .await?;
-
-    let updated = result.rows_affected() as i64;
+    let updated = repo::set_enabled_many(&state.db, &req.ids, req.enabled).await? as i64;
 
     state.audit.log(
         auth_user
@@ -816,30 +620,6 @@ pub async fn bulk_set_enabled_models(
 // Model Routes CRUD
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct ModelRouteRow {
-    pub id: Uuid,
-    pub model_id: String,
-    pub provider_id: Uuid,
-    pub provider_name: String,
-    pub upstream_model: String,
-    pub weight: i32,
-    pub enabled: bool,
-    /// Optional human-readable identifier (e.g. "EU-primary"). Pure
-    /// metadata for the admin UI; ignored by the routing layer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    /// Free-form note. Surfaced in the edit dialog only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-    /// Per-route RPM cap. NULL = unlimited.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rpm_cap: Option<i32>,
-    /// Per-route TPM cap. NULL = unlimited.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tpm_cap: Option<i32>,
-}
-
 /// GET /api/admin/models/{model_id}/routes
 pub async fn list_model_routes(
     auth_user: AuthUser,
@@ -850,24 +630,7 @@ pub async fn list_model_routes(
         .require_global_permission(&state.db, "models:read")
         .await?;
 
-    // Order by creation time so the routes table and the traffic-share
-    // sliders stay in the same place when admins drag weights — sorting
-    // by weight DESC made rows jump around as soon as you adjusted the
-    // ratios, which the operator UI shouldn't do.
-    let rows = sqlx::query_as::<_, ModelRouteRow>(
-        r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                  mr.upstream_model, mr.weight, mr.enabled,
-                  mr.label, mr.notes, mr.rpm_cap, mr.tpm_cap
-           FROM model_routes mr
-           JOIN providers p ON p.id = mr.provider_id
-           WHERE mr.model_id = $1 AND p.deleted_at IS NULL
-           ORDER BY mr.created_at, mr.id"#,
-    )
-    .bind(&model_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    Ok(Json(rows))
+    Ok(Json(repo::routes_of(&state.db, &model_id).await?))
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -906,24 +669,12 @@ pub async fn create_model_route(
         .require_global_permission(&state.db, "models:write")
         .await?;
 
-    // Verify model exists
-    let model_exists: Option<String> =
-        sqlx::query_scalar("SELECT model_id FROM models WHERE model_id = $1")
-            .bind(&model_id)
-            .fetch_optional(&state.db)
-            .await?;
-    if model_exists.is_none() {
+    if !repo::exists(&state.db, &model_id).await? {
         return Err(AppError::NotFound("Model not found".into()));
     }
-
-    // Verify provider exists
-    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(req.provider_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::BadRequest("Provider not found".into()))?;
+    let provider = provider_repository::find_live(&state.db, req.provider_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Provider not found".into()))?;
 
     let weight = req.weight.unwrap_or(100);
     let upstream_model = req
@@ -938,18 +689,7 @@ pub async fn create_model_route(
     // Uniqueness is on (model_id, provider_id, upstream_model), so the
     // dup check has to match — same provider with a different upstream
     // is a legal second route.
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM model_routes
-           WHERE model_id = $1
-             AND provider_id = $2
-             AND upstream_model = $3"#,
-    )
-    .bind(&model_id)
-    .bind(req.provider_id)
-    .bind(&upstream_model)
-    .fetch_optional(&state.db)
-    .await?;
-    if existing.is_some() {
+    if repo::route_exists(&state.db, &model_id, req.provider_id, &upstream_model).await? {
         return Err(AppError::BadRequest(
             "A route for this model+provider+upstream already exists".into(),
         ));
@@ -986,27 +726,21 @@ pub async fn create_model_route(
     }
     let upstream_protocol = verdict.protocol().map(|p| p.as_str().to_string());
 
-    let row = sqlx::query_as::<_, ModelRouteRow>(
-        r#"INSERT INTO model_routes
-              (model_id, provider_id, upstream_model, weight, enabled,
-               label, notes, rpm_cap, tpm_cap, upstream_protocol)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           RETURNING id, model_id, provider_id,
-                     (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
-                     upstream_model, weight, enabled,
-                     label, notes, rpm_cap, tpm_cap"#,
+    let row = repo::insert_route(
+        &state.db,
+        &NewRoute {
+            model_id: &model_id,
+            provider_id: req.provider_id,
+            upstream_model: &upstream_model,
+            weight,
+            enabled: req.enabled.unwrap_or(true),
+            label: req.label.as_deref().filter(|s| !s.is_empty()),
+            notes: req.notes.as_deref().filter(|s| !s.is_empty()),
+            rpm_cap: req.rpm_cap,
+            tpm_cap: req.tpm_cap,
+            upstream_protocol: upstream_protocol.as_deref(),
+        },
     )
-    .bind(&model_id)
-    .bind(req.provider_id)
-    .bind(&upstream_model)
-    .bind(weight)
-    .bind(req.enabled.unwrap_or(true))
-    .bind(req.label.as_deref().filter(|s| !s.is_empty()))
-    .bind(req.notes.as_deref().filter(|s| !s.is_empty()))
-    .bind(req.rpm_cap)
-    .bind(req.tpm_cap)
-    .bind(&upstream_protocol)
-    .fetch_one(&state.db)
     .await?;
 
     state.audit.log(
@@ -1067,61 +801,33 @@ pub async fn update_model_route(
             "upstream_model cannot be empty".into(),
         ));
     }
-    let (label_set, label_value) = match &req.label {
-        None => (false, None),
-        Some(inner) => (true, inner.as_deref().filter(|s| !s.is_empty())),
-    };
-    let (notes_set, notes_value) = match &req.notes {
-        None => (false, None),
-        Some(inner) => (true, inner.as_deref().filter(|s| !s.is_empty())),
-    };
-    let (rpm_set, rpm_value) = match req.rpm_cap {
-        None => (false, None),
-        Some(inner) => (true, inner),
-    };
-    let (tpm_set, tpm_value) = match req.tpm_cap {
-        None => (false, None),
-        Some(inner) => (true, inner),
-    };
-    if let Some(c) = rpm_value
+    if let Some(Some(c)) = req.rpm_cap
         && c <= 0
     {
         return Err(AppError::BadRequest("rpm_cap must be > 0".into()));
     }
-    if let Some(c) = tpm_value
+    if let Some(Some(c)) = req.tpm_cap
         && c <= 0
     {
         return Err(AppError::BadRequest("tpm_cap must be > 0".into()));
     }
 
-    let row = sqlx::query_as::<_, ModelRouteRow>(
-        r#"UPDATE model_routes SET
-              upstream_model = COALESCE($2, upstream_model),
-              weight   = COALESCE($3, weight),
-              enabled  = COALESCE($4, enabled),
-              label    = CASE WHEN $6  THEN $5  ELSE label    END,
-              notes    = CASE WHEN $8  THEN $7  ELSE notes    END,
-              rpm_cap  = CASE WHEN $10 THEN $9  ELSE rpm_cap  END,
-              tpm_cap  = CASE WHEN $12 THEN $11 ELSE tpm_cap  END
-           WHERE id = $1
-           RETURNING id, model_id, provider_id,
-                     (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
-                     upstream_model, weight, enabled,
-                     label, notes, rpm_cap, tpm_cap"#,
+    fn non_empty(v: &Option<String>) -> Option<&str> {
+        v.as_deref().filter(|s| !s.is_empty())
+    }
+    let row = repo::update_route(
+        &state.db,
+        route_id,
+        &RouteUpdate {
+            upstream_model: upstream_value,
+            weight: req.weight,
+            enabled: req.enabled,
+            label: req.label.as_ref().map(non_empty),
+            notes: req.notes.as_ref().map(non_empty),
+            rpm_cap: req.rpm_cap,
+            tpm_cap: req.tpm_cap,
+        },
     )
-    .bind(route_id)
-    .bind(upstream_value)
-    .bind(req.weight)
-    .bind(req.enabled)
-    .bind(label_value)
-    .bind(label_set)
-    .bind(notes_value)
-    .bind(notes_set)
-    .bind(rpm_value)
-    .bind(rpm_set)
-    .bind(tpm_value)
-    .bind(tpm_set)
-    .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Route not found".into()))?;
 
@@ -1147,12 +853,7 @@ pub async fn delete_model_route(
         .require_global_permission(&state.db, "models:write")
         .await?;
 
-    let result = sqlx::query("DELETE FROM model_routes WHERE id = $1")
-        .bind(route_id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    if !repo::delete_route(&state.db, route_id).await? {
         return Err(AppError::NotFound("Route not found".into()));
     }
 
@@ -1207,63 +908,8 @@ pub async fn list_all_routes(
     let page = q.page.unwrap_or(1).max(1);
     let offset = (page - 1) * page_size;
     let search = q.q.as_deref().unwrap_or("").trim();
-    let search_pattern = format!("%{search}%");
-
-    let (rows, total) = if search.is_empty() && q.provider_id.is_none() {
-        let total: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM model_routes mr JOIN providers p ON p.id = mr.provider_id WHERE p.deleted_at IS NULL",
-        )
-        .fetch_one(&state.db)
-        .await?;
-        let rows = sqlx::query_as::<_, ModelRouteRow>(
-            r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                      mr.upstream_model, mr.weight, mr.enabled,
-                      mr.label, mr.notes, mr.rpm_cap, mr.tpm_cap
-               FROM model_routes mr
-               JOIN providers p ON p.id = mr.provider_id
-               WHERE p.deleted_at IS NULL
-               ORDER BY mr.model_id, mr.weight DESC
-               LIMIT $1 OFFSET $2"#,
-        )
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total.unwrap_or(0))
-    } else {
-        let total: Option<i64> = sqlx::query_scalar(
-            r#"SELECT COUNT(*) FROM model_routes mr
-               JOIN providers p ON p.id = mr.provider_id
-               WHERE p.deleted_at IS NULL
-                 AND ($1 = '' OR mr.model_id ILIKE $2 OR p.name ILIKE $2)
-                 AND ($3::UUID IS NULL OR mr.provider_id = $3)"#,
-        )
-        .bind(search)
-        .bind(&search_pattern)
-        .bind(q.provider_id)
-        .fetch_one(&state.db)
-        .await?;
-        let rows = sqlx::query_as::<_, ModelRouteRow>(
-            r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                      mr.upstream_model, mr.weight, mr.enabled,
-                      mr.label, mr.notes, mr.rpm_cap, mr.tpm_cap
-               FROM model_routes mr
-               JOIN providers p ON p.id = mr.provider_id
-               WHERE p.deleted_at IS NULL
-                 AND ($1 = '' OR mr.model_id ILIKE $2 OR p.name ILIKE $2)
-                 AND ($3::UUID IS NULL OR mr.provider_id = $3)
-               ORDER BY mr.model_id, mr.weight DESC
-               LIMIT $4 OFFSET $5"#,
-        )
-        .bind(search)
-        .bind(&search_pattern)
-        .bind(q.provider_id)
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total.unwrap_or(0))
-    };
+    let (total, rows) =
+        repo::list_routes(&state.db, search, q.provider_id, page_size, offset).await?;
 
     Ok(Json(RouteListResponse { items: rows, total }))
 }
@@ -1325,13 +971,9 @@ pub async fn batch_create_routes(
         return Err(AppError::BadRequest("items is empty".into()));
     }
 
-    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(req.provider_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::BadRequest("Provider not found".into()))?;
+    let provider = provider_repository::find_live(&state.db, req.provider_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Provider not found".into()))?;
 
     // Split the request into the two flows. Each flow is one bulk
     // INSERT via UNNEST so we stay at O(1) round trips regardless of N.
@@ -1370,12 +1012,7 @@ pub async fn batch_create_routes(
         })
         .collect();
 
-    let mut new_exposed: Vec<String> = Vec::new();
-    let mut new_upstreams: Vec<String> = Vec::new();
-    let mut new_protocols: Vec<Option<String>> = Vec::new();
-    let mut attach_targets: Vec<String> = Vec::new();
-    let mut attach_upstreams: Vec<String> = Vec::new();
-    let mut attach_protocols: Vec<Option<String>> = Vec::new();
+    let mut import = RouteImport::default();
 
     for it in &req.items {
         let verdict = verdicts.get(&it.upstream);
@@ -1397,89 +1034,22 @@ pub async fn batch_create_routes(
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&it.upstream)
                     .to_string();
-                new_exposed.push(exposed);
-                new_upstreams.push(it.upstream.clone());
-                new_protocols.push(protocol);
+                import.new_exposed.push(exposed);
+                import.new_upstreams.push(it.upstream.clone());
+                import.new_protocols.push(protocol);
             }
             Some(target) => {
-                attach_targets.push(target.clone());
-                attach_upstreams.push(it.upstream.clone());
-                attach_protocols.push(protocol);
+                import.attach_targets.push(target.clone());
+                import.attach_upstreams.push(it.upstream.clone());
+                import.attach_protocols.push(protocol);
             }
         }
     }
 
-    let mut tx = state.db.begin().await?;
-
-    // --- "new" items -----------------------------------------------
-    //
-    // Catalog insert is idempotent. Route insert counts rows via the
-    // RETURNING/CTE pattern so the response's `created` count reflects
-    // only rows that actually landed (skipping ON CONFLICT dupes).
-    let new_inserted: i64 = if new_exposed.is_empty() {
-        0
-    } else {
-        sqlx::query(
-            r#"INSERT INTO models (model_id, display_name)
-               SELECT exposed, exposed
-               FROM UNNEST($1::TEXT[]) AS t(exposed)
-               ON CONFLICT (model_id) DO NOTHING"#,
-        )
-        .bind(&new_exposed)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query_scalar::<_, i64>(
-            r#"WITH ins AS (
-                 INSERT INTO model_routes
-                     (model_id, provider_id, upstream_model, weight, upstream_protocol)
-                 SELECT exposed, $3, upstream, 100, protocol
-                 FROM UNNEST($1::TEXT[], $2::TEXT[], $4::TEXT[])
-                   AS t(exposed, upstream, protocol)
-                 ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
-                 RETURNING 1
-               )
-               SELECT COUNT(*) FROM ins"#,
-        )
-        .bind(&new_exposed)
-        .bind(&new_upstreams)
-        .bind(req.provider_id)
-        .bind(&new_protocols)
-        .fetch_one(&mut *tx)
-        .await?
-    };
-
-    // --- "attach" items --------------------------------------------
-    //
-    // Targets that don't exist in `models` are silently skipped
-    // (EXISTS guard below) to avoid a FK failure on a typo. The audit
-    // log records the discrepancy via the created/requested deltas.
-    let attach_inserted: i64 = if attach_targets.is_empty() {
-        0
-    } else {
-        sqlx::query_scalar::<_, i64>(
-            r#"WITH ins AS (
-                 INSERT INTO model_routes
-                     (model_id, provider_id, upstream_model, weight, upstream_protocol)
-                 SELECT t.target, $3, t.upstream, 100, t.protocol
-                 FROM UNNEST($1::TEXT[], $2::TEXT[], $4::TEXT[])
-                   AS t(target, upstream, protocol)
-                 WHERE EXISTS (SELECT 1 FROM models m WHERE m.model_id = t.target)
-                 ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
-                 RETURNING 1
-               )
-               SELECT COUNT(*) FROM ins"#,
-        )
-        .bind(&attach_targets)
-        .bind(&attach_upstreams)
-        .bind(req.provider_id)
-        .bind(&attach_protocols)
-        .fetch_one(&mut *tx)
-        .await?
-    };
-
-    tx.commit().await?;
-    let created = new_inserted + attach_inserted;
+    // Imported routes that already exist, or attach to a catalog entry
+    // that does not, are skipped; the audit row records the discrepancy
+    // via the created/requested deltas.
+    let created = repo::import_routes(&state.db, req.provider_id, &import).await?;
 
     state.audit.log(
         auth_user
@@ -1487,8 +1057,8 @@ pub async fn batch_create_routes(
             .resource("model_routes")
             .detail(serde_json::json!({
                 "provider_id": req.provider_id,
-                "new": new_exposed.len(),
-                "attach": attach_targets.len(),
+                "new": import.new_exposed.len(),
+                "attach": import.attach_targets.len(),
                 "created": created,
             })),
     );
@@ -1532,12 +1102,7 @@ pub async fn batch_delete_routes(
         return Err(AppError::BadRequest("ids is empty".into()));
     }
 
-    let result = sqlx::query("DELETE FROM model_routes WHERE id = ANY($1)")
-        .bind(&req.ids)
-        .execute(&state.db)
-        .await?;
-
-    let deleted = result.rows_affected() as i64;
+    let deleted = repo::delete_routes(&state.db, &req.ids).await? as i64;
 
     state.audit.log(
         auth_user
@@ -1601,17 +1166,8 @@ pub async fn batch_update_route_weights(
 
     // One transaction so partial failures roll back — admins shouldn't
     // see "1/3 of my drag landed".
-    let mut tx = state.db.begin().await?;
-    let mut updated = 0i64;
-    for u in &req.updates {
-        let result = sqlx::query("UPDATE model_routes SET weight = $1 WHERE id = $2")
-            .bind(u.weight)
-            .bind(u.id)
-            .execute(&mut *tx)
-            .await?;
-        updated += result.rows_affected() as i64;
-    }
-    tx.commit().await?;
+    let weights: Vec<(Uuid, i32)> = req.updates.iter().map(|u| (u.id, u.weight)).collect();
+    let updated = repo::set_route_weights(&state.db, &weights).await? as i64;
 
     state.audit.log(
         auth_user
@@ -1698,16 +1254,9 @@ pub async fn get_route_history(
     // and the log table records the resolved (model, provider name,
     // upstream_model) tuple instead. Look those up here so the CH
     // query can filter on what it actually has.
-    let route = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT mr.model_id, p.name, mr.upstream_model \
-         FROM model_routes mr \
-         JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL \
-         WHERE mr.id = $1",
-    )
-    .bind(q.route_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("route lookup: {e}")))?;
+    let route = repo::route_log_identity(&state.db, q.route_id)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("route lookup: {e}")))?;
     let Some((model_id, provider_name, upstream_model)) = route else {
         // Route was deleted between page load and refresh — return
         // an empty history so the sparkline stays blank rather than
@@ -1795,13 +1344,7 @@ pub async fn batch_update_routes(
         return Err(AppError::BadRequest("ids is empty".into()));
     }
 
-    let result = sqlx::query("UPDATE model_routes SET enabled = $1 WHERE id = ANY($2)")
-        .bind(req.enabled)
-        .bind(&req.ids)
-        .execute(&state.db)
-        .await?;
-
-    let updated = result.rows_affected() as i64;
+    let updated = repo::set_routes_enabled(&state.db, &req.ids, req.enabled).await? as i64;
 
     state.audit.log(
         auth_user
@@ -1831,13 +1374,9 @@ pub async fn list_remote_models(
 ) -> Result<Json<Vec<Value>>, AppError> {
     auth_user.require_permission("models:read")?;
 
-    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(provider_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("Provider not found".into()))?;
+    let provider = provider_repository::find_live(&state.db, provider_id)
+        .await?
+        .ok_or(AppError::NotFound("Provider not found".into()))?;
 
     // Stored header values are `{"$enc": …}` envelopes, so they have to
     // be decrypted here — deserializing them straight into
@@ -1906,13 +1445,9 @@ pub async fn recheck_provider_models(
         .require_global_permission(&state.db, "models:write")
         .await?;
 
-    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(provider_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("Provider not found".into()))?;
+    let provider = provider_repository::find_live(&state.db, provider_id)
+        .await?
+        .ok_or(AppError::NotFound("Provider not found".into()))?;
 
     let headers = super::providers::decrypt_headers_from_config(
         &provider.config_json,

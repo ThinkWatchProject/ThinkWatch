@@ -26,6 +26,9 @@
 //! a service yet; the migration is iterative.
 
 pub mod auth_lockout;
+pub mod model_repository;
+pub mod pricing_repository;
+pub mod provider_repository;
 pub mod rbac_service;
 pub mod refresh_blacklist;
 pub mod session_service;

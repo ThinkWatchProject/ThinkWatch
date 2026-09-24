@@ -14,21 +14,13 @@
 use axum::Json;
 use axum::extract::State;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
-
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct PlatformPricing {
-    #[schema(value_type = f64)]
-    pub input_price_per_token: Decimal,
-    #[schema(value_type = f64)]
-    pub output_price_per_token: Decimal,
-    pub currency: String,
-}
+use crate::services::pricing_repository::{self as repo, PlatformPricing};
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdatePlatformPricingRequest {
@@ -54,13 +46,7 @@ pub async fn get_platform_pricing(
     State(state): State<AppState>,
 ) -> Result<Json<PlatformPricing>, AppError> {
     auth_user.require_permission("settings:read")?;
-    let row = sqlx::query_as::<_, PlatformPricing>(
-        "SELECT input_price_per_token, output_price_per_token, currency \
-         FROM platform_pricing WHERE id = 1",
-    )
-    .fetch_one(&state.db)
-    .await?;
-    Ok(Json(row))
+    Ok(Json(repo::get(&state.db).await?))
 }
 
 #[utoipa::path(
@@ -99,19 +85,12 @@ pub async fn update_platform_pricing(
         ));
     }
 
-    let updated = sqlx::query_as::<_, PlatformPricing>(
-        r#"UPDATE platform_pricing SET
-              input_price_per_token  = COALESCE($1, input_price_per_token),
-              output_price_per_token = COALESCE($2, output_price_per_token),
-              currency               = COALESCE($3, currency),
-              updated_at             = now()
-           WHERE id = 1
-           RETURNING input_price_per_token, output_price_per_token, currency"#,
+    let updated = repo::update(
+        &state.db,
+        req.input_price_per_token,
+        req.output_price_per_token,
+        req.currency.as_deref(),
     )
-    .bind(req.input_price_per_token)
-    .bind(req.output_price_per_token)
-    .bind(req.currency.as_ref())
-    .fetch_one(&state.db)
     .await?;
 
     state.audit.log(
