@@ -10,24 +10,15 @@ use think_watch_common::models::McpServer;
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::mcp_credential_repository as credential_repo;
+use crate::services::mcp_server_repository::{self as repo, McpServerFields};
+use crate::services::mcp_store_repository as store_repo;
 
 // `probe_mcp_endpoint`, `McpProbeOutcome`, `McpToolSummary`, and
 // `normalize_namespace_prefix` live in `super::mcp_shared` so
 // `mcp_store` (and any future caller) can reach them without
 // reaching across handlers.
 pub use super::mcp_shared::{McpToolSummary, normalize_namespace_prefix, probe_mcp_endpoint};
-
-/// Process-wide advisory-lock key for serializing template installs.
-/// The literal spells "mcpStore" in ASCII so a DBA glancing at
-/// `pg_locks` can tell what's holding it. Any new advisory lock
-/// added elsewhere in the codebase MUST use a distinct constant —
-/// collisions silently serialize unrelated work and can deadlock
-/// under concurrent load.
-///
-/// Reserved advisory lock keys (keep this list current):
-///   * `MCP_STORE_INSTALL_LOCK_KEY` (here): template-install
-///     serialization in `create_server` when `template_slug` is set.
-const MCP_STORE_INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
 
 /// Find an available `(name, namespace_prefix)` pair by appending
 /// `_2`, `_3`, … when the base values are already taken. Runs inside
@@ -36,7 +27,7 @@ const MCP_STORE_INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
 /// path; non-template `create_server` calls just rely on UNIQUE to
 /// reject collisions and surface a 409 to the admin.
 async fn resolve_server_collisions(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     base_name: &str,
     base_prefix: &str,
 ) -> Result<(String, String), AppError> {
@@ -46,18 +37,7 @@ async fn resolve_server_collisions(
         } else {
             (format!("{base_name} #{i}"), format!("{base_prefix}_{i}"))
         };
-        // `SELECT 1` is INT4 on the wire; binding into `Option<i64>`
-        // panics with a column-decode mismatch the moment a row
-        // comes back. We don't actually care about the value — only
-        // whether the row exists — so use Option<i32>.
-        let conflict: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM mcp_servers WHERE name = $1 OR namespace_prefix = $2 LIMIT 1",
-        )
-        .bind(&n)
-        .bind(&p)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if conflict.is_none() {
+        if !repo::name_or_prefix_taken(conn, &n, &p).await? {
             return Ok((n, p));
         }
     }
@@ -177,15 +157,7 @@ pub async fn list_servers(
     auth_user
         .require_global_permission(&state.db, "mcp_servers:read")
         .await?;
-    let mut servers = sqlx::query_as::<_, McpServer>(
-        r#"SELECT s.*, COALESCE(t.cnt, 0) AS tools_count
-           FROM mcp_servers s
-           LEFT JOIN (SELECT server_id, COUNT(*) AS cnt FROM mcp_tools WHERE is_active = true GROUP BY server_id) t
-             ON t.server_id = s.id
-           ORDER BY s.created_at DESC"#,
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let mut servers = repo::list_with_tool_counts(&state.db).await?;
 
     // Attach lifetime call counts from ClickHouse (mcp_logs) — best-effort:
     // if CH is unavailable we simply leave the counter at 0.
@@ -501,16 +473,10 @@ pub async fn create_server(
     // window between snapshot fetch and INSERT.
     let (final_name, final_prefix, template_id) = match req.template_slug.as_deref() {
         Some(slug) if !slug.is_empty() => {
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(MCP_STORE_INSTALL_LOCK_KEY)
-                .execute(&mut *tx)
-                .await?;
-            let template_id: Uuid =
-                sqlx::query_scalar("SELECT id FROM mcp_store_templates WHERE slug = $1 FOR UPDATE")
-                    .bind(slug)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' not found")))?;
+            store_repo::lock_installs(&mut tx).await?;
+            let template_id: Uuid = store_repo::lock_template_by_slug(&mut tx, slug)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' not found")))?;
             let (resolved_name, resolved_prefix) =
                 resolve_server_collisions(&mut tx, &req.name, &namespace_prefix).await?;
             (resolved_name, resolved_prefix, Some(template_id))
@@ -527,78 +493,61 @@ pub async fn create_server(
         .filter(|s| !s.is_empty())
         .map(String::from);
 
-    let server = sqlx::query_as::<_, McpServer>(
-        r#"INSERT INTO mcp_servers (
-               name, namespace_prefix, display_label, description, endpoint_url, transport_type,
-               oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
-               oauth_revocation_endpoint, oauth_userinfo_endpoint,
-               oauth_client_id, oauth_client_secret_encrypted,
-               oauth_scopes, auth_shape, static_token_help_url,
-               auth_header_name, auth_value_template, credential_owner,
-               config_json
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                   $16, $17, $18, $19, $20)
-           RETURNING *"#,
+    let server = repo::insert(
+        &mut tx,
+        &McpServerFields {
+            name: &final_name,
+            namespace_prefix: &final_prefix,
+            display_label: display_label.as_deref(),
+            description: req.description.as_deref(),
+            endpoint_url: &req.endpoint_url,
+            transport_type: &transport_type,
+            oauth_issuer: req.oauth_issuer.as_deref(),
+            oauth_authorization_endpoint: req.oauth_authorization_endpoint.as_deref(),
+            oauth_token_endpoint: req.oauth_token_endpoint.as_deref(),
+            oauth_revocation_endpoint: req.oauth_revocation_endpoint.as_deref(),
+            oauth_userinfo_endpoint: req.oauth_userinfo_endpoint.as_deref(),
+            oauth_client_id: req.oauth_client_id.as_deref(),
+            oauth_client_secret_encrypted: oauth_client_secret_encrypted.as_deref(),
+            oauth_scopes: &oauth_scopes,
+            auth_shape: &auth_shape,
+            static_token_help_url: req.static_token_help_url.as_deref(),
+            auth_header_name: &auth_header_name,
+            auth_value_template: &auth_value_template,
+            credential_owner: &credential_owner,
+            config_json: &config_json,
+        },
     )
-    .bind(&final_name)
-    .bind(&final_prefix)
-    .bind(&display_label)
-    .bind(&req.description)
-    .bind(&req.endpoint_url)
-    .bind(&transport_type)
-    .bind(&req.oauth_issuer)
-    .bind(&req.oauth_authorization_endpoint)
-    .bind(&req.oauth_token_endpoint)
-    .bind(&req.oauth_revocation_endpoint)
-    .bind(&req.oauth_userinfo_endpoint)
-    .bind(&req.oauth_client_id)
-    .bind(&oauth_client_secret_encrypted)
-    .bind(&oauth_scopes)
-    .bind(&auth_shape)
-    .bind(&req.static_token_help_url)
-    .bind(&auth_header_name)
-    .bind(&auth_value_template)
-    .bind(&credential_owner)
-    .bind(&config_json)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_mcp_server_unique_violation)?;
+    .await?;
 
     // Template install audit row + install_count bump. Same TX as
     // the server INSERT so the count never drifts even if
     // mcp_store_installs FK violations rollback the whole thing.
     if let Some(tid) = template_id {
-        sqlx::query(
-            "INSERT INTO mcp_store_installs (template_id, server_id, installed_by) VALUES ($1, $2, $3)",
-        )
-        .bind(tid)
-        .bind(server.id)
-        .bind(auth_user.claims.sub)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE mcp_store_templates SET install_count = install_count + 1 WHERE id = $1",
-        )
-        .bind(tid)
-        .execute(&mut *tx)
-        .await?;
+        store_repo::record_install(&mut tx, tid, server.id, auth_user.claims.sub).await?;
     }
 
     // Atomic credential install for admin_shared mode.
     if let Some(cred) = &wizard_cred {
-        super::mcp_oauth::insert_shared_credential_from_wizard(&mut tx, server.id, cred).await?;
-    } else if let Some(encrypted) = &shared_static_token_encrypted {
-        sqlx::query(
-            r#"INSERT INTO mcp_server_shared_credentials (
-                   mcp_server_id, credential_type, access_token_encrypted, configured_by
-               )
-               VALUES ($1, 'static_token', $2, $3)"#,
+        credential_repo::insert_shared_credential(
+            &mut tx,
+            server.id,
+            &cred.credential_type,
+            &cred.access_token_encrypted,
+            cred.refresh_token_encrypted.as_deref(),
+            cred.expires_at,
+            &cred.scopes,
+            cred.upstream_subject.as_deref(),
+            cred.configured_by,
         )
-        .bind(server.id)
-        .bind(encrypted)
-        .bind(auth_user.claims.sub)
-        .execute(&mut *tx)
+        .await?;
+    } else if let Some(encrypted) = &shared_static_token_encrypted {
+        credential_repo::insert_shared_static_token(
+            &mut tx,
+            server.id,
+            encrypted,
+            auth_user.claims.sub,
+        )
         .await?;
     }
 
@@ -684,10 +633,7 @@ pub async fn create_server(
                         tools = n,
                         "MCP tool discovery completed for new server"
                     );
-                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
-                        .bind(server_id)
-                        .execute(&db_for_err)
-                        .await;
+                    let _ = repo::clear_last_error(&db_for_err, server_id).await;
                     if let Ok(updated) =
                         crate::mcp_runtime::build_registered_server(&db, &server, &key).await
                     {
@@ -698,10 +644,7 @@ pub async fn create_server(
                     // Server requires per-user auth — `mcp_tools` stays
                     // empty by design. Clear last_error so the admin UI
                     // doesn't show stale failure text.
-                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
-                        .bind(server_id)
-                        .execute(&db_for_err)
-                        .await;
+                    let _ = repo::clear_last_error(&db_for_err, server_id).await;
                 }
                 SystemDiscoveryOutcome::Failed(e) => {
                     tracing::warn!(
@@ -709,11 +652,7 @@ pub async fn create_server(
                         error = %e,
                         "Initial MCP tool discovery failed"
                     );
-                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = $1 WHERE id = $2")
-                        .bind(format!("{e}"))
-                        .bind(server_id)
-                        .execute(&db_for_err)
-                        .await;
+                    let _ = repo::set_last_error(&db_for_err, server_id, &format!("{e}")).await;
                 }
             }
         });
@@ -823,9 +762,7 @@ pub async fn update_server(
     auth_user
         .require_global_permission(&state.db, "mcp_servers:update")
         .await?;
-    let existing = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
+    let existing = repo::find(&state.db, id)
         .await?
         .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
@@ -1015,74 +952,48 @@ pub async fn update_server(
     // credential_owner with old-shape credentials still attached —
     // the resolver would then mismatch. Wrapping both in a TX makes
     // the transition atomic.
-    let mut tx = state.db.begin().await?;
-    let updated = sqlx::query_as::<_, McpServer>(
-        r#"UPDATE mcp_servers SET
-              name = $2, namespace_prefix = $3, display_label = $4,
-              description = $5, endpoint_url = $6,
-              transport_type = $7,
-              oauth_issuer = $8, oauth_authorization_endpoint = $9,
-              oauth_token_endpoint = $10, oauth_revocation_endpoint = $11,
-              oauth_userinfo_endpoint = $12,
-              oauth_client_id = $13, oauth_client_secret_encrypted = $14,
-              oauth_scopes = $15, auth_shape = $16, static_token_help_url = $17,
-              auth_header_name = $18, auth_value_template = $19, credential_owner = $20,
-              config_json = $21
-           WHERE id = $1 RETURNING *"#,
-    )
-    .bind(id)
-    .bind(name)
-    .bind(&namespace_prefix)
-    .bind(display_label)
-    .bind(description)
-    .bind(endpoint_url)
-    .bind(transport_type)
-    .bind(oauth_issuer)
-    .bind(oauth_authorization_endpoint)
-    .bind(oauth_token_endpoint)
-    .bind(oauth_revocation_endpoint)
-    .bind(oauth_userinfo_endpoint)
-    .bind(oauth_client_id)
-    .bind(&oauth_client_secret_encrypted)
-    .bind(&oauth_scopes)
-    .bind(&auth_shape)
-    .bind(static_token_help_url)
-    .bind(&auth_header_name)
-    .bind(&auth_value_template)
-    .bind(&credential_owner)
-    .bind(&config_json)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_mcp_server_unique_violation)?;
-
+    //
     // Credential cleanup on relevant transitions. Switching to
     // admin_shared makes per-user creds dead weight; flipping the
     // auth_shape (oauth ↔ static, or either ↔ anonymous) makes the
     // *previous shape's* tokens incompatible with the new resolver
     // path. Both cases purge per-user + shared rows for the server
     // so callers don't end up holding mismatched credentials.
-    if switching_to_admin_shared || auth_shape_changed {
-        sqlx::query("DELETE FROM mcp_user_credentials WHERE mcp_server_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM mcp_user_tools WHERE mcp_server_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    // Drop the shared-credential row when *either* the auth_shape
+    //
+    // The shared-credential row goes when *either* the auth_shape
     // changed (old token is wrong shape) OR we left admin_shared
     // entirely. Same DELETE either way; collapsing the two
     // conditions avoids running it twice on a combined transition
     // (e.g. admin_shared/oauth → per_user/static).
-    if auth_shape_changed || switching_off_admin_shared {
-        sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
+    let updated = repo::update(
+        &state.db,
+        id,
+        &McpServerFields {
+            name,
+            namespace_prefix: &namespace_prefix,
+            display_label,
+            description,
+            endpoint_url,
+            transport_type: &transport_type,
+            oauth_issuer,
+            oauth_authorization_endpoint,
+            oauth_token_endpoint,
+            oauth_revocation_endpoint,
+            oauth_userinfo_endpoint,
+            oauth_client_id,
+            oauth_client_secret_encrypted: oauth_client_secret_encrypted.as_deref(),
+            oauth_scopes: &oauth_scopes,
+            auth_shape: &auth_shape,
+            static_token_help_url,
+            auth_header_name: &auth_header_name,
+            auth_value_template: &auth_value_template,
+            credential_owner: &credential_owner,
+            config_json: &config_json,
+        },
+        switching_to_admin_shared || auth_shape_changed,
+        auth_shape_changed || switching_off_admin_shared,
+    )
+    .await?;
 
     // Evict any cached connection first — the pool keys by id, so a
     // changed endpoint URL needs a fresh connection.
@@ -1190,9 +1101,7 @@ pub async fn get_server(
     auth_user
         .require_global_permission(&state.db, "mcp_servers:read")
         .await?;
-    let server = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
+    let server = repo::find(&state.db, id)
         .await?
         .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
@@ -1223,11 +1132,9 @@ pub async fn delete_server(
         .require_global_permission(&state.db, "mcp_servers:delete")
         .await?;
 
-    let mut tx = state.db.begin().await?;
-    let name = delete_server_inner(&mut tx, id)
+    let name = repo::delete(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("MCP Server not found".into()))?;
-    tx.commit().await?;
 
     // Drop from the in-memory registry and connection pool — otherwise the
     // gateway would keep a stale entry for a server that no longer exists
@@ -1244,47 +1151,6 @@ pub async fn delete_server(
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
-}
-
-/// Tear down a single MCP server inside the caller's transaction.
-/// Performs the same DB-side work as [`delete_server`]:
-///   * SELECT the server name (returned to the caller for audit detail)
-///   * decrement the originating store template's `install_count`
-///   * DELETE the server row (children CASCADE: `mcp_tools`,
-///     `mcp_user_credentials`, `mcp_server_shared_credentials`,
-///     `mcp_user_tools`, `mcp_store_installs`)
-///
-/// Returns `Ok(Some(name))` on success, `Ok(None)` if the row doesn't
-/// exist (caller maps that to a "not_found" skip). In-memory registry
-/// / connection-pool eviction happens at the call site, *after* the
-/// TX commits, so a rolled-back batch never desyncs the registry.
-pub(super) async fn delete_server_inner(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    id: Uuid,
-) -> Result<Option<String>, AppError> {
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&mut **tx)
-        .await?;
-    if name.is_none() {
-        return Ok(None);
-    }
-
-    // Decrement install_count if this server was installed from the store.
-    sqlx::query(
-        r#"UPDATE mcp_store_templates SET install_count = GREATEST(install_count - 1, 0)
-           WHERE id = (SELECT template_id FROM mcp_store_installs WHERE server_id = $1)"#,
-    )
-    .bind(id)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
-
-    Ok(name)
 }
 
 /// Hard cap on `POST /api/mcp/servers/bulk-delete` batch size. Picked
@@ -1368,11 +1234,10 @@ pub async fn bulk_delete_servers(
     // separate TXs would let a mid-batch failure leave the DB in a
     // half-deleted state, which is exactly the footgun bulk-delete
     // is meant to avoid.
-    let mut tx = state.db.begin().await?;
     let mut deleted_pairs: Vec<(Uuid, String)> = Vec::new();
     let mut skipped: Vec<BulkDeleteSkip> = Vec::new();
-    for id in unique_ids {
-        match delete_server_inner(&mut tx, id).await? {
+    for (id, name) in repo::delete_many(&state.db, &unique_ids).await? {
+        match name {
             Some(name) => deleted_pairs.push((id, name)),
             None => skipped.push(BulkDeleteSkip {
                 id,
@@ -1380,7 +1245,6 @@ pub async fn bulk_delete_servers(
             }),
         }
     }
-    tx.commit().await?;
 
     // Post-commit cleanup + audit. Done outside the TX so an audit
     // emit that briefly blocks on the forwarder pool can't roll back
@@ -1402,25 +1266,6 @@ pub async fn bulk_delete_servers(
         deleted: deleted_pairs.into_iter().map(|(id, _)| id).collect(),
         skipped,
     }))
-}
-
-/// Translate PostgreSQL unique-constraint violations on `mcp_servers` into
-/// user-facing conflict errors, so the UI shows "already in use" instead of
-/// a generic 500. Other sqlx errors fall through unchanged.
-fn map_mcp_server_unique_violation(e: sqlx::Error) -> AppError {
-    if let sqlx::Error::Database(db_err) = &e
-        && db_err.code().as_deref() == Some("23505")
-    {
-        let constraint = db_err.constraint().unwrap_or("");
-        if constraint.contains("namespace_prefix") {
-            return AppError::Conflict("namespace_prefix already in use".into());
-        }
-        if constraint.contains("name") {
-            return AppError::Conflict("server name already in use".into());
-        }
-        return AppError::Conflict("duplicate server".into());
-    }
-    AppError::from(e)
 }
 
 #[cfg(test)]

@@ -29,6 +29,8 @@ use think_watch_common::models::McpServer;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::mcp_credential_repository as credential_repo;
+use crate::services::mcp_server_repository as server_repo;
 
 use super::{
     AuthorizeResponse, McpOauthState, OAUTH_STATE_PREFIX, OAUTH_STATE_TTL_SECS, OauthStateTarget,
@@ -38,54 +40,6 @@ use super::{
 // ---------------------------------------------------------------------------
 // Admin: shared-credential storage
 // ---------------------------------------------------------------------------
-
-/// UPSERT into `mcp_server_shared_credentials`. Single row per server
-/// — when the admin rotates the credential the new row replaces the
-/// previous one. Uses `INSERT … ON CONFLICT` keyed on the server_id
-/// PK so the lifecycle code in [`UserTokenResolver`] sees a fresh
-/// `(access_token_encrypted, expires_at)` after a rotation without
-/// any extra coordination.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn upsert_shared_credential(
-    state: &AppState,
-    server_id: Uuid,
-    credential_type: &str,
-    access_encrypted: &[u8],
-    refresh_encrypted: Option<&[u8]>,
-    expires_at: Option<DateTime<Utc>>,
-    scopes: &[String],
-    upstream_subject: Option<&str>,
-    configured_by: Uuid,
-) -> Result<(), AppError> {
-    sqlx::query(
-        r#"INSERT INTO mcp_server_shared_credentials (
-               mcp_server_id, credential_type,
-               access_token_encrypted, refresh_token_encrypted,
-               expires_at, scopes, upstream_subject, configured_by
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (mcp_server_id) DO UPDATE SET
-               credential_type         = EXCLUDED.credential_type,
-               access_token_encrypted  = EXCLUDED.access_token_encrypted,
-               refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-               expires_at              = EXCLUDED.expires_at,
-               scopes                  = EXCLUDED.scopes,
-               upstream_subject        = EXCLUDED.upstream_subject,
-               configured_by           = EXCLUDED.configured_by,
-               updated_at              = now()"#,
-    )
-    .bind(server_id)
-    .bind(credential_type)
-    .bind(access_encrypted)
-    .bind(refresh_encrypted)
-    .bind(expires_at)
-    .bind(scopes)
-    .bind(upstream_subject)
-    .bind(configured_by)
-    .execute(&state.db)
-    .await?;
-    Ok(())
-}
 
 /// Background tool-catalog refresh after a shared-credential write.
 /// Builds the auth header from the server's `auth_header_name` /
@@ -117,21 +71,19 @@ pub(super) fn spawn_shared_tool_discovery(
                     tools = n,
                     "Shared-credential MCP tool discovery succeeded"
                 );
-                let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
-                    .bind(server.id)
-                    .execute(&db)
-                    .await;
+                let _ = server_repo::clear_last_error(&db, server.id).await;
             }
             crate::mcp_runtime::SystemDiscoveryOutcome::AuthRequired => {
                 tracing::warn!(
                     mcp_server = %server.name,
                     "Shared credential rejected by upstream tools/list (401/403)"
                 );
-                let _ = sqlx::query("UPDATE mcp_servers SET last_error = $1 WHERE id = $2")
-                    .bind("Shared credential rejected by upstream — verify token / scopes")
-                    .bind(server.id)
-                    .execute(&db)
-                    .await;
+                let _ = server_repo::set_last_error(
+                    &db,
+                    server.id,
+                    "Shared credential rejected by upstream — verify token / scopes",
+                )
+                .await;
             }
             crate::mcp_runtime::SystemDiscoveryOutcome::Failed(e) => {
                 tracing::warn!(
@@ -139,11 +91,7 @@ pub(super) fn spawn_shared_tool_discovery(
                     error = %e,
                     "Shared-credential MCP tool discovery failed"
                 );
-                let _ = sqlx::query("UPDATE mcp_servers SET last_error = $1 WHERE id = $2")
-                    .bind(format!("{e}"))
-                    .bind(server.id)
-                    .execute(&db)
-                    .await;
+                let _ = server_repo::set_last_error(&db, server.id, &format!("{e}")).await;
             }
         }
     });
@@ -187,8 +135,8 @@ pub async fn paste_shared_static_token(
     let access_encrypted = crypto::encrypt(req.token.as_bytes(), &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt token: {e}")))?;
 
-    upsert_shared_credential(
-        &state,
+    credential_repo::upsert_shared_credential(
+        &state.db,
         server_id,
         "static_token",
         &access_encrypted,
@@ -345,21 +293,7 @@ pub async fn shared_credential_status(
         .require_global_permission(&state.db, "mcp_servers:read")
         .await?;
 
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        credential_type: String,
-        expires_at: Option<DateTime<Utc>>,
-        upstream_subject: Option<String>,
-        configured_by: Option<Uuid>,
-        updated_at: DateTime<Utc>,
-    }
-    let row = sqlx::query_as::<_, Row>(
-        r#"SELECT credential_type, expires_at, upstream_subject, configured_by, updated_at
-             FROM mcp_server_shared_credentials WHERE mcp_server_id = $1"#,
-    )
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row = credential_repo::find_shared_status(&state.db, server_id).await?;
 
     Ok(Json(match row {
         Some(r) => SharedCredentialStatus {
@@ -401,10 +335,7 @@ pub async fn revoke_shared_credential(
         ));
     }
 
-    sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
-        .bind(server_id)
-        .execute(&state.db)
-        .await?;
+    credential_repo::delete_shared_credential(&state.db, server_id).await?;
 
     // The shared bearer is gone — every cached response was minted
     // under it and is now serving against an identity that no longer
@@ -438,13 +369,7 @@ pub async fn best_effort_revoke_shared_upstream(
     state: &AppState,
     server_id: Uuid,
 ) -> Result<bool, AppError> {
-    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
-        r#"SELECT credential_type, access_token_encrypted
-             FROM mcp_server_shared_credentials WHERE mcp_server_id = $1"#,
-    )
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row = credential_repo::find_shared_token(&state.db, server_id).await?;
     let Some((credential_type, access_encrypted)) = row else {
         return Ok(false);
     };

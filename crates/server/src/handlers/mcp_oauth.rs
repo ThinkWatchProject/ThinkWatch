@@ -32,8 +32,8 @@ pub use shared::{
 };
 pub use wizard::{
     PoppedWizardCredential, WizardAuthorizeRequest, WizardCredentialStatus,
-    claim_wizard_credential, discard_wizard_credential, insert_shared_credential_from_wizard,
-    start_wizard_authorize, wizard_credential_status,
+    claim_wizard_credential, discard_wizard_credential, start_wizard_authorize,
+    wizard_credential_status,
 };
 
 use axum::Json;
@@ -55,6 +55,8 @@ use think_watch_common::models::McpServer;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::mcp_credential_repository as credential_repo;
+use crate::services::mcp_server_repository as server_repo;
 
 pub(super) const OAUTH_STATE_PREFIX: &str = "mcp_oauth:state:";
 pub(super) const OAUTH_STATE_TTL_SECS: i64 = 600;
@@ -193,36 +195,8 @@ pub async fn list_connections(
 ) -> Result<Json<Vec<ServerConnections>>, AppError> {
     auth_user.require_permission("mcp:connect")?;
 
-    let servers = sqlx::query_as::<_, McpServer>(
-        r#"SELECT s.*, 0::bigint AS tools_count, 0::bigint AS call_count
-             FROM mcp_servers s
-            ORDER BY s.name"#,
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    #[derive(sqlx::FromRow)]
-    struct AccountRow {
-        mcp_server_id: Uuid,
-        account_label: String,
-        credential_type: String,
-        is_default: bool,
-        scopes: Vec<String>,
-        expires_at: Option<DateTime<Utc>>,
-        upstream_subject: Option<String>,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    }
-    let rows = sqlx::query_as::<_, AccountRow>(
-        r#"SELECT mcp_server_id, account_label, credential_type, is_default,
-                  scopes, expires_at, upstream_subject, created_at, updated_at
-             FROM mcp_user_credentials
-            WHERE user_id = $1
-            ORDER BY mcp_server_id, is_default DESC, account_label"#,
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_all(&state.db)
-    .await?;
+    let servers = server_repo::list_by_name(&state.db).await?;
+    let rows = credential_repo::list_user_accounts(&state.db, auth_user.claims.sub).await?;
 
     let mut out = Vec::with_capacity(servers.len());
     for s in servers {
@@ -577,8 +551,8 @@ pub async fn oauth_callback(
         } => {
             let server = load_server(&state, *server_id).await?;
             retry_pg_storage("per_user_credential", || {
-                upsert_credential(
-                    &state,
+                credential_repo::upsert_user_credential(
+                    &state.db,
                     *server_id,
                     *user_id,
                     account_label,
@@ -641,8 +615,8 @@ pub async fn oauth_callback(
         } => {
             let server = load_server(&state, *server_id).await?;
             retry_pg_storage("admin_shared_credential", || {
-                shared::upsert_shared_credential(
-                    &state,
+                credential_repo::upsert_shared_credential(
+                    &state.db,
                     *server_id,
                     "oauth_authcode",
                     &access_encrypted,
@@ -911,15 +885,12 @@ pub async fn revoke_connection(
 
     // Best-effort revoke at the upstream — only when we actually have
     // an access_token AND the server advertises a revocation endpoint.
-    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
-        r#"SELECT credential_type, access_token_encrypted
-             FROM mcp_user_credentials
-            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
+    let row = credential_repo::find_user_token(
+        &state.db,
+        server_id,
+        auth_user.claims.sub,
+        &account_label,
     )
-    .bind(server_id)
-    .bind(auth_user.claims.sub)
-    .bind(&account_label)
-    .fetch_optional(&state.db)
     .await?;
     let Some((credential_type, access_encrypted)) = row else {
         return Err(AppError::NotFound("Connection not found".into()));
@@ -955,42 +926,13 @@ pub async fn revoke_connection(
     // call, even though the user clearly still has a usable connection.
     // Promote the most recently created remaining row as a graceful
     // fallback so the user keeps working without manually re-marking.
-    let mut tx = state.db.begin().await?;
-    let was_default: Option<bool> = sqlx::query_scalar(
-        r#"DELETE FROM mcp_user_credentials
-            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3
-            RETURNING is_default"#,
+    credential_repo::delete_user_credential(
+        &state.db,
+        server_id,
+        auth_user.claims.sub,
+        &account_label,
     )
-    .bind(server_id)
-    .bind(auth_user.claims.sub)
-    .bind(&account_label)
-    .fetch_optional(&mut *tx)
     .await?;
-
-    if matches!(was_default, Some(true)) {
-        // Promote the newest remaining credential for the same
-        // (server, user). Newest wins because a user juggling
-        // multiple credentials usually treats the latest one as
-        // "current" — same heuristic the connect-then-overwrite UX
-        // already nudges them toward. NULL `created_at` shouldn't
-        // exist (column is NOT NULL DEFAULT now()) but the ORDER BY
-        // is still safe under NULLS LAST.
-        sqlx::query(
-            r#"UPDATE mcp_user_credentials
-                SET is_default = true
-                WHERE id = (
-                    SELECT id FROM mcp_user_credentials
-                     WHERE mcp_server_id = $1 AND user_id = $2
-                     ORDER BY created_at DESC NULLS LAST
-                     LIMIT 1
-                )"#,
-        )
-        .bind(server_id)
-        .bind(auth_user.claims.sub)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
 
     // Cached responses pinned to this credential are now serving an
     // identity that no longer has access. Wipe the user's lane for
@@ -1034,41 +976,16 @@ pub async fn set_default_connection(
     )
     .await?;
 
-    let mut tx = state.db.begin().await?;
-    let exists: Option<i32> = sqlx::query_scalar(
-        r#"SELECT 1 FROM mcp_user_credentials
-            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
+    let found = credential_repo::set_default_user_credential(
+        &state.db,
+        server_id,
+        auth_user.claims.sub,
+        &account_label,
     )
-    .bind(server_id)
-    .bind(auth_user.claims.sub)
-    .bind(&account_label)
-    .fetch_optional(&mut *tx)
     .await?;
-    if exists.is_none() {
+    if !found {
         return Err(AppError::NotFound("Connection not found".into()));
     }
-
-    // Two-step toggle so the partial unique index never sees two
-    // is_default rows at once: clear the old default first, then mark
-    // the new one inside the same transaction.
-    sqlx::query(
-        r#"UPDATE mcp_user_credentials SET is_default = false, updated_at = now()
-            WHERE mcp_server_id = $1 AND user_id = $2 AND is_default"#,
-    )
-    .bind(server_id)
-    .bind(auth_user.claims.sub)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"UPDATE mcp_user_credentials SET is_default = true, updated_at = now()
-            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
-    )
-    .bind(server_id)
-    .bind(auth_user.claims.sub)
-    .bind(&account_label)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
 
     // Switching default flips which credential the resolver picks
     // when no API-key override is set. The no-override lane (`_`)
@@ -1146,8 +1063,8 @@ pub async fn paste_static_token(
     let access_encrypted = crypto::encrypt(req.token.as_bytes(), &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt token: {e}")))?;
 
-    upsert_credential(
-        &state,
+    credential_repo::upsert_user_credential(
+        &state.db,
         server_id,
         auth_user.claims.sub,
         account_label.trim(),
@@ -1282,16 +1199,14 @@ pub async fn test_connection(
     // Confirm the credential exists before probing — saves a misleading
     // `NeedsUserCredentials` result for an account_label the user
     // never created (typo in the URL, stale UI cache, etc.).
-    let exists: Option<i32> = sqlx::query_scalar(
-        r#"SELECT 1 FROM mcp_user_credentials
-            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
+    let exists = credential_repo::user_account_exists(
+        &state.db,
+        server_id,
+        auth_user.claims.sub,
+        &account_label,
     )
-    .bind(server_id)
-    .bind(auth_user.claims.sub)
-    .bind(&account_label)
-    .fetch_optional(&state.db)
     .await?;
-    if exists.is_none() {
+    if !exists {
         return Err(AppError::NotFound("Connection not found".into()));
     }
 
@@ -1458,84 +1373,9 @@ pub(crate) async fn resolve_upstream_subject(
 // ---------------------------------------------------------------------------
 
 pub(super) async fn load_server(state: &AppState, server_id: Uuid) -> Result<McpServer, AppError> {
-    sqlx::query_as::<_, McpServer>(
-        r#"SELECT s.*, 0::bigint AS tools_count, 0::bigint AS call_count
-             FROM mcp_servers s WHERE s.id = $1"#,
-    )
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("MCP server not found".into()))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn upsert_credential(
-    state: &AppState,
-    server_id: Uuid,
-    user_id: Uuid,
-    account_label: &str,
-    credential_type: &str,
-    access_encrypted: &[u8],
-    refresh_encrypted: Option<&[u8]>,
-    expires_at: Option<DateTime<Utc>>,
-    scopes: &[String],
-    upstream_subject: Option<&str>,
-) -> Result<(), AppError> {
-    // First credential for (server, user) becomes the default.
-    // SELECT-then-INSERT inside one tx is NOT enough on its own —
-    // two concurrent first-time inserts (admin opens authorize in two
-    // tabs, two account labels) would each read empty + each try
-    // is_default=true and the partial unique index
-    // `uq_mcp_user_credentials_default` would 23505 the loser into a
-    // user-facing 500. Take a per-(server, user) advisory lock so the
-    // decision is serialized.
-    let mut tx = state.db.begin().await?;
-    let lock_key = format!("mcp_user_default:{server_id}:{user_id}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&lock_key)
-        .execute(&mut *tx)
-        .await?;
-    let any_existing: Option<i32> = sqlx::query_scalar(
-        r#"SELECT 1 FROM mcp_user_credentials
-            WHERE mcp_server_id = $1 AND user_id = $2 LIMIT 1"#,
-    )
-    .bind(server_id)
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let new_default = any_existing.is_none();
-
-    sqlx::query(
-        r#"INSERT INTO mcp_user_credentials (
-               mcp_server_id, user_id, account_label, credential_type, is_default,
-               access_token_encrypted, refresh_token_encrypted,
-               expires_at, scopes, upstream_subject
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           ON CONFLICT (mcp_server_id, user_id, account_label) DO UPDATE SET
-               credential_type         = EXCLUDED.credential_type,
-               access_token_encrypted  = EXCLUDED.access_token_encrypted,
-               refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-               expires_at              = EXCLUDED.expires_at,
-               scopes                  = EXCLUDED.scopes,
-               upstream_subject        = EXCLUDED.upstream_subject,
-               updated_at              = now()"#,
-    )
-    .bind(server_id)
-    .bind(user_id)
-    .bind(account_label)
-    .bind(credential_type)
-    .bind(new_default)
-    .bind(access_encrypted)
-    .bind(refresh_encrypted)
-    .bind(expires_at)
-    .bind(scopes)
-    .bind(upstream_subject)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
+    server_repo::find_without_counts(&state.db, server_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("MCP server not found".into()))
 }
 
 // ---------------------------------------------------------------------------
