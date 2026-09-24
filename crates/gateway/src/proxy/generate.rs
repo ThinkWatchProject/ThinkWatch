@@ -86,10 +86,6 @@ const RESPONSES: ClientSurface = ClientSurface {
     caches: false,
 };
 
-/// Output length when the caller set none and the upstream insists on
-/// one (Anthropic). The value the previous handlers used.
-const DEFAULT_MAX_TOKENS: u64 = 4096;
-
 /// POST /v1/chat/completions
 pub async fn proxy_chat_completion(
     State(state): State<GatewayState>,
@@ -179,10 +175,14 @@ impl Outbound {
         official: bool,
     ) -> Result<Wire, GatewayError> {
         let client = self.surface.dialect;
+        // Output length when the caller set none and the upstream insists
+        // on one (Anthropic). There is no per-model output limit on file
+        // here, so it goes by the upstream model's name.
+        let default_max_tokens = tw_dialect::official::fallback_max_output_tokens(model);
         let target = |dialect| Target {
             dialect,
             official,
-            default_max_tokens: DEFAULT_MAX_TOKENS,
+            default_max_tokens,
         };
         let decode = |v: &Value| {
             tw_dialect::convert::decode(client, v, self.surface.path, None)
@@ -358,7 +358,20 @@ pub(crate) async fn read_whole(
 
 // ───────────────────────────────────────────── the pipeline
 
+/// Every error on the way out is in the caller's own format.
 async fn generate(
+    state: GatewayState,
+    headers: HeaderMap,
+    identity: GatewayRequestIdentity,
+    body: Bytes,
+    surface: ClientSurface,
+) -> Result<axum::response::Response, GatewayErrorResponse> {
+    run(state, headers, identity, body, surface)
+        .await
+        .map_err(|e| e.in_dialect(surface.dialect))
+}
+
+async fn run(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
@@ -778,9 +791,8 @@ async fn generate(
 /// part; counting it the same way everywhere keeps one route from
 /// looking cheaper than another for the same work.
 pub(crate) fn tokens(u: &tw_dialect::usage::Usage) -> (u32, u32) {
-    let prompt = u.input + u.cache_read + u.cache_write;
     (
-        u32::try_from(prompt).unwrap_or(u32::MAX),
+        u32::try_from(u.prompt_total()).unwrap_or(u32::MAX),
         u32::try_from(u.output).unwrap_or(u32::MAX),
     )
 }

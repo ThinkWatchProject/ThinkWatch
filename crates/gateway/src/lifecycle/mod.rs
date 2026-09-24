@@ -204,7 +204,7 @@ pub(crate) fn build_chat_pump(
                 // Headers already went out as 200, so the refusal is said
                 // in the stream — and logged with the upstream's own status,
                 // so a throttled upstream stays 429 on the audit row.
-                let mut out = shaper.process(&error_frame(client, &e.to_string()));
+                let mut out = shaper.process(&error_frame(client, e.status_code(), &e.to_string()));
                 out.extend(shaper.finish());
                 yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(out));
                 if let Some(tx) = done_tx.take() {
@@ -271,7 +271,7 @@ pub(crate) fn build_chat_pump(
                     tracing::warn!("{message}");
                     let tail = match convert.as_mut() {
                         Some(c) => c.fail(&message),
-                        None => error_frame(client, &message),
+                        None => error_frame(client, 502, &message),
                     };
                     let mut out = shaper.process(&tail);
                     out.extend(shaper.finish());
@@ -404,23 +404,19 @@ fn cut(
     let mut out = shaper.process(safe);
     let refusal = match convert {
         Some(c) => c.fail(&message),
-        None => error_frame(client, &message),
+        None => error_frame(client, err.status_code(), &message),
     };
     out.extend(shaper.process(&refusal));
     out.extend(shaper.finish());
     out
 }
 
-/// An error in the caller's format, for a stream that was forwarded
-/// untouched and so has no converter to write one.
-fn error_frame(client: Dialect, message: &str) -> Vec<u8> {
-    let body = tw_dialect::convert::error_body(client, 502, message);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    match client {
-        Dialect::Chat => tw_dialect::frame::data(&v),
-        _ => tw_dialect::frame::named("error", &v),
-    }
-    .into_bytes()
+/// A standalone error frame in the caller's format, for a stream that has
+/// no converter to write one (forwarded as sent, or never opened). `status`
+/// is what the error would have been as a response, and picks its class.
+fn error_frame(client: Dialect, status: i64, message: &str) -> Vec<u8> {
+    let status = u16::try_from(status).unwrap_or(502);
+    tw_dialect::convert::error_frame(client, status, message).into_bytes()
 }
 
 impl Surface for ChatCompletionSurface {
