@@ -2,6 +2,7 @@ pub mod cache;
 pub mod content_filter;
 pub mod cost_tracker;
 pub mod health;
+pub mod hidden_text;
 pub mod lifecycle;
 pub mod metadata;
 pub mod metrics_labels;

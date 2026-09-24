@@ -54,12 +54,13 @@ debug = "line-tables-only"
 # One copy, not two. Code that lives in core is used from core directly,
 # never re-exported through a local shim — the envelope layout in
 # tw-crypto already drifted by 61 lines once, while two copies existed.
-tw-crypto = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.38.0" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.38.0" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.38.0" }
-tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.38.0" }
-tw-upstream = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.38.0" }
-tw-wire = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.38.0" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-crypto = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-upstream = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
+tw-wire = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.40.0" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -149,4 +150,5 @@ think-watch-common = { path = "crates/common" }
 think-watch-auth = { path = "crates/auth" }
 think-watch-gateway = { path = "crates/gateway" }
 think-watch-mcp-gateway = { path = "crates/mcp-gateway" }
+
 
