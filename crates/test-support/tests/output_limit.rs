@@ -23,9 +23,10 @@ use wiremock::{Mock, ResponseTemplate};
 /// a byte cap of `max`.
 async fn seed(app: &TestApp, upstream: &str, model: &str, max: usize) -> String {
     let user = fixtures::create_random_user(&app.db).await.unwrap();
-    let provider = fixtures::create_provider(&app.db, &unique_name("cap"), "openai", upstream, None)
-        .await
-        .unwrap();
+    let provider =
+        fixtures::create_provider(&app.db, &unique_name("cap"), "openai", upstream, None)
+            .await
+            .unwrap();
     fixtures::create_model_and_route(&app.db, provider.id, model)
         .await
         .unwrap();
@@ -121,7 +122,10 @@ fn text_in(v: &Value) -> String {
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    if let Some(ps) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
+    if let Some(ps) = v
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+    {
         out.extend(ps.iter().filter_map(|p| p["text"].as_str()));
     }
     out
@@ -173,8 +177,8 @@ async fn a_gemini_json_array_stream_over_the_cap_ends_with_an_error_element() {
     )
     .await;
     assert_eq!(status, 200, "{text}");
-    let elements: Vec<Value> = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("not a JSON array ({e}): {text}"));
+    let elements: Vec<Value> =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not a JSON array ({e}): {text}"));
     let said: String = elements.iter().map(text_in).collect();
     assert_eq!(said, "hi ", "{text}");
     let last = elements.last().unwrap();
