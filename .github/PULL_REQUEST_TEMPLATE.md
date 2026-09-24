@@ -7,7 +7,7 @@ commit. A PR opened against it will be asked to retarget. Use the "Edit"
 button next to the title to switch the base to `dev`; with the CLI, pass
 `--base dev`.
 
-The only PRs that belong on `main` are the release PR (`dev` -> `main`,
+The only PRs that belong on `main` are the release PR (`release/X.Y.Z` -> `main`,
 titled `release: vX.Y.Z`) and a `hotfix/*` branch. See
 docs/operations/release.md for the branch contract.
 -->
