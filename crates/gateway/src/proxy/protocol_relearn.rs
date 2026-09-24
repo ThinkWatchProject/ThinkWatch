@@ -16,8 +16,8 @@
 
 use uuid::Uuid;
 
+use crate::error::GatewayError;
 use crate::protocol::UpstreamProtocol;
-use tw_types::GatewayError;
 
 /// Does this failure look like "wrong dialect" rather than "bad
 /// request" or "upstream down"?

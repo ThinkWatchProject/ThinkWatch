@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::cache::ResponseCache;
 use crate::content_filter::ContentFilter;
 use crate::cost_tracker::CostTracker;
+use crate::error::GatewayError;
 use crate::health::HealthTracker;
 use crate::model_mapping::ModelMapper;
 use crate::pii_redactor::PiiRedactor;
@@ -21,7 +22,6 @@ use crate::router::ModelRouter;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::SurfaceConstraints;
 use think_watch_common::limits::weight;
-use tw_types::GatewayError;
 
 mod accounting;
 mod body_capture;
@@ -356,7 +356,7 @@ mod helper_tests {
 
     #[test]
     fn retry_after_parser_handles_delta_seconds_and_garbage() {
-        use tw_types::parse_retry_after_seconds;
+        use crate::error::parse_retry_after_seconds;
         assert_eq!(parse_retry_after_seconds("30"), Some(30));
         assert_eq!(parse_retry_after_seconds("  45  "), Some(45));
         assert_eq!(parse_retry_after_seconds("0"), Some(0));

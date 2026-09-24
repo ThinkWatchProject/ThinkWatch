@@ -14,7 +14,6 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-tw-crypto = { workspace = true }
 think-watch-server = { path = "../server" }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }

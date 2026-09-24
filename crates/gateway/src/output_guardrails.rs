@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use tw_types::GatewayError;
+use crate::error::GatewayError;
 
 /// Inclusive upper bound on `MaxLength.max_chars`. Anything past this
 /// is almost certainly a configuration mistake — even a 1M-char

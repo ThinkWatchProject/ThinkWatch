@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 tw-breaker = { workspace = true }
-tw-crypto = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 sqlx = { workspace = true }

@@ -103,11 +103,11 @@ fn to_tokens(bytes: usize) -> u64 {
 ///
 /// Returns the usage to bill and whether any of it is an estimate.
 pub fn complete(
-    reported: Option<tw_wire::Usage>,
+    reported: Option<tw_dialect::usage::Usage>,
     finished: bool,
     input_estimate: u64,
     answer: Option<&[u8]>,
-) -> (tw_wire::Usage, bool) {
+) -> (tw_dialect::usage::Usage, bool) {
     let output_estimate = || answer.map(answer_tokens).unwrap_or(0);
     match reported {
         Some(mut u) => {
@@ -126,7 +126,7 @@ pub fn complete(
             (u, estimated)
         }
         None => (
-            tw_wire::Usage {
+            tw_dialect::usage::Usage {
                 input: input_estimate,
                 output: output_estimate(),
                 ..Default::default()
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_finished_answer_keeps_what_the_upstream_reported() {
-        let reported = tw_wire::Usage {
+        let reported = tw_dialect::usage::Usage {
             input: 7,
             output: 3,
             ..Default::default()
@@ -187,7 +187,7 @@ mod tests {
     fn a_cut_short_answer_bills_the_text_that_arrived() {
         // Anthropic reports input at the start and a running output
         // count; a stream cut off after it has only the first count.
-        let reported = tw_wire::Usage {
+        let reported = tw_dialect::usage::Usage {
             input: 7,
             output: 1,
             ..Default::default()

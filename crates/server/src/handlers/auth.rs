@@ -1725,11 +1725,11 @@ pub async fn totp_setup(
         "secret": secret,
         "recovery_codes": recovery_codes,
     });
-    let enc_key = tw_crypto::crypto::parse_encryption_key(&state.config.encryption_key)
+    let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let pending_json = serde_json::to_string(&pending_data)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialization error: {e}")))?;
-    let encrypted_pending = tw_crypto::crypto::encrypt(pending_json.as_bytes(), &enc_key)
+    let encrypted_pending = think_watch_common::crypto::encrypt(pending_json.as_bytes(), &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
     let _: () = fred::interfaces::KeysInterface::set(
         &state.redis,
@@ -1787,11 +1787,11 @@ pub async fn totp_verify_setup(
     ))?;
 
     // Decrypt the pending data from Redis
-    let enc_key = tw_crypto::crypto::parse_encryption_key(&state.config.encryption_key)
+    let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let encrypted_bytes = hex::decode(&pending_hex)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid hex from Redis: {e}")))?;
-    let decrypted = tw_crypto::crypto::decrypt(&encrypted_bytes, &enc_key)
+    let decrypted = think_watch_common::crypto::decrypt(&encrypted_bytes, &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Decryption error: {e}")))?;
     let pending_str = String::from_utf8(decrypted)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid UTF-8: {e}")))?;

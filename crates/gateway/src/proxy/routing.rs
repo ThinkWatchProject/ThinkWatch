@@ -6,10 +6,11 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use super::GatewayState;
+use crate::call_ctx::CallCtx;
+use crate::error::GatewayError;
 use crate::health::{CircuitBreakerConfig, RouteHealth};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
-use tw_types::{CallCtx, GatewayError};
 
 /// What the affinity layer can pin a session to.
 #[derive(Debug, Clone, Copy)]

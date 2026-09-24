@@ -94,13 +94,13 @@ fn scan_parts(parts: &[Part], in_tool_result: bool, out: &mut Vec<Found>) {
 }
 
 /// What the caller is told when the request is refused.
-pub fn refusal(found: &[Found]) -> tw_types::GatewayError {
+pub fn refusal(found: &[Found]) -> crate::error::GatewayError {
     let place = if found.iter().any(|f| f.in_tool_result) {
         "a tool result"
     } else {
         "the message"
     };
-    tw_types::GatewayError::PolicyBlocked(format!(
+    crate::error::GatewayError::PolicyBlocked(format!(
         "{place} contains invisible characters that can hide instructions from a reader ({})",
         found.iter().map(|f| f.kind).collect::<Vec<_>>().join(", ")
     ))

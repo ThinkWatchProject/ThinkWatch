@@ -20,6 +20,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use crate::error::GatewayError;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, header};
 use futures::StreamExt;
@@ -29,7 +30,6 @@ use think_watch_common::lifecycle::Surface;
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord};
 use think_watch_common::limits::{BudgetCap, RateLimitRule};
 use tw_dialect::ir::Dialect;
-use tw_types::GatewayError;
 
 use crate::pii_redactor::PiiRedactor;
 use crate::proxy::generate::{Wire, priced, tokens};
@@ -54,7 +54,7 @@ pub struct Completed {
     pub body: Vec<u8>,
     /// Read off the upstream's bytes, whatever format they were in, or
     /// estimated when they carried none.
-    pub usage: tw_wire::Usage,
+    pub usage: tw_dialect::usage::Usage,
     /// `usage` is at least partly an estimate (see `crate::usage_estimate`).
     pub usage_estimated: bool,
 }
@@ -70,7 +70,7 @@ pub enum ChatCompletionOutcome {
 pub struct ChatStreamCaptured {
     /// What the upstream reported, completed by an estimate where it
     /// reported nothing or was cut short. Zero when no answer came.
-    pub usage: tw_wire::Usage,
+    pub usage: tw_dialect::usage::Usage,
     /// `usage` is at least partly an estimate.
     pub usage_estimated: bool,
     pub cost_usd: Decimal,
@@ -171,7 +171,7 @@ pub(crate) fn build_chat_pump(
     Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
 ) {
     struct Readers {
-        sniffer: Option<tw_wire::Sniffer>,
+        sniffer: Option<tw_dialect::usage::Sniffer>,
         collector: Option<tw_dialect::convert::Collector>,
     }
     let readers = Arc::new(Mutex::new(Readers {
@@ -218,7 +218,7 @@ pub(crate) fn build_chat_pump(
             }
         };
         if let Ok(mut r) = readers.lock() {
-            r.sniffer = Some(tw_wire::Sniffer::new());
+            r.sniffer = Some(tw_dialect::usage::Sniffer::new());
             r.collector = Some(wire.collect.collector());
         }
         let mut convert = wire.convert.as_ref().map(|s| s.stream());
@@ -226,7 +226,7 @@ pub(crate) fn build_chat_pump(
         // the door, so the sniffer, the collector and the converter all
         // read the same SSE they read from every other upstream.
         let mut unframe = (wire.dialect == Dialect::Bedrock)
-            .then(tw_upstream::eventstream::Transcoder::new);
+            .then(crate::bedrock::eventstream::Transcoder::new);
         let mut source = upstream.bytes_stream();
         while let Some(item) = source.next().await {
             let item = match item {
@@ -356,7 +356,7 @@ pub(crate) fn build_chat_pump(
                 assembled.as_deref(),
             )
         } else {
-            (tw_wire::Usage::default(), false)
+            (tw_dialect::usage::Usage::default(), false)
         };
         if usage_estimated {
             metrics::counter!("gateway_usage_estimated_total").increment(1);
@@ -398,7 +398,7 @@ fn cut(
     convert: Option<&mut tw_dialect::convert::StreamConverter>,
     client: Dialect,
     safe: &[u8],
-    err: &tw_types::GatewayError,
+    err: &crate::error::GatewayError,
 ) -> Vec<u8> {
     let message = err.to_string();
     let mut out = shaper.process(safe);
@@ -625,7 +625,7 @@ impl Surface for ChatCompletionSurface {
 /// whole input, and the cost depends on the split.
 fn with_usage_detail(
     detail: Option<serde_json::Value>,
-    usage: &tw_wire::Usage,
+    usage: &tw_dialect::usage::Usage,
     estimated: bool,
 ) -> Option<serde_json::Value> {
     let mut extra = serde_json::Map::new();
@@ -652,11 +652,11 @@ fn with_usage_detail(
 
 /// The usage a captured view bills — shared by `record_usage` and
 /// `emit_audit` so the budget and the audit row can never disagree.
-fn extract_usage(view: &CapturedView<ChatCompletionSurface>) -> tw_wire::Usage {
+fn extract_usage(view: &CapturedView<ChatCompletionSurface>) -> tw_dialect::usage::Usage {
     match view {
         CapturedView::Streaming { captured, .. } => captured.usage,
         CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage,
-        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => tw_wire::Usage::default(),
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => tw_dialect::usage::Usage::default(),
     }
 }
 

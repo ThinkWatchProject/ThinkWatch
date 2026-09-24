@@ -49,9 +49,9 @@ use think_watch_auth::oauth::client::TokenEndpointResponse;
 use think_watch_auth::oauth::pkce::{pkce_challenge, random_token, state_binding};
 use think_watch_auth::oauth::subject::{extract_subject_from_json, subject_from_jwt};
 use think_watch_common::audit::AuditActor;
+use think_watch_common::crypto::{self, parse_encryption_key};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::McpServer;
-use tw_crypto::crypto::{self, parse_encryption_key};
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
