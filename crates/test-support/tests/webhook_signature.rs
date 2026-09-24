@@ -277,15 +277,7 @@ async fn outbox_redelivery_resigns_payload() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    sqlx::query(
-        "UPDATE webhook_outbox SET next_attempt_at = now() - interval '1 second' \
-         WHERE forwarder_id = $1",
-    )
-    .bind(forwarder_id)
-    .execute(&app.db)
-    .await
-    .unwrap();
-    app.state.audit.drain_webhook_outbox_once().await.unwrap();
+    app.drain_outbox(forwarder_id).await;
 
     let received = receiver.received_requests().await.unwrap_or_default();
     assert!(

@@ -212,6 +212,17 @@ impl TestClient {
         // rejects non-ASCII anyway, so the Unicode case-folding is
         // dead surface area waiting to be a future bug.
         let bound_email = email.trim().to_ascii_lowercase();
+        // A nonce is valid with probability 2^-difficulty, so the number
+        // of tries is geometric with mean 2^difficulty. A fixed cap near
+        // the mean fails now and then: 10M at difficulty 21 failed about
+        // one run in a hundred. 32 × the mean fails with probability
+        // e^-32. The server's highest tier is 23; anything above 26
+        // means the difficulty is misconfigured, not unlucky.
+        anyhow::ensure!(
+            difficulty <= 26,
+            "PoW difficulty {difficulty} is too high to grind in a test"
+        );
+        let limit = 32u64 << difficulty;
         let mut nonce: u64 = 0;
         loop {
             let nonce_str = nonce.to_string();
@@ -227,13 +238,10 @@ impl TestClient {
                 }));
             }
             nonce += 1;
-            // Safety belt — at default difficulty 19 the expected
-            // iteration count is ~262k. Stop at 10M (40-ish bits)
-            // to fail-fast if difficulty is misconfigured.
-            if nonce > 10_000_000 {
+            if nonce > limit {
                 anyhow::bail!(
-                    "PoW grinder exceeded 10M iterations at difficulty {difficulty}; \
-                     either DEFAULT_DIFFICULTY was raised dangerously high or there's a bug"
+                    "PoW grinder found no nonce in {limit} tries at difficulty {difficulty}; \
+                     the server and `verify_pow` disagree"
                 );
             }
         }
