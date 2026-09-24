@@ -54,4 +54,5 @@ bytes = { workspace = true }
 rust_decimal = { workspace = true }
 
 [dev-dependencies]
+jsonwebtoken = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

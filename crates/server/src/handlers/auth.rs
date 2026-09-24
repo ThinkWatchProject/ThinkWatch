@@ -12,13 +12,13 @@ use think_watch_common::dto::{
     RefreshRequest, UserResponse,
 };
 use think_watch_common::errors::AppError;
-use think_watch_common::models::User;
 use think_watch_common::validation::{normalize_email, validate_email, validate_password};
 
 use crate::middleware::verify_signature;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+use crate::services::auth_repository as repo;
 
 /// Parse a JSON request body from a raw `axum::extract::Request`,
 /// enforcing a maximum byte limit. Shared by login, register, and
@@ -495,12 +495,7 @@ pub async fn login(
     // lookup in this file already filters `deleted_at IS NULL`; the
     // login path was the lone exception, leaving a 30-day window after
     // soft-delete where the credential still worked.
-    let maybe_user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
-    )
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await?;
+    let maybe_user = repo::find_active_by_email(&state.db, &email).await?;
 
     let (user, password_hash) = match maybe_user {
         Some(u) => {
@@ -639,16 +634,13 @@ pub async fn login(
                         // plaintext: two concurrent requests reading the
                         // same `codes_blob` and racing to update will see
                         // exactly one rows_affected==1.
-                        let rows = sqlx::query(
-                            "UPDATE users SET totp_recovery_codes = $1 \
-                             WHERE id = $2 AND totp_recovery_codes = $3",
+                        let rows = repo::swap_recovery_codes(
+                            &state.db,
+                            user.id,
+                            codes_blob,
+                            &updated_blob,
                         )
-                        .bind(&updated_blob)
-                        .bind(user.id)
-                        .bind(codes_blob)
-                        .execute(&state.db)
-                        .await?
-                        .rows_affected();
+                        .await?;
                         if rows == 1 {
                             recovery_used = true;
                             // Actor is identified (credentials passed)
@@ -1057,17 +1049,8 @@ pub async fn register(
     let mut tx = state.db.begin().await?;
 
     // Use INSERT ... ON CONFLICT to avoid leaking whether email exists (user enumeration)
-    let user = sqlx::query_as::<_, User>(
-        r#"INSERT INTO users (email, display_name, password_hash)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (email) DO NOTHING
-           RETURNING *"#,
-    )
-    .bind(&email)
-    .bind(&req.display_name)
-    .bind(&password_hash)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let user =
+        repo::insert_user_unless_taken(&mut tx, &email, &req.display_name, &password_hash).await?;
 
     let user = match user {
         Some(u) => u,
@@ -1089,14 +1072,7 @@ pub async fn register(
 
     // Assign default role (configurable via settings; empty = no role)
     if let Some(role_name) = state.dynamic_config.default_role().await {
-        sqlx::query(
-            r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-               SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = $2"#,
-        )
-        .bind(user.id)
-        .bind(&role_name)
-        .execute(&mut *tx)
-        .await?;
+        repo::assign_default_role(&mut *tx, user.id, &role_name).await?;
     }
 
     tx.commit().await?;
@@ -1227,12 +1203,9 @@ pub async fn refresh(
     // check covers the cold-start / flushed-Redis case. Without it, a
     // disabled-then-cache-cleared user can mint fresh access tokens
     // for up to refresh_ttl_days (default 7).
-    let user_active: Option<bool> =
-        sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(claims.sub)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|_| AppError::Unauthorized)?;
+    let user_active = repo::is_active(&state.db, claims.sub)
+        .await
+        .map_err(|_| AppError::Unauthorized)?;
     if !matches!(user_active, Some(true)) {
         return Err(AppError::Unauthorized);
     }
@@ -1351,13 +1324,9 @@ pub async fn me(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("User not found".into()))?;
+    let user = repo::find_active(&state.db, auth_user.claims.sub)
+        .await?
+        .ok_or(AppError::NotFound("User not found".into()))?;
 
     let role_assignments = fetch_user_role_assignments(&state, user.id).await;
 
@@ -1379,17 +1348,7 @@ pub async fn me(
 
     // Team memberships — used by the frontend permission cache
     // and the team-context badge in the header.
-    type TeamRow = (uuid::Uuid, String);
-    let team_rows: Vec<TeamRow> = sqlx::query_as(
-        "SELECT t.id, t.name FROM team_members tm \
-           JOIN teams t ON t.id = tm.team_id \
-          WHERE tm.user_id = $1 \
-          ORDER BY t.name ASC",
-    )
-    .bind(user.id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let team_rows = repo::teams_of(&state.db, user.id).await.unwrap_or_default();
     let teams: Vec<think_watch_common::dto::UserTeamSummary> = team_rows
         .into_iter()
         .map(|(id, name)| think_watch_common::dto::UserTeamSummary { id, name })
@@ -1417,18 +1376,9 @@ async fn fetch_user_role_assignments(
     state: &AppState,
     user_id: uuid::Uuid,
 ) -> Vec<think_watch_common::dto::RoleAssignment> {
-    type Row = (uuid::Uuid, String, bool, String, Option<uuid::Uuid>);
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT r.id, r.name, r.is_system, ra.scope_kind, ra.scope_id \
-           FROM rbac_role_assignments ra \
-           JOIN rbac_roles r ON r.id = ra.role_id \
-          WHERE ra.user_id = $1 \
-          ORDER BY r.is_system DESC, r.name ASC",
-    )
-    .bind(user_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let rows = repo::role_assignments_of(&state.db, user_id)
+        .await
+        .unwrap_or_default();
     rows.into_iter()
         .map(|(role_id, name, is_system, scope_kind, scope_id)| {
             let scope = match (scope_kind.as_str(), scope_id) {
@@ -1470,13 +1420,9 @@ pub async fn change_password(
     // here without a matching row is a deleted/disabled account on
     // a still-valid token. 404 leaks existence info AND contradicted
     // the OpenAPI contract (only 200/400/401 were documented).
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::Unauthorized)?;
+    let user = repo::find_active(&state.db, auth_user.claims.sub)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
 
     let current_hash = user
         .password_hash
@@ -1509,11 +1455,7 @@ pub async fn change_password(
         .await;
 
     let new_hash = password::hash_password(&req.new_password)?;
-    sqlx::query("UPDATE users SET password_hash = $1, password_change_required = false, updated_at = now() WHERE id = $2")
-        .bind(&new_hash)
-        .bind(user.id)
-        .execute(&state.db)
-        .await?;
+    repo::set_own_password(&state.db, user.id, &new_hash).await?;
 
     // Revoke all signing public keys for this user (invalidates sessions)
     let pubkey_key = format!("signing_pubkey:{}", user.id);
@@ -1583,16 +1525,7 @@ pub async fn delete_account(
     let user_id = auth_user.claims.sub;
 
     // Soft-delete in a transaction: mark keys + user as deleted atomically
-    let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE api_keys SET is_active = false, deleted_at = now(), disabled_reason = 'account_deleted' WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE users SET is_active = false, deleted_at = now() WHERE id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    repo::soft_delete_account(&state.db, user_id).await?;
 
     // Revoke all sessions. Proceed even if Redis is unreachable — the
     // account's DB flags (is_active = false) already invalidate future
@@ -1702,13 +1635,9 @@ pub async fn totp_setup(
 ) -> Result<Json<TotpSetupResponse>, AppError> {
     use think_watch_auth::totp;
 
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("User not found".into()))?;
+    let user = repo::find_active(&state.db, auth_user.claims.sub)
+        .await?
+        .ok_or(AppError::NotFound("User not found".into()))?;
 
     if user.totp_enabled {
         return Err(AppError::BadRequest("TOTP is already enabled".into()));
@@ -1816,13 +1745,12 @@ pub async fn totp_verify_setup(
     let encrypted_recovery_codes =
         crate::services::totp_service::encrypt_recovery_codes(&state, &pending.recovery_codes)?;
 
-    sqlx::query(
-        "UPDATE users SET totp_secret = $1, totp_enabled = true, totp_recovery_codes = $2, updated_at = now() WHERE id = $3",
+    repo::enable_totp(
+        &state.db,
+        user_id,
+        &encrypted_secret,
+        &encrypted_recovery_codes,
     )
-    .bind(&encrypted_secret)
-    .bind(&encrypted_recovery_codes)
-    .bind(user_id)
-    .execute(&state.db)
     .await?;
 
     // Clean up pending
@@ -1854,13 +1782,9 @@ pub async fn totp_disable(
     State(state): State<AppState>,
     Json(req): Json<DisableTotpRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("User not found".into()))?;
+    let user = repo::find_active(&state.db, auth_user.claims.sub)
+        .await?
+        .ok_or(AppError::NotFound("User not found".into()))?;
 
     if !user.totp_enabled {
         return Err(AppError::BadRequest("TOTP is not enabled".into()));
@@ -1874,12 +1798,7 @@ pub async fn totp_disable(
         return Err(AppError::Unauthorized);
     }
 
-    sqlx::query(
-        "UPDATE users SET totp_secret = NULL, totp_enabled = false, totp_recovery_codes = NULL, updated_at = now() WHERE id = $1",
-    )
-    .bind(user.id)
-    .execute(&state.db)
-    .await?;
+    repo::disable_totp(&state.db, user.id).await?;
 
     state
         .audit
@@ -1902,11 +1821,7 @@ pub async fn totp_status(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let enabled: bool =
-        sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(auth_user.claims.sub)
-            .fetch_one(&state.db)
-            .await?;
+    let enabled = repo::totp_enabled(&state.db, auth_user.claims.sub).await?;
 
     // Check if platform requires TOTP
     let required: bool = state
