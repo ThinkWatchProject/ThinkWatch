@@ -40,7 +40,7 @@ pub mod transport;
 pub(crate) use accounting::post_flight_account;
 pub(crate) use body_capture::prepare_body_capture;
 pub(crate) use log_ctx::emit_gateway_log_with_extra;
-pub(crate) use routing::{SelectionRecord, finalize_health};
+pub(crate) use routing::{SelectionRecord, fails as upstream_failed, finalize_health};
 
 // pub re-exports — `server::app` mounts these as route handlers.
 pub use generate::{proxy_anthropic_messages, proxy_chat_completion, proxy_responses};

@@ -27,26 +27,14 @@ use tw_types::GatewayError;
 /// once. Only 4xx bodies that name an API surface qualify — the shape
 /// upstreams actually use to report this.
 pub(super) fn is_protocol_mismatch(err: &GatewayError) -> bool {
-    let message = match err {
-        GatewayError::ProviderHttpError { status, message } => {
-            if !(400..500).contains(status) {
-                return false;
-            }
-            message
-        }
-        // `transport::check_status` reports most non-2xx upstream
-        // replies as `ProviderError("{label} returned {status}: {body}")`
-        // rather than the structured variant, so the status has to be
-        // read back out of the text. Matching only the structured shape
-        // would mean this never fires in production.
-        GatewayError::ProviderError(message) => {
-            if !mentions_4xx(message) {
-                return false;
-            }
-            message
-        }
-        _ => return false,
+    let GatewayError::ProviderHttpError { status, message } = err else {
+        return false;
     };
+    // A 5xx is an upstream incident, not a dialect problem, and retrying
+    // it through another dialect would misattribute an outage.
+    if !(400..500).contains(status) {
+        return false;
+    }
     let m = message.to_ascii_lowercase();
     let names_an_api = m.contains("/v1/chat/completions")
         || m.contains("/v1/messages")
@@ -59,18 +47,6 @@ pub(super) fn is_protocol_mismatch(err: &GatewayError) -> bool {
         || m.contains("invalid endpoint")
         || m.contains("unknown endpoint");
     names_an_api && sounds_unsupported
-}
-
-/// Pull the HTTP status back out of a `check_status` message
-/// (`"OpenAI returned 400 Bad Request: …"`) and report whether it's a
-/// 4xx. A 5xx is an upstream incident, not a dialect problem, and
-/// retrying it through another dialect would misattribute an outage.
-fn mentions_4xx(message: &str) -> bool {
-    message
-        .split(" returned ")
-        .skip(1)
-        .filter_map(|rest| rest.get(..3).and_then(|s| s.parse::<u16>().ok()))
-        .any(|status| (400..500).contains(&status))
 }
 
 /// Persist a relearned dialect so it survives the next router rebuild.
@@ -150,25 +126,5 @@ mod tests {
             message: "/v1/chat/completions is not available right now".into(),
         }));
         assert!(!is_protocol_mismatch(&GatewayError::UpstreamAuthError));
-    }
-
-    #[test]
-    fn reads_the_status_out_of_the_check_status_message_shape() {
-        // What upstream 4xx failures actually look like in production —
-        // `check_status` formats them into `ProviderError`.
-        assert!(is_protocol_mismatch(&GatewayError::ProviderError(
-            "OpenAI returned 400 Bad Request: {\"message\":\"The model 'anthropic.claude-x' \
-             does not support the '/v1/chat/completions' API\"}"
-                .into()
-        )));
-        // 5xx in the same wrapper is an outage — not something another
-        // dialect would fix.
-        assert!(!is_protocol_mismatch(&GatewayError::ProviderError(
-            "OpenAI returned 503 Service Unavailable: /v1/chat/completions not available".into()
-        )));
-        // No status at all ⇒ nothing to classify on.
-        assert!(!is_protocol_mismatch(&GatewayError::ProviderError(
-            "does not support the '/v1/chat/completions' API".into()
-        )));
     }
 }

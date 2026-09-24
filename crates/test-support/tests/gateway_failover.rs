@@ -343,3 +343,198 @@ async fn the_dashboard_shows_a_tripped_ai_provider_as_open() {
         .unwrap_or_else(|| panic!("no row for {name}: {live}"));
     assert_eq!(row["cb_state"], "Open", "{row}");
 }
+
+/// Upstream that refuses every request with a 400, counting the hits.
+async fn always_400() -> wiremock::MockServer {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {"message": "max_tokens is too large", "type": "invalid_request_error"}
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn hits(server: &wiremock::MockServer) -> usize {
+    server.received_requests().await.unwrap_or_default().len()
+}
+
+/// A request the upstream refuses (400) goes back to the caller as it is.
+/// Every route would refuse it the same way, so it is not tried on the
+/// next one — it used to walk every route of the model.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_refused_request_goes_back_without_trying_another_route() {
+    let app = TestApp::spawn().await;
+    let a = always_400().await;
+    let b = always_400().await;
+
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    for server in [&a, &b] {
+        let p =
+            fixtures::create_provider(&app.db, &unique_name("r"), "openai", &server.uri(), None)
+                .await
+                .unwrap();
+        fixtures::create_model_route(&app.db, p.id, "refused-model", 100)
+            .await
+            .unwrap();
+    }
+    app.rebuild_gateway_router().await;
+    let key = fixtures::create_api_key(&app.db, user.user.id, "r", &["ai_gateway"], None, None)
+        .await
+        .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "refused-model", "messages": [{"role": "user", "content": "x"}]}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(400);
+    let body: Value = resp.json().unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("max_tokens is too large")),
+        "the upstream's reason reaches the caller: {body}"
+    );
+    assert_eq!(
+        hits(&a).await + hits(&b).await,
+        1,
+        "tried on a second route"
+    );
+}
+
+/// Refused requests do not open the route's breaker. One caller's bad
+/// requests used to count as the upstream failing, and with two of them
+/// every route of the model was shut for everyone.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn refused_requests_do_not_open_the_breaker() {
+    let app = TestApp::spawn().await;
+    for (k, v) in [
+        ("gateway.cb_enabled", json!(true)),
+        ("gateway.cb_error_pct", json!(50)),
+        ("gateway.cb_min_samples", json!(2)),
+        ("gateway.cb_window_secs", json!(60)),
+        ("gateway.cb_open_secs", json!(600)),
+    ] {
+        app.set_setting(k, v).await;
+    }
+
+    let server = always_400().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let p = fixtures::create_provider(
+        &app.db,
+        &unique_name("cb400"),
+        "openai",
+        &server.uri(),
+        None,
+    )
+    .await
+    .unwrap();
+    fixtures::create_model_route(&app.db, p.id, "cb400-model", 100)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    let key = fixtures::create_api_key(&app.db, user.user.id, "cb400", &["ai_gateway"], None, None)
+        .await
+        .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+
+    // Buffered and streamed alike.
+    for stream in [false, false, true, true] {
+        let resp = gw
+            .post(
+                "/v1/chat/completions",
+                json!({
+                    "model": "cb400-model",
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "x"}],
+                }),
+            )
+            .await
+            .unwrap();
+        if !stream {
+            resp.assert_status(400);
+        }
+    }
+    // Every one reached the upstream: the breaker never opened.
+    assert_eq!(hits(&server).await, 4);
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "cb400-model", "messages": [{"role": "user", "content": "x"}]}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(400);
+    assert_eq!(
+        hits(&server).await,
+        5,
+        "the route was shut by refused requests"
+    );
+}
+
+/// Server errors still open it — the counterpart of the test above.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn server_errors_open_the_breaker() {
+    let app = TestApp::spawn().await;
+    for (k, v) in [
+        ("gateway.cb_enabled", json!(true)),
+        ("gateway.cb_error_pct", json!(50)),
+        ("gateway.cb_min_samples", json!(2)),
+        ("gateway.cb_window_secs", json!(60)),
+        ("gateway.cb_open_secs", json!(600)),
+    ] {
+        app.set_setting(k, v).await;
+    }
+
+    let bad = MockProvider::always_500().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let p = fixtures::create_provider(&app.db, &unique_name("cb500"), "openai", &bad.uri(), None)
+        .await
+        .unwrap();
+    fixtures::create_model_route(&app.db, p.id, "cb500-model", 100)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    let key = fixtures::create_api_key(&app.db, user.user.id, "cb500", &["ai_gateway"], None, None)
+        .await
+        .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    let ask = || {
+        gw.post(
+            "/v1/chat/completions",
+            json!({"model": "cb500-model", "messages": [{"role": "user", "content": "x"}]}),
+        )
+    };
+    for _ in 0..2 {
+        assert_eq!(ask().await.unwrap().status.as_u16(), 500);
+    }
+    let upstream_hits = bad
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .len();
+    assert_eq!(upstream_hits, 2);
+    // Open: refused without reaching the upstream.
+    assert!(!ask().await.unwrap().status.is_success());
+    let after = bad
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .len();
+    assert_eq!(after, 2, "an open route was still called");
+}

@@ -464,12 +464,18 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn record_outcome(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        // A client that leaves did nothing wrong to the upstream.
+        // A client that leaves did nothing wrong to the upstream, and
+        // neither did one that refused the request (see
+        // `routing::is_upstream_failure`).
         let success = match &invoked.view {
-            CapturedView::Streaming { outcome, .. } => matches!(
-                outcome,
-                StreamOutcome::Natural | StreamOutcome::ClientCancelled
-            ),
+            CapturedView::Streaming { outcome, .. } => match outcome {
+                StreamOutcome::Natural | StreamOutcome::ClientCancelled => true,
+                StreamOutcome::UpstreamError {
+                    error_type,
+                    status_code,
+                    ..
+                } => !crate::proxy::upstream_failed(error_type, *status_code),
+            },
             CapturedView::Buffered(ChatCompletionOutcome::Success(_)) => true,
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
         };
