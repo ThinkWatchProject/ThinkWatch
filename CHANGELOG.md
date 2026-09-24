@@ -11,17 +11,143 @@ target.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-24
+
+The gateway stops rebuilding every request as a chat-shaped message. A
+request whose route speaks the caller's own format goes out as the
+caller sent it; one that crosses formats is converted by
+[ThinkWatch-Core](https://github.com/ThinkWatchProject/ThinkWatch-Core),
+the same layer the desktop edition uses. Tools, tool choice, system
+prompt blocks, `metadata` and `cache_control` now reach the upstream,
+where they used to be dropped. Two new checks guard what goes in and
+out: tool calls an upstream returns, and invisible characters in what
+a caller sends.
+
+### Read before upgrading
+
+- **Anthropic routes record more prompt tokens for the same work.**
+  Prompt tokens now count the same for every upstream: plain input plus
+  cache reads and cache writes, which is OpenAI's definition.
+  Anthropic's own `input_tokens` leaves the cached part out, so on those
+  routes prompt tokens, cost and budget use all go up. The price model
+  still charges every prompt token at one rate.
+- **Requests in the upstream's own format are forwarded as sent.** Every
+  field the caller sends reaches the upstream, along with the caller's
+  `anthropic-beta` and `anthropic-version` headers. Only the model name
+  changes, and PII is swapped for placeholders. An OpenAI-compatible
+  upstream that rejects fields it does not know may now refuse requests
+  that used to succeed, because those fields were stripped before. Try
+  your upstreams with the clients you actually run.
+- **Two checks are on by default, and neither blocks anything yet.**
+  - Tool-call inspection starts in `observe` mode.
+  - The hidden-character check starts in `warn` mode.
+  - Both write audit events, so expect new entries in the audit log and
+    in anything subscribed to it.
+  - Nothing is refused until you switch to `enforce` or `block`.
+- **The response cache starts cold.** The cache key now covers the whole
+  request, so entries written by 1.0.2 are never hit again. They expire
+  on their own.
+- **One PII value gets one placeholder.** Within a request, the same
+  e-mail address is `{{EMAIL_1}}` wherever it appears. It used to get a
+  new number each time, so a model saw one person as several. Saving a
+  PII pattern now also requires the placeholder prefix to be letters,
+  digits or underscores.
+
+### Added
+
+- **Tool-call inspection** (`security.tool_inspection`).
+  - **Why:** an upstream writes the response, so it can hand the caller
+    a tool call the model never made, such as `bash("curl … | sh")`
+    appended to an ordinary answer. An agent set to auto-approve then
+    runs it.
+  - **Rules:** a built-in set of dangerous-command rules. Each can be
+    switched off or given a different action, and you can add your own.
+  - **Modes:** `off`, `observe` (records hits and changes nothing on the
+    wire) and `enforce`.
+  - **Enforce on a stream:** the stream is cut at the frame that would
+    complete a matching call, and the refusal arrives in the caller's
+    format.
+  - **Enforce on a whole response or a cache hit:** refused with 403
+    (`policy_blocked`). A refused answer is neither cached nor billed.
+  - **Audit and metrics:** every hit is an audit event
+    (`gateway.tool_call_flagged` or `gateway.tool_call_blocked`) and
+    counts in `gateway_tool_call_flagged_total`.
+  - **Admin API:** `GET /api/admin/settings/tool-inspection/rules` and
+    `POST /api/admin/settings/tool-inspection/test`.
+  - **Console:** a card on the security page, plus a sandbox tab.
+- **Hidden-character check** (`security.hidden_text`: `off`, `log`,
+  `warn` or `block`).
+  - **What it looks for:**
+    - Unicode tag characters, which carry an instruction invisibly into
+      the model's context;
+    - bidirectional overrides, which make text read differently on
+      screen than it is.
+  - **Where:** the caller's messages and the tool results inside them.
+    The system prompt and the model's own turns are not checked.
+  - **Not flagged:** zero-width joiners (emoji), the zero-width
+    non-joiner (Persian) and Cyrillic.
+  - **Actions:** `warn` writes `gateway.hidden_text_flagged`; `block`
+    refuses with 403 and writes `gateway.hidden_text_blocked`.
+  - **Console:** a card on the security page.
+- **Tool-call arguments get their PII back.** A model asked to e-mail
+  `a@example.com` used to call the tool with `{{EMAIL_1}}` as the
+  address.
+
+### Changed
+
+- **One pipeline for `/v1/chat/completions`, `/v1/messages` and
+  `/v1/responses`.** A same-format request is forwarded as sent. A
+  cross-format request is converted, and the gateway logs what the
+  target format cannot carry.
+- **Content filtering and PII detection read tool results too.** That is
+  where an injected instruction, or customer data pulled in by a tool,
+  usually sits.
+- **Usage is read off the upstream's own bytes.** A streamed response is
+  no longer held in memory for an accounting pass at the end.
+- **Chat streams are billed on the upstream's actual usage.** They are
+  always sent asking for it. A caller who did not ask for the usage
+  chunk still does not get one. 1.0.2 estimated the count for these.
+- **Streams send their headers at once.** A caller who leaves while the
+  upstream is still thinking is recorded as cancelled.
+- **Connectivity tests use the live encoder.** A route's test request is
+  built by the same encoder as real traffic, so a passing test means
+  forwarding works.
+- **The web console loads data through TanStack Query.**
+  - Signing out, including from another tab, clears everything cached.
+  - After a change, screens refresh in place.
+  - Polling pauses while the tab is hidden.
+- **Core crates come from one pinned tag** (ThinkWatch-Core v0.40.0),
+  declared once at the workspace root.
+
 ### Fixed
 
-- **CI** — the `main` push that merged #23 never produced its web image.
-  `Dockerfile.web` built the frontend once per architecture, Node crashed
-  with SIGILL in the QEMU-emulated arm64 build, and the build step hung
-  until GitHub cancelled the job at the six-hour limit. The static files
-  are identical on every architecture, so they are now built once,
-  natively, and copied into each architecture's nginx image — emulated,
-  `pnpm build` alone took 260s against 23s. The job also times out after
-  20 minutes. Image contents are unchanged; release builds already ran on
-  native runners.
+- **Requests lost their tools, tool choice and non-text content** on the
+  way upstream (ThinkWatch-Core#50). Claude Code's system prompt, sent
+  as an array, was dropped whole, and so was every `cache_control`
+  breakpoint. Each cached prefix was billed as full-price input.
+- **The response cache could serve the wrong answer.** Its key covered
+  only model, messages and `max_tokens`, so two requests that differed
+  only in tools, `response_format`, `seed` and so on shared one entry.
+- **A tripped route stayed out until its Redis key expired**, roughly
+  four cooldowns. It now gets probed once the cooldown is over, and a
+  success closes it.
+- **The dashboard showed every AI provider's breaker as `Closed`.** It
+  now shows the real state of the provider's routes, reporting the
+  worst one.
+- **The PII "try patterns" endpoint misreported labels.** A pattern
+  named `CUSTOM_EMAIL` was reported as `CUSTOM`.
+- **`:latest` could point at a `main` build rather than the release**,
+  which is what happened for v1.0.2's server image. Only the release
+  workflow sets `:latest` now.
+- **The web image hung for six hours.** Its frontend was built under
+  QEMU for arm64, where Node crashed and the step never returned. It is
+  now built once, natively. The image contents are unchanged.
+
+### Security
+
+- Refreshed the web console's lockfile to clear 56 Dependabot alerts
+  (1 critical, 23 high). All were transitive, and none of them reached
+  the shipped bundle.
 
 ## [1.0.2] — 2026-09-13
 
@@ -103,21 +229,6 @@ had only lived in `docs/operations/release.md`: routine work targets
 against `main` from anything other than `dev` or a `hotfix/*` branch,
 because GitHub pre-fills the base with the default branch and walks
 contributors into it.
-
-### Added
-- _(nothing yet)_
-
-### Changed
-- _(nothing yet)_
-
-### Fixed
-- _(nothing yet)_
-
-### Removed
-- _(nothing yet)_
-
-### Security
-- _(nothing yet)_
 
 ## [1.0.1] — 2026-05-27
 
@@ -232,7 +343,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.1.0
 [1.0.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.2
 [1.0.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.1
 [1.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.0
