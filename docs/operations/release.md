@@ -116,13 +116,15 @@ gh pr create --base main --head release/X.Y.Z \
   --body "See CHANGELOG.md [X.Y.Z] for the full notes."
 ```
 
-Wait for CI to go green (`Rust Check & Test` + `Frontend Build`).
+Wait for CI to go green (`Rust Check & Test` + `Frontend Build`, plus
+`Integration Tests`, which runs the full `#[ignore]` suite against
+Postgres, Redis and ClickHouse service containers).
 The PR description is internal — the user-facing release notes
 live in CHANGELOG.md and are extracted into the GitHub Release
 body automatically. Don't duplicate them.
 
-CI does not run the `#[ignore]` integration tests. Run them locally
-against the release commit before merging (`make test-it`).
+`make test-it` locally is optional: the release PR's CI already runs
+the same suite on the release commit.
 
 ### 6. Squash-merge the PR
 
@@ -299,7 +301,7 @@ make precommit                            # green
 make changelog VERSION=X.Y.Z WRITE=1
 $EDITOR CHANGELOG.md                      # review + polish
 $EDITOR Cargo.toml web/package.json deploy/helm/think-watch/Chart.yaml
-make precommit && make test-it            # green again
+make precommit                            # green again
 git commit -am "chore(release): tag X.Y.Z" && git push -u origin release/X.Y.Z
 gh pr create --base main --head release/X.Y.Z --title "release: vX.Y.Z"
 gh pr merge <N> --squash --match-head-commit <SHA>   # once CI is green
