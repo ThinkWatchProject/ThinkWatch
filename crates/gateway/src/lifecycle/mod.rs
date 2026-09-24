@@ -163,6 +163,7 @@ pub(crate) fn build_chat_pump(
     open: OpenUpstream,
     mut shaper: StreamShaper,
     client: Dialect,
+    client_sse: bool,
     deps_state: GatewayState,
     request: &ChatRequestSnapshot,
     provider: &str,
@@ -311,12 +312,15 @@ pub(crate) fn build_chat_pump(
         }
     };
 
-    let mut response = axum::response::Response::new(Body::from_stream(body));
+    // A Gemini caller that did not ask for SSE reads one JSON array.
+    let (body, content_type) = if client_sse {
+        (Body::from_stream(body), "text/event-stream")
+    } else {
+        (Body::from_stream(as_json_array(body)), "application/json")
+    };
+    let mut response = axum::response::Response::new(body);
     let h = response.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream"),
-    );
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 
     let identity = request.identity.clone();
@@ -386,6 +390,24 @@ pub(crate) fn build_chat_pump(
         }
     });
     (response, tail)
+}
+
+/// Reframe a client-format SSE stream as Gemini's JSON-array stream (see
+/// [`crate::proxy::shaper::JsonArrayFramer`]).
+fn as_json_array(
+    sse: impl futures::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static {
+    async_stream::stream! {
+        let mut framer = crate::proxy::shaper::JsonArrayFramer::default();
+        let mut sse = Box::pin(sse);
+        while let Some(Ok(chunk)) = sse.next().await {
+            let out = framer.process(&chunk);
+            if !out.is_empty() {
+                yield Ok(Bytes::from(out));
+            }
+        }
+        yield Ok(Bytes::from(framer.finish()));
+    }
 }
 
 /// End a stream at a tool call the inspection stops: what came before it

@@ -6,10 +6,10 @@
 //!
 //! **Model name.** A route can send `gpt-4` to `gpt-4o-2024-08-06`; the
 //! caller asked for the alias and gets the alias back. Every format puts
-//! the model in one of three places — top level (chat, every chunk),
+//! the model in one of four places — top level (chat, every chunk),
 //! `message.model` (Anthropic `message_start`), `response.model`
-//! (Responses) — so rewriting those three covers all of them without
-//! asking which format this is.
+//! (Responses), `modelVersion` (Gemini) — so rewriting those covers all
+//! of them without asking which format this is.
 //!
 //! **PII.** A whole response has its placeholders intact and is restored
 //! in one pass (`pii_redactor::restore_body`). A stream does not: `{{EMA`
@@ -46,7 +46,12 @@ pub fn rewrite_model(body: &[u8], model: &str) -> Vec<u8> {
 /// Returns whether anything changed.
 fn set_model(v: &mut Value, model: &str) -> bool {
     let mut changed = false;
-    for path in ["/model", "/message/model", "/response/model"] {
+    for path in [
+        "/model",
+        "/message/model",
+        "/response/model",
+        "/modelVersion",
+    ] {
         if let Some(slot) = v.pointer_mut(path)
             && slot.is_string()
             && slot.as_str() != Some(model)
@@ -154,6 +159,54 @@ impl StreamShaper {
     }
 }
 
+/// Gemini's stream without `alt=sse`: one JSON array, an element per
+/// chunk, sent as the chunks arrive.
+///
+/// The pipeline works on SSE throughout (see `generate::GEMINI_SSE`);
+/// this is the last step, after everything else has read the frames. A
+/// Gemini SSE frame and an array element carry the same object, so each
+/// `data:` payload becomes one element. An error frame becomes an element
+/// too, which is where Gemini itself puts a mid-stream error.
+#[derive(Default)]
+pub struct JsonArrayFramer {
+    decoder: Decoder,
+    opened: bool,
+}
+
+impl JsonArrayFramer {
+    pub fn process(&mut self, sse: &[u8]) -> Vec<u8> {
+        let frames = self.decoder.feed(sse);
+        self.write(frames)
+    }
+
+    /// The stream ended: whatever the decoder held, then the closing
+    /// bracket. An empty stream is still an array.
+    pub fn finish(&mut self) -> Vec<u8> {
+        let frames = self.decoder.flush();
+        let mut out = self.write(frames);
+        if !self.opened {
+            out.push(b'[');
+        }
+        out.extend_from_slice(b"]");
+        out
+    }
+
+    fn write(&mut self, frames: Vec<Frame>) -> Vec<u8> {
+        let mut out = String::new();
+        for f in frames {
+            // `[DONE]` and anything else that is not an object has no
+            // place in the array.
+            if serde_json::from_str::<Value>(&f.data).is_err() {
+                continue;
+            }
+            out.push_str(if self.opened { ",\r\n" } else { "[" });
+            self.opened = true;
+            out.push_str(&f.data);
+        }
+        out.into_bytes()
+    }
+}
+
 fn raw(f: &Frame) -> String {
     match &f.event {
         Some(e) => format!("event: {e}\ndata: {}\n\n", f.data),
@@ -191,6 +244,27 @@ mod tests {
             "data: {}\n\n",
             serde_json::json!({"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]})
         )
+    }
+
+    #[test]
+    fn a_gemini_sse_stream_becomes_one_json_array() {
+        let mut f = JsonArrayFramer::default();
+        let mut out = f.process(b"data: {\"a\":1}\n\ndata: {\"b\"");
+        out.extend(f.process(b":2}\n\n"));
+        out.extend(f.finish());
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v, serde_json::json!([{"a": 1}, {"b": 2}]));
+
+        let mut empty = JsonArrayFramer::default();
+        assert_eq!(empty.finish(), b"[]");
+    }
+
+    #[test]
+    fn a_gemini_answer_carries_the_callers_model() {
+        let body = serde_json::json!({"candidates": [], "modelVersion": "gemini-2.5-pro-002"});
+        let out = rewrite_model(body.to_string().as_bytes(), "my-alias");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["modelVersion"], "my-alias");
     }
 
     #[test]

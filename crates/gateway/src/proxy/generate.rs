@@ -1,5 +1,6 @@
-//! The three generation surfaces — `/v1/chat/completions`, `/v1/messages`,
-//! `/v1/responses` — as one pipeline.
+//! The four generation surfaces — `/v1/chat/completions`, `/v1/messages`,
+//! `/v1/responses` and Gemini's `/v1beta/models/{model}:generateContent`
+//! (`:streamGenerateContent`) — as one pipeline.
 //!
 //! # Forward what can be forwarded, convert what must be
 //!
@@ -31,7 +32,7 @@ use std::convert::Infallible;
 use crate::call_ctx::CallCtx;
 use crate::error::GatewayError;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::IntoResponse;
 use rust_decimal::Decimal;
@@ -64,27 +65,37 @@ use think_watch_common::limits::weight::TokenCounts;
 #[derive(Clone, Copy)]
 pub(crate) struct ClientSurface {
     pub dialect: Dialect,
-    pub path: &'static str,
-    /// Only chat completions caches, as before. Anthropic and Responses
-    /// never did, and turning it on for them is its own decision.
+    /// Only chat completions caches, as before. The other formats never
+    /// did, and turning it on for them is its own decision.
     pub caches: bool,
 }
 
 const CHAT: ClientSurface = ClientSurface {
     dialect: Dialect::Chat,
-    path: "/v1/chat/completions",
     caches: true,
 };
 const MESSAGES: ClientSurface = ClientSurface {
     dialect: Dialect::Anthropic,
-    path: "/v1/messages",
     caches: false,
 };
-const RESPONSES: ClientSurface = ClientSurface {
+pub(crate) const RESPONSES: ClientSurface = ClientSurface {
     dialect: Dialect::Responses,
-    path: "/v1/responses",
     caches: false,
 };
+const GEMINI: ClientSurface = ClientSurface {
+    dialect: Dialect::Gemini,
+    caches: false,
+};
+
+/// The query a Gemini request is read with inside the gateway.
+///
+/// **Inside, a Gemini stream is always SSE**, whatever the caller asked
+/// for: upstreams are asked for `alt=sse`, and the shaper, the tool-call
+/// inspection, the usage sniffer and the error frames all read and write
+/// SSE. A caller that asked for Gemini's other stream form — one JSON
+/// array, an element per chunk — gets the SSE reframed as that on the
+/// way out (`shaper::JsonArrayFramer`).
+const GEMINI_SSE: &str = "alt=sse";
 
 /// POST /v1/chat/completions
 pub async fn proxy_chat_completion(
@@ -93,7 +104,16 @@ pub async fn proxy_chat_completion(
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    generate(state, headers, identity, body, CHAT).await
+    generate(
+        state,
+        headers,
+        identity,
+        body,
+        CHAT,
+        "/v1/chat/completions",
+        None,
+    )
+    .await
 }
 
 /// POST /v1/messages
@@ -103,7 +123,16 @@ pub async fn proxy_anthropic_messages(
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    generate(state, headers, identity, body, MESSAGES).await
+    generate(
+        state,
+        headers,
+        identity,
+        body,
+        MESSAGES,
+        "/v1/messages",
+        None,
+    )
+    .await
 }
 
 /// POST /v1/responses
@@ -113,7 +142,53 @@ pub async fn proxy_responses(
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    generate(state, headers, identity, body, RESPONSES).await
+    generate(
+        state,
+        headers,
+        identity,
+        body,
+        RESPONSES,
+        "/v1/responses",
+        None,
+    )
+    .await
+}
+
+/// POST /v1beta/models/{model}:generateContent, and `:streamGenerateContent`
+/// for a stream. `/v1/models/…` too: some Gemini clients use that version.
+///
+/// The model and whether to stream are in the path, not the body.
+pub async fn proxy_gemini(
+    State(state): State<GatewayState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
+    body: Bytes,
+) -> Result<axum::response::Response, GatewayErrorResponse> {
+    generate(
+        state,
+        headers,
+        identity,
+        body,
+        GEMINI,
+        uri.path(),
+        uri.query(),
+    )
+    .await
+}
+
+/// `/v1beta/models/gemini-2.5-pro:streamGenerateContent` → the model, and
+/// whether it is a stream. Only the two generation actions; anything else
+/// (`:countTokens`, `:embedContent`) has no counterpart in another format.
+fn gemini_target(path: &str) -> Option<(String, bool)> {
+    let (_, rest) = path.split_once("/models/")?;
+    let (model, action) = rest.rsplit_once(':')?;
+    let stream = match action {
+        "streamGenerateContent" => true,
+        "generateContent" => false,
+        _ => return None,
+    };
+    (!model.is_empty()).then(|| (model.to_string(), stream))
 }
 
 // ───────────────────────────────────────────── addressing one upstream
@@ -122,6 +197,9 @@ pub async fn proxy_responses(
 /// route.
 pub(crate) struct Outbound {
     pub surface: ClientSurface,
+    /// The path the caller called. A Gemini request's model and action
+    /// are in it.
+    pub path: String,
     /// Redacted, otherwise exactly as sent.
     pub body: Value,
     pub stream: bool,
@@ -185,7 +263,7 @@ impl Outbound {
             default_max_tokens,
         };
         let decode = |v: &Value| {
-            tw_dialect::convert::decode(client, v, self.surface.path, None)
+            tw_dialect::convert::decode(client, v, &self.path, internal_query(client))
                 .map_err(|r| GatewayError::TransformError(r.0))
         };
 
@@ -193,7 +271,25 @@ impl Outbound {
             // Forwarded as sent. Only the model changes, and a Chat
             // stream always asks for its usage (see `hides_usage`).
             let mut body = self.body.clone();
-            if let Some(obj) = body.as_object_mut() {
+            let (path, query) = if client == Dialect::Gemini {
+                // Gemini names the model in the path, and is always asked
+                // for SSE (see `GEMINI_SSE`).
+                let action = if self.stream {
+                    "streamGenerateContent"
+                } else {
+                    "generateContent"
+                };
+                let model = model.strip_prefix("models/").unwrap_or(model);
+                (
+                    format!("/v1beta/models/{model}:{action}"),
+                    self.stream.then(|| GEMINI_SSE.to_string()),
+                )
+            } else {
+                (self.path.clone(), None)
+            };
+            if client != Dialect::Gemini
+                && let Some(obj) = body.as_object_mut()
+            {
                 obj.insert("model".into(), Value::String(model.to_string()));
                 if self.hides_usage() {
                     let opts = obj
@@ -216,8 +312,8 @@ impl Outbound {
             }
             return Ok(Wire {
                 body: bytes,
-                path: self.surface.path.to_string(),
-                query: None,
+                path,
+                query,
                 dialect: client,
                 headers: self.dialect_headers.clone(),
                 convert: None,
@@ -359,14 +455,19 @@ pub(crate) async fn read_whole(
 // ───────────────────────────────────────────── the pipeline
 
 /// Every error on the way out is in the caller's own format.
-async fn generate(
+///
+/// `path` and `query` are the caller's: Gemini puts the model, whether to
+/// stream and which stream form in them.
+pub(crate) async fn generate(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
     body: Bytes,
     surface: ClientSurface,
+    path: &str,
+    query: Option<&str>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    run(state, headers, identity, body, surface)
+    run(state, headers, identity, body, surface, path, query)
         .await
         .map_err(|e| e.in_dialect(surface.dialect))
 }
@@ -377,6 +478,8 @@ async fn run(
     identity: GatewayRequestIdentity,
     body: Bytes,
     surface: ClientSurface,
+    path: &str,
+    query: Option<&str>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     let trace_id = resolve_trace_id(&headers);
     let session_id = resolve_session_id(&headers);
@@ -397,14 +500,30 @@ async fn run(
             "The request body is not valid JSON.".into(),
         ))
     })?;
-    let model = raw
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            early_ctx.emit(GatewayError::TransformError("Missing 'model' field".into()))
+    let (model, is_stream) = if surface.dialect == Dialect::Gemini {
+        gemini_target(path).ok_or_else(|| {
+            early_ctx.emit(GatewayError::TransformError(format!(
+                "The path {path} does not name a Gemini model and one of \
+                 :generateContent or :streamGenerateContent."
+            )))
         })?
-        .to_string();
-    let is_stream = raw.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    } else {
+        let model = raw
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                early_ctx.emit(GatewayError::TransformError("Missing 'model' field".into()))
+            })?
+            .to_string();
+        (
+            model,
+            raw.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        )
+    };
+    // Whether the caller reads a stream as SSE. Gemini's does only with
+    // `alt=sse`; without it, the stream is one JSON array.
+    let client_sse = surface.dialect != Dialect::Gemini
+        || query.is_some_and(|q| q.split('&').any(|kv| kv == GEMINI_SSE));
 
     // 1. Model aliases
     let mapped_model = state.model_mapper.map(&model);
@@ -424,8 +543,9 @@ async fn run(
     let metadata = RequestMetadata::extract(&headers, &raw);
 
     // 3. Decode once, to know where the caller's text is.
-    let mut decoded = tw_dialect::convert::decode(surface.dialect, &raw, surface.path, None)
-        .map_err(|r| ctx.emit(GatewayError::TransformError(r.0)))?;
+    let mut decoded =
+        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect))
+            .map_err(|r| ctx.emit(GatewayError::TransformError(r.0)))?;
 
     // 4. Content filter. Log lines carry `log_summary()` (no snippet) so
     //    prompt content stays out of the log pipeline; the caller sees
@@ -619,6 +739,7 @@ async fn run(
     let input_estimate = crate::usage_estimate::request_tokens(&decoded.request);
     let outbound = Outbound {
         surface,
+        path: path.to_string(),
         body: redacted,
         stream: is_stream,
         dialect_headers: dialect_headers(&headers),
@@ -684,7 +805,13 @@ async fn run(
         let deps = snapshot(entry, sel_record);
         let shaper = StreamShaper::new(mapped_model.clone(), &redaction, surface.dialect)
             .hiding_usage(hide_usage);
-        return Ok(launch_stream_pump(deps, open, shaper, surface.dialect));
+        return Ok(launch_stream_pump(
+            deps,
+            open,
+            shaper,
+            surface.dialect,
+            client_sse,
+        ));
     }
 
     // Buffered: full failover across healthy candidates.
@@ -810,6 +937,12 @@ pub(crate) fn priced(u: &tw_dialect::usage::Usage) -> TokenCounts {
     }
 }
 
+/// The query a request in `client`'s format is decoded with (see
+/// [`GEMINI_SSE`]).
+fn internal_query(client: Dialect) -> Option<&'static str> {
+    (client == Dialect::Gemini).then_some(GEMINI_SSE)
+}
+
 /// The caller's `anthropic-*` headers, to go with a request forwarded in
 /// its own format.
 fn dialect_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -829,4 +962,24 @@ fn json_response(body: Vec<u8>) -> axum::response::Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gemini_path_names_the_model_and_whether_to_stream() {
+        assert_eq!(
+            gemini_target("/v1beta/models/gemini-2.5-pro:streamGenerateContent"),
+            Some(("gemini-2.5-pro".into(), true))
+        );
+        assert_eq!(
+            gemini_target("/v1/models/gemini-2.5-flash:generateContent"),
+            Some(("gemini-2.5-flash".into(), false))
+        );
+        // Not a generation: nothing to convert it to.
+        assert_eq!(gemini_target("/v1beta/models/g:countTokens"), None);
+        assert_eq!(gemini_target("/v1beta/models/:generateContent"), None);
+    }
 }

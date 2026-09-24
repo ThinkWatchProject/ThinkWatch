@@ -39,6 +39,40 @@ fn intersect_allowlists(
     }
 }
 
+/// The key a client presented, wherever its SDK puts it.
+///
+/// `Authorization: Bearer` (OpenAI's SDKs, Claude Code with
+/// `ANTHROPIC_AUTH_TOKEN`), `x-api-key` (Anthropic's SDKs),
+/// `x-goog-api-key` or `?key=` (Gemini's). Headers first: a key in the
+/// query ends up in access logs and browser history, and is accepted only
+/// because Gemini's REST form sends it there. The query never reaches an
+/// upstream — requests go out with the paths and queries the gateway
+/// builds.
+fn presented_key<'a>(
+    headers: &'a axum::http::HeaderMap,
+    query: Option<&'a str>,
+) -> Option<&'a str> {
+    let header = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+    };
+    header("x-api-key")
+        .or_else(|| header("x-goog-api-key"))
+        .or_else(|| {
+            header(AUTHORIZATION.as_str())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .filter(|v| !v.is_empty())
+        })
+        .or_else(|| {
+            query?
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("key="))
+                .filter(|v| !v.is_empty())
+        })
+}
+
 /// Future returned by the middleware closure. Boxed because the
 /// generated impl trait isn't nameable; pulled out into a type
 /// alias to keep clippy::type_complexity happy.
@@ -60,15 +94,10 @@ pub fn require_api_key(
 ) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {
     move |State(state): State<AppState>, mut request: Request, next: Next| {
         Box::pin(async move {
-            let auth_header = request
-                .headers()
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or(StatusCode::UNAUTHORIZED)?;
-
-            let token = auth_header
-                .strip_prefix("Bearer ")
-                .ok_or(StatusCode::UNAUTHORIZED)?;
+            let token = presented_key(request.headers(), request.uri().query())
+                .ok_or(StatusCode::UNAUTHORIZED)?
+                .to_string();
+            let token = token.as_str();
 
             // Reject anything that doesn't look like a `tw-` key. The
             // separate JWT fallback path is gone — gateway data
@@ -281,5 +310,59 @@ pub fn require_api_key(
 
             Ok(next.run(request).await)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(*k, HeaderValue::from_str(v).unwrap());
+        }
+        m
+    }
+
+    #[test]
+    fn a_key_is_read_where_each_sdk_puts_it() {
+        assert_eq!(
+            presented_key(&h(&[("authorization", "Bearer tw-1")]), None),
+            Some("tw-1")
+        );
+        assert_eq!(
+            presented_key(&h(&[("x-api-key", "tw-2")]), None),
+            Some("tw-2")
+        );
+        assert_eq!(
+            presented_key(&h(&[("x-goog-api-key", "tw-3")]), None),
+            Some("tw-3")
+        );
+        assert_eq!(
+            presented_key(&HeaderMap::new(), Some("alt=sse&key=tw-4")),
+            Some("tw-4")
+        );
+    }
+
+    #[test]
+    fn the_query_is_the_last_resort_and_empty_values_are_no_key() {
+        assert_eq!(
+            presented_key(&h(&[("x-api-key", "tw-h")]), Some("key=tw-q")),
+            Some("tw-h")
+        );
+        assert_eq!(
+            presented_key(
+                &h(&[("x-api-key", ""), ("authorization", "Bearer tw-b")]),
+                None
+            ),
+            Some("tw-b")
+        );
+        assert_eq!(presented_key(&h(&[("authorization", "tw-1")]), None), None);
+        assert_eq!(
+            presented_key(&HeaderMap::new(), Some("key=&monkey=1")),
+            None
+        );
     }
 }
