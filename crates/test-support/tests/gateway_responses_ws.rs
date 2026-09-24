@@ -184,3 +184,65 @@ async fn limits_apply_per_turn_and_a_refusal_keeps_the_connection() {
     assert_eq!(refused.last().unwrap()["type"], "response.failed");
     socket.send(Message::Ping(vec![1])).await.unwrap();
 }
+
+/// OpenAI's socket mode keeps the connection's last response, so a turn
+/// can continue from it with `store: false` (how Codex runs). The
+/// connection keeps it here: the next turn goes upstream — to a Chat
+/// upstream, which has no such store — with the whole conversation.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_turn_continues_from_the_connections_last_response() {
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::openai_chat_stream_ok("ws-chain").await;
+    let (_, key) = seed(&app, &upstream.uri(), "ws-chain").await;
+
+    let mut socket = connect(&app, &key).await;
+    socket
+        .send(Message::Text(
+            json!({"type": "response.create", "model": "ws-chain", "store": false, "input": "one"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    let first = turn(&mut socket).await;
+    let id = first.last().unwrap()["response"]["id"]
+        .as_str()
+        .expect("response id")
+        .to_string();
+
+    socket
+        .send(Message::Text(
+            json!({"type": "response.create", "model": "ws-chain", "store": false,
+                   "previous_response_id": id, "input": "two"})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let second = turn(&mut socket).await;
+    assert_eq!(
+        second.last().unwrap()["type"],
+        "response.completed",
+        "{second:?}"
+    );
+
+    let sent = upstream.received_requests().await;
+    assert_eq!(sent.len(), 2);
+    let body: Value = sent[1].body_json().unwrap();
+    let said: Vec<(&str, String)> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let text = match &m["content"] {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            (m["role"].as_str().unwrap(), text)
+        })
+        .collect();
+    assert_eq!(said.len(), 3, "{body}");
+    assert_eq!(said[0], ("user", "one".to_string()), "{body}");
+    assert_eq!(said[1].0, "assistant", "{body}");
+    assert!(said[1].1.contains("hi there"), "{body}");
+    assert_eq!(said[2], ("user", "two".to_string()), "{body}");
+}
