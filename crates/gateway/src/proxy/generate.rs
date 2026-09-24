@@ -393,6 +393,47 @@ async fn generate(
         }
     }
 
+    // 4b. Invisible characters that can carry an instruction past a
+    //     reader — in what the caller typed, or in a tool result.
+    let hidden_action = crate::hidden_text::action(&state.dynamic_config).await;
+    if hidden_action != crate::hidden_text::Action::Off {
+        let found = crate::hidden_text::scan(&decoded.request);
+        if !found.is_empty() {
+            use crate::hidden_text::Action as H;
+            use think_watch_common::audit::{AuditActor, GatewayActor, LogType};
+            metrics::counter!("gateway_hidden_text_total", "action" => format!("{hidden_action:?}"))
+                .increment(1);
+            tracing::warn!(trace_id = %trace_id, ?found, "request carries hidden characters");
+            if matches!(hidden_action, H::Warn | H::Block) {
+                let blocked = hidden_action == H::Block;
+                state.audit.log(
+                    GatewayActor {
+                        user_id: identity.user_id.as_deref(),
+                        user_email: identity.user_email.as_deref(),
+                        api_key_id: identity.api_key_id.as_deref(),
+                        api_key_lineage_id: identity.api_key_lineage_id.as_deref(),
+                        ip: identity.ip_address.as_deref(),
+                        session_id: None,
+                    }
+                    .audit(if blocked {
+                        "gateway.hidden_text_blocked"
+                    } else {
+                        "gateway.hidden_text_flagged"
+                    })
+                    .log_type(LogType::Audit)
+                    .detail(serde_json::json!({
+                        "trace_id": trace_id,
+                        "model": mapped_model,
+                        "found": found,
+                    })),
+                );
+            }
+            if hidden_action == H::Block {
+                return Err(ctx.emit(crate::hidden_text::refusal(&found)).into());
+            }
+        }
+    }
+
     let call_ctx = CallCtx::new(
         Some(trace_id.clone()),
         identity.user_id.clone(),

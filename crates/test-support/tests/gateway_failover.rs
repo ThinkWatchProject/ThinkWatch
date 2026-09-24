@@ -198,3 +198,148 @@ async fn all_providers_failing_returns_upstream_error() {
         resp.status
     );
 }
+
+/// A tripped route comes back after the cooldown.
+///
+/// The breaker used to move from open to half-open only when a request on
+/// that route completed — and an open route is never picked, so it stayed
+/// open until its Redis key expired, about four cooldowns later. A cooled
+/// breaker now reads as half-open, the next request probes it, and a
+/// success closes it.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_tripped_route_is_probed_again_once_the_cooldown_is_over() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let app = TestApp::spawn().await;
+    for (k, v) in [
+        ("gateway.cb_enabled", json!(true)),
+        ("gateway.cb_error_pct", json!(50)),
+        ("gateway.cb_min_samples", json!(2)),
+        ("gateway.cb_window_secs", json!(60)),
+        ("gateway.cb_open_secs", json!(1)),
+    ] {
+        fixtures::set_setting(&app.db, k, v).await.unwrap();
+    }
+    app.state.dynamic_config.reload().await.unwrap();
+
+    // Fails twice, then recovers.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"message": "boom"}})),
+        )
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c", "object": "chat.completion", "created": 1, "model": "cb-model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "back"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })))
+        .mount(&server)
+        .await;
+
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let p = fixtures::create_provider(&app.db, &unique_name("cb"), "openai", &server.uri(), None)
+        .await
+        .unwrap();
+    fixtures::create_model_route(&app.db, p.id, "cb-model", 100)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    let key = fixtures::create_api_key(&app.db, user.user.id, "cb", &["ai_gateway"], None, None)
+        .await
+        .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    let ask = || {
+        gw.post(
+            "/v1/chat/completions",
+            json!({"model": "cb-model", "messages": [{"role": "user", "content": "ping"}]}),
+        )
+    };
+    let hits = || async { server.received_requests().await.unwrap_or_default().len() };
+
+    // Two failures: 100% errors over 2 samples trips it.
+    assert!(!ask().await.unwrap().status.is_success());
+    assert!(!ask().await.unwrap().status.is_success());
+    assert_eq!(hits().await, 2);
+
+    // Open: refused without reaching the upstream.
+    assert!(!ask().await.unwrap().status.is_success());
+    assert_eq!(hits().await, 2, "an open route was still called");
+
+    // Cooled: half-open, probed, recovered.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let resp = ask().await.unwrap();
+    resp.assert_ok();
+    assert_eq!(hits().await, 3);
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "back");
+
+    // Closed again: the next one goes straight through.
+    ask().await.unwrap().assert_ok();
+}
+
+/// The dashboard shows a tripped AI route's provider as open. Its state
+/// used to come from a process-local registry only the MCP breaker wrote
+/// to, so every AI provider read `Closed` whatever its routes were doing.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_dashboard_shows_a_tripped_ai_provider_as_open() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    for (k, v) in [
+        ("gateway.cb_enabled", json!(true)),
+        ("gateway.cb_error_pct", json!(50)),
+        ("gateway.cb_min_samples", json!(2)),
+        ("gateway.cb_open_secs", json!(600)),
+    ] {
+        fixtures::set_setting(&app.db, k, v).await.unwrap();
+    }
+    app.state.dynamic_config.reload().await.unwrap();
+
+    let bad = MockProvider::always_500().await;
+    let name = unique_name("tripped");
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let p = fixtures::create_provider(&app.db, &name, "openai", &bad.uri(), None)
+        .await
+        .unwrap();
+    fixtures::create_model_route(&app.db, p.id, "dash-model", 100)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    let key = fixtures::create_api_key(&app.db, user.user.id, "dash", &["ai_gateway"], None, None)
+        .await
+        .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    for _ in 0..2 {
+        let _ = gw
+            .post(
+                "/v1/chat/completions",
+                json!({"model": "dash-model", "messages": [{"role": "user", "content": "x"}]}),
+            )
+            .await
+            .unwrap();
+    }
+
+    let con = admin_session(&app).await;
+    let live: Value = con
+        .get("/api/dashboard/live")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let row = live["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["provider"] == name.as_str())
+        .unwrap_or_else(|| panic!("no row for {name}: {live}"));
+    assert_eq!(row["cb_state"], "Open", "{row}");
+}

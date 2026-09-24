@@ -122,6 +122,13 @@ export interface PiiTestResponse {
   matches: PiiTestMatch[];
 }
 
+/** `security.hidden_text`: what a request carrying hidden characters gets. */
+export type HiddenTextAction = 'off' | 'log' | 'warn' | 'block';
+
+export function normalizeHiddenText(raw: unknown): HiddenTextAction {
+  return raw === 'off' || raw === 'log' || raw === 'block' ? raw : 'warn';
+}
+
 export type ToolInspectionMode = 'off' | 'observe' | 'enforce';
 export type ToolAction = 'cut' | 'record';
 

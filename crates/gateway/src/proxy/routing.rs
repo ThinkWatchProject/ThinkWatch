@@ -107,13 +107,7 @@ async fn resolve_routing_config(
 }
 
 async fn resolve_breaker_config(state: &GatewayState) -> CircuitBreakerConfig {
-    CircuitBreakerConfig {
-        enabled: state.dynamic_config.cb_enabled().await,
-        error_pct: state.dynamic_config.cb_error_pct().await,
-        min_samples: state.dynamic_config.cb_min_samples().await,
-        window_secs: state.dynamic_config.cb_window_secs().await,
-        open_secs: state.dynamic_config.cb_open_secs().await,
-    }
+    CircuitBreakerConfig::load(&state.dynamic_config).await
 }
 
 /// Strategy/affinity/breaker context resolved once per request and
@@ -163,11 +157,7 @@ async fn pick_with_strategy<'a>(
     }
     let mut healths: Vec<RouteHealth> = Vec::with_capacity(group.len());
     for entry in group {
-        let h = ctx
-            .state
-            .health
-            .snapshot(entry.route_id, ctx.breaker.window_secs)
-            .await;
+        let h = ctx.state.health.snapshot(entry.route_id, ctx.breaker).await;
         healths.push(h);
     }
 
@@ -187,7 +177,7 @@ async fn pick_with_strategy<'a>(
     let mut excluded: Vec<bool> = Vec::with_capacity(group.len());
     for (i, entry) in group.iter().enumerate() {
         let h = &healths[i];
-        let excl = !h.state.allows_selection() || tried.contains(&entry.provider_id);
+        let excl = h.state == tw_breaker::State::Open || tried.contains(&entry.provider_id);
         excluded.push(excl);
         let success_rate = if h.total > 0 {
             Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))

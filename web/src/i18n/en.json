@@ -1425,6 +1425,13 @@
       "sandboxMatchCount": "{{count}} item(s) redacted",
       "redactedOutput": "Redacted output (what the AI receives)"
     },
+    "hiddenText": {
+      "title": "Hidden characters",
+      "intro": "Unicode tag characters render as nothing and still reach the model, so a whole instruction can ride along invisibly; bidirectional overrides make text read on screen in a different order than it really is. Neither has a use in a prompt, and both turn up where the caller did not write them — in a page or file a tool fetched. The caller's messages and the tool results inside them are checked; emoji, Persian and Russian text are not flagged.",
+      "action": "When found",
+      "off": "Off",
+      "behavior": "Warn lets the request through and writes gateway.hidden_text_flagged to the audit log; Block refuses it with 403 and writes gateway.hidden_text_blocked; Log only records it in the application log."
+    },
     "toolInspection": {
       "title": "Tool-call inspection",
       "intro": "The upstream writes the response, so it can hand back a tool call the model never made, such as a command that downloads and runs a script. Every tool call in a response is checked against these rules. Observe records each hit in the audit log and changes nothing; Enforce also cuts the response when a rule set to Cut matches, so the client never receives a complete call. Changes apply immediately, no restart needed.",

@@ -44,13 +44,16 @@ import {
   type PiiPattern,
   type PiiTestResponse,
   type SettingEntry,
+  type HiddenTextAction,
   type ToolInspectionConfig,
   type ToolRule,
   type ToolTestMatch,
   getSettingValue,
   normalizeContentRule,
+  normalizeHiddenText,
   normalizeToolInspection,
 } from '../admin/settings/types';
+import { HiddenTextCard } from './hidden-text-card';
 import { ToolInspectionCard } from './tool-inspection-card';
 
 type ContentFilterRuleWithId = ContentFilterRule & { _clientId: string };
@@ -74,6 +77,7 @@ export function GatewaySecurityPage() {
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
   const [toolConfig, setToolConfig] = useState<ToolInspectionConfig>(normalizeToolInspection(null));
   const [toolRules, setToolRules] = useState<ToolRule[]>([]);
+  const [hiddenText, setHiddenText] = useState<HiddenTextAction>('warn');
 
   const cfPager = useClientPagination(contentFilters, 20);
   const piiPager = useClientPagination(piiPatterns, 20);
@@ -101,6 +105,7 @@ export function GatewaySecurityPage() {
         const pp = getSettingValue(data, 'security', 'pii_redactor_patterns');
         setPiiPatterns(Array.isArray(pp) ? pp : []);
         setToolConfig(normalizeToolInspection(getSettingValue(data, 'security', 'tool_inspection')));
+        setHiddenText(normalizeHiddenText(getSettingValue(data, 'security', 'hidden_text')));
       })
       .catch((err) => {
         // Previously silent — left the form blank with no feedback.
@@ -130,6 +135,7 @@ export function GatewaySecurityPage() {
           'security.content_filter_patterns': dedupCf.map(stripClientId),
           'security.pii_redactor_patterns': dedupPii,
           'security.tool_inspection': toolConfig,
+          'security.hidden_text': hiddenText,
         },
       });
       setStatusMsg({ type: 'success', text: t('settings.saved') });
@@ -569,6 +575,12 @@ export function GatewaySecurityPage() {
           </p>
         </CardContent>
       </Card>
+
+      <HiddenTextCard
+        action={hiddenText}
+        onChange={setHiddenText}
+        canWrite={hasPermission('content_filter:write')}
+      />
 
       <ToolInspectionCard
         config={toolConfig}

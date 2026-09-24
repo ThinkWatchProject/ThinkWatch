@@ -614,10 +614,7 @@ pub async fn create_server(
     .await
     {
         state.mcp_registry.register(registered).await;
-        state
-            .mcp_circuit_breakers
-            .register(server.id, &server.name)
-            .await;
+        state.mcp_circuit_breakers.register(server.id, &server.name);
     }
 
     // Kick off tool discovery in the background — adding a server in
@@ -1094,8 +1091,7 @@ pub async fn update_server(
         state.mcp_registry.register(registered).await;
         state
             .mcp_circuit_breakers
-            .register(updated.id, &updated.name)
-            .await;
+            .register(updated.id, &updated.name);
     }
 
     // Wipe response cache for this server across every user. Admin

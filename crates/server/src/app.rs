@@ -343,10 +343,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     // Pre-register a CB for every loaded server so the dashboard upstream
     // health panel shows them as `Closed` immediately on first paint.
     for server in registry.list().await {
-        state
-            .mcp_circuit_breakers
-            .register(server.id, &server.name)
-            .await;
+        state.mcp_circuit_breakers.register(server.id, &server.name);
     }
 
     // Background health check loop — keeps the in-memory registry status

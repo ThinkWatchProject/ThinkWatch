@@ -1112,13 +1112,9 @@ impl McpProxy {
             })
             .unwrap_or(false);
         if is_server_failure {
-            self.circuit_breakers
-                .record_failure(server_id, server_name)
-                .await;
+            self.circuit_breakers.record_failure(server_id, server_name);
         } else {
-            self.circuit_breakers
-                .record_success(server_id, server_name)
-                .await;
+            self.circuit_breakers.record_success(server_id, server_name);
         }
     }
 }

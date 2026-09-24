@@ -706,6 +706,15 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
+        "security.hidden_text" => {
+            serde_json::from_value::<think_watch_gateway::hidden_text::Action>(value.clone())
+                .map_err(|_| {
+                    AppError::BadRequest(format!(
+                        "{key} must be one of \"off\", \"log\", \"warn\", \"block\""
+                    ))
+                })?;
+        }
+
         "security.tool_inspection" => {
             let cfg: think_watch_gateway::tool_inspection::ToolInspectionConfig =
                 serde_json::from_value(value.clone())
