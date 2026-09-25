@@ -61,6 +61,7 @@ should say how you convinced yourself it doesn't leak a credential or
 weaken an existing check. "The tests pass" doesn't answer that — the
 tests didn't know about the hole either.
 
-Please don't open a public PR or issue for a vulnerability. See
-[SECURITY.md](SECURITY.md) if present, or contact the maintainer
-directly.
+Please don't describe a vulnerability in a public issue, PR, commit or
+comment. The organization's
+[security policy](https://github.com/ThinkWatchProject/.github/blob/main/SECURITY.md)
+explains how to report one privately.
