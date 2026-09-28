@@ -211,7 +211,7 @@ mod tests {
     use hmac::{Hmac, Mac, digest::KeyInit};
     use serde_json::json;
     use sha2::{Digest, Sha256};
-    use think_watch_gateway::proxy::transport::{Shape, Signer};
+    use think_watch_gateway::proxy::transport::{Credential, Shape, Signer};
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -230,11 +230,12 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             Shape::Bedrock {
-                signer: Arc::new(Signer {
-                    region: "us-east-1".into(),
-                    access_key_id: keys.map(|(ak, _)| ak.into()),
-                    secret_access_key: keys.map(|(_, sk)| sk.into()),
-                }),
+                signer: Arc::new(Signer::new(
+                    "us-east-1",
+                    keys.map_or(Credential::InstanceRole, |(ak, sk)| {
+                        Credential::from_keys(ak.into(), sk.into())
+                    }),
+                )),
             },
             "test",
         )

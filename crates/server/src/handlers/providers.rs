@@ -10,6 +10,7 @@ use crate::app::AppState;
 use crate::gateway_adapters::ProviderMaterials;
 use crate::middleware::auth_guard::AuthUser;
 use crate::services::provider_repository as repo;
+use think_watch_gateway::proxy::transport::Credential;
 
 // ---------------------------------------------------------------------------
 // At-rest encryption for provider secrets stored in `providers.config_json`.
@@ -601,11 +602,12 @@ fn test_materials(
         })
         .collect();
     // No access key id means no keys, as for a saved provider
-    let aws_keys = req
+    let aws = req
         .config
         .filter(|c| !c.aws_access_key_id.is_empty())
-        .map(|c| (c.aws_access_key_id, c.aws_secret_access_key))
-        .or_else(|| stored.and_then(|s| s.aws_keys.clone()));
+        .map(|c| Credential::from_keys(c.aws_access_key_id, c.aws_secret_access_key))
+        .or_else(|| stored.map(|s| s.aws.clone()))
+        .unwrap_or(Credential::InstanceRole);
 
     ProviderMaterials {
         name: stored.map_or_else(|| "connection test".to_string(), |s| s.name.clone()),
@@ -613,7 +615,7 @@ fn test_materials(
         base_url: req.base_url,
         headers,
         api_version: stored.and_then(|s| s.api_version.clone()),
-        aws_keys,
+        aws,
     }
 }
 
@@ -896,7 +898,7 @@ mod tests {
             base_url: "us-east-1".into(),
             headers: vec![("Authorization".into(), "Bearer ABSK-saved".into())],
             api_version: None,
-            aws_keys: Some(("AKIA-saved".into(), "secret-saved".into())),
+            aws: keys("AKIA-saved", "secret-saved"),
         }
     }
 
@@ -923,6 +925,13 @@ mod tests {
         (a.to_string(), b.to_string())
     }
 
+    fn keys(id: &str, secret: &str) -> Credential {
+        Credential::Keys {
+            access_key_id: id.into(),
+            secret_access_key: secret.into(),
+        }
+    }
+
     #[test]
     fn a_test_takes_what_it_leaves_out_from_the_saved_provider() {
         // The edit dialog gets secrets back redacted and has no fields for
@@ -932,7 +941,7 @@ mod tests {
             Some(&saved_bedrock()),
         );
         assert_eq!(m.headers, [pair("Authorization", "Bearer ABSK-saved")]);
-        assert_eq!(m.aws_keys, Some(pair("AKIA-saved", "secret-saved")));
+        assert_eq!(m.aws, keys("AKIA-saved", "secret-saved"));
         // The region under test is the one in the dialog
         assert_eq!(m.base_url, "eu-west-1");
     }
@@ -947,17 +956,20 @@ mod tests {
             Some(&saved_bedrock()),
         );
         assert_eq!(m.headers, [pair("Authorization", "Bearer ABSK-new")]);
-        assert_eq!(m.aws_keys, Some(pair("AKIA-new", "secret-new")));
+        assert_eq!(m.aws, keys("AKIA-new", "secret-new"));
     }
 
     #[test]
     fn a_new_providers_test_has_only_its_own_credentials() {
         let m = test_materials(bedrock_test(&[], Some(("AKIA-new", "secret-new"))), None);
-        assert_eq!(m.aws_keys, Some(pair("AKIA-new", "secret-new")));
+        assert_eq!(m.aws, keys("AKIA-new", "secret-new"));
         // No access key id, no keys: the instance role signs
         let m = test_materials(bedrock_test(&[("Authorization", "")], Some(("", ""))), None);
-        assert_eq!(m.aws_keys, None);
+        assert_eq!(m.aws, Credential::InstanceRole);
         assert_eq!(m.headers, [pair("Authorization", "")]);
+        // An access key ID without its secret cannot sign: refused, not signed with nothing
+        let m = test_materials(bedrock_test(&[], Some(("AKIA-new", ""))), None);
+        assert!(matches!(m.aws, Credential::Unusable(_)), "{:?}", m.aws);
     }
 
     #[tokio::test]
