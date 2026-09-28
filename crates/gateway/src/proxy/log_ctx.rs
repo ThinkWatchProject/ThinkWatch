@@ -112,21 +112,7 @@ pub(super) fn emit_gateway_error_log(
     err: &GatewayError,
     bodies: BodyCapture,
 ) {
-    let status = gateway_error_status(err);
-    let detail = serde_json::json!({
-        "model_id": model_id,
-        "provider": provider,
-        "input_tokens": 0i64,
-        "output_tokens": 0i64,
-        // Decimal-as-string in the audit JSON so the CH flush reader
-        // can reconstruct exact precision — the JSON `number` path
-        // would collapse through f64 in between.
-        "cost_usd": Decimal::ZERO.to_string(),
-        "latency_ms": latency_ms,
-        "status_code": status,
-        "error_type": format!("{err:?}").split('(').next().unwrap_or("Error"),
-        "error_message": err.to_string(),
-    });
+    let detail = error_detail(model_id, provider, latency_ms, err);
     // Same `chat.completion` action as the success path — flush_gateway
     // drops the action when it writes ChGatewayRow, so the trace
     // endpoint distinguishes errors via `status_code` (>= 400) instead.
@@ -144,6 +130,31 @@ pub(super) fn emit_gateway_error_log(
         .trace_id(trace_id.to_string())
         .detail(detail);
     audit.log(bodies.apply(entry));
+}
+
+/// The detail of a failed request's `gateway_logs` row.
+fn error_detail(
+    model_id: &str,
+    provider: Option<&str>,
+    latency_ms: i64,
+    err: &GatewayError,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model_id": model_id,
+        "provider": provider,
+        "input_tokens": 0i64,
+        "output_tokens": 0i64,
+        // Decimal-as-string in the audit JSON so the CH flush reader
+        // can reconstruct exact precision — the JSON `number` path
+        // would collapse through f64 in between.
+        "cost_usd": Decimal::ZERO.to_string(),
+        "latency_ms": latency_ms,
+        "status_code": gateway_error_status(err),
+        // The tag, never the debug text: that carries every field, and
+        // an upstream error's fields hold the upstream's own reply.
+        "error_type": err.error_tag(),
+        "error_message": err.to_string(),
+    })
 }
 
 /// Same as `emit_gateway_log` but with an optional `extra` JSON object
@@ -247,4 +258,28 @@ pub(super) fn emit_gateway_log(
             "status_code": status_code,
         }));
     audit.log(bodies.apply(entry));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_requests_error_type_is_the_errors_tag() {
+        // A struct variant's debug text is its fields too, and an
+        // upstream's reply can name the account behind the credential
+        for err in [
+            GatewayError::ProviderHttpError {
+                status: 500,
+                message: "bedrock: arn:aws:iam::123456789012:user/gateway".into(),
+            },
+            GatewayError::UpstreamRateLimited {
+                retry_after_secs: Some(12),
+            },
+            GatewayError::ProviderError("boom".into()),
+        ] {
+            let detail = error_detail("m", Some("p"), 1, &err);
+            assert_eq!(detail["error_type"], err.error_tag());
+        }
+    }
 }

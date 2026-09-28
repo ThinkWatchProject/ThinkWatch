@@ -30,6 +30,13 @@ target.
 
 ### Fixed
 
+- **`error_type` in a failed request's gateway log could be the error's
+  debug text** rather than its tag: for an upstream HTTP error it was
+  `ProviderHttpError { status: …, message: "…" }`, with the upstream's
+  reply inside, and for an upstream rate limit a cut-off
+  `UpstreamRateLimited { retry_after_secs: Some`. Both now log their
+  tag, `ProviderHttpError` and `UpstreamRateLimited`, as the metric
+  labels and streamed requests always did.
 - **Bedrock providers could not be created or edited in the console.**
   The region was checked as a URL, so saving failed with
   `400 Invalid URL`. A Bedrock provider's `base_url` is now checked as an
