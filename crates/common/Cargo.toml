@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 tw-breaker = { workspace = true }
 tw-guard = { workspace = true }
+tw-bedrock = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 fred = { workspace = true }

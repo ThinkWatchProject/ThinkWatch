@@ -1,9 +1,10 @@
-//! What only Bedrock needs on the wire: SigV4 request signing and
-//! unframing AWS eventstream into SSE.
+//! Where a Bedrock upstream's signing credentials come from.
 //!
-//! Converting Converse to and from the other formats is not here — that is
-//! `tw_dialect::bedrock`, shared with the desktop gateway. The desktop
-//! gateway does not talk to Bedrock, so these two live on this side only.
+//! What Bedrock needs on the wire — SigV4 signing, unframing AWS eventstream
+//! into SSE, the runtime and control-plane addresses, the model catalog — is
+//! `tw_bedrock`, shared with the desktop gateway. Converting Converse to and
+//! from the other formats is `tw_dialect::bedrock`. What is left here is the
+//! part only this side has: keys from the provider row, or else the instance
+//! role through IMDSv2.
 
-pub mod eventstream;
 pub mod sigv4;

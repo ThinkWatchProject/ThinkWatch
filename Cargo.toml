@@ -57,20 +57,23 @@ opt-level = 3
 # ── thinkwatch-core (MIT) ────────────────────────────────────────────
 # The layer shared with the desktop gateway: format conversion and usage
 # parsing (tw-dialect), redaction and tool-call inspection (tw-guard), the
-# circuit-breaker state machine (tw-breaker). Declared once, here, so a core
-# release is a one-line bump. Pinned to a tag: tracking a branch turns every
-# core merge into a coin flip on this build.
+# circuit-breaker state machine (tw-breaker), and what only Amazon Bedrock
+# needs on the wire: SigV4 signing, eventstream unframing, its addresses and
+# its model catalog (tw-bedrock). Declared once, here, so a core release is a
+# one-line bump. Pinned to a tag: tracking a branch turns every core merge
+# into a coin flip on this build.
 #
 # Code flows one way: from core into this tree, never back. Anything that
 # lands in core is MIT from that moment on.
 #
 # One copy, not two. Code that lives in core is used from core directly,
 # never re-exported through a local shim. And the reverse: something only
-# this side uses (the at-rest crypto, SigV4, the gateway error) lives here,
-# not in core.
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.43.0" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.43.0" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.43.0" }
+# this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
+# lives here, not in core.
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/bedrock-shared-crate" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/bedrock-shared-crate" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/bedrock-shared-crate" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/bedrock-shared-crate" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -141,15 +144,14 @@ dotenvy = "0.15"
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
-# AWS (Bedrock)
+# AWS SigV4 for the S3-compatible body store. Bedrock's signing,
+# eventstream unframing and model catalog come from tw-bedrock.
 # NOTE: "hardcoded-credentials" is the AWS SDK feature name for constructing
 # Credentials from explicit access_key/secret_key values (as opposed to the
 # default credential chain). This does NOT embed credentials in the binary —
-# they are loaded at runtime from encrypted provider config in the database.
+# they are loaded at runtime from encrypted configuration.
 aws-sigv4 = "1"
 aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
-aws-smithy-eventstream = "0.60"
-aws-smithy-types = "1"
 
 # Utils
 arc-swap = "1"
