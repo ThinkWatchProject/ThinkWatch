@@ -229,8 +229,9 @@ pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
 ///
 /// The upstream's body goes to the caller **truncated**: error bodies
 /// have carried stack traces, AWS account ids and full debug strings,
-/// and forwarding them verbatim turns the gateway into a leak. The full
-/// body goes to the log.
+/// and forwarding them verbatim turns the gateway into a leak. An auth
+/// error keeps its truncated body too, but not in the text the caller
+/// sees. The full body goes to the log.
 async fn check_status(
     resp: reqwest::Response,
     label: &str,
@@ -243,9 +244,6 @@ async fn check_status(
             .and_then(|v| v.to_str().ok())
             .and_then(crate::error::parse_retry_after_seconds);
         return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
-    }
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(GatewayError::UpstreamAuthError);
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -261,9 +259,11 @@ async fn check_status(
         } else {
             body
         };
-        return Err(GatewayError::ProviderHttpError {
-            status: status.as_u16(),
-            message: format!("{label}: {shown}"),
+        let (status, message) = (status.as_u16(), format!("{label}: {shown}"));
+        return Err(if status == 401 || status == 403 {
+            GatewayError::UpstreamAuthError { status, message }
+        } else {
+            GatewayError::ProviderHttpError { status, message }
         });
     }
     Ok(resp)
@@ -351,6 +351,36 @@ mod tests {
             u.url(b"{}", "/model/anthropic.claude-v2/converse", None),
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2/converse"
         );
+    }
+
+    fn answer(status: u16, body: &str) -> reqwest::Response {
+        http_1x::Response::builder()
+            .status(status)
+            .body(body.to_string())
+            .unwrap()
+            .into()
+    }
+
+    #[tokio::test]
+    async fn a_refused_credential_keeps_the_upstreams_reason_out_of_the_callers_sight() {
+        let body =
+            r#"{"message":"You don't have access to the model with the specified model ID."}"#;
+        let err = check_status(answer(403, body), "bedrock")
+            .await
+            .unwrap_err();
+
+        let GatewayError::UpstreamAuthError { status, message } = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, 403);
+        assert!(
+            message.contains("You don't have access to the model"),
+            "{message}"
+        );
+        // The caller is told the gateway's own words: the reason names
+        // the AWS account
+        assert_eq!(err.to_string(), "Authentication failed with upstream");
+        assert_eq!(err.status_code(), 401);
     }
 
     const AK: &str = "AKIAIOSFODNN7EXAMPLE";

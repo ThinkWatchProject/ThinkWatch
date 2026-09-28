@@ -66,6 +66,24 @@ pub(crate) async fn list_models(
     Ok(ids.into_iter().collect())
 }
 
+/// Does the control plane accept `upstream`'s credential? One small
+/// listing: a refusal of the credential shows up here too, a refusal of
+/// one model doesn't. See `protocol_probe::is_credential_good`.
+pub(crate) async fn accepts_credential(
+    client: &reqwest::Client,
+    endpoint: &str,
+    upstream: &Upstream,
+) -> bool {
+    let Ok(url) = listing_url(
+        endpoint,
+        "inference-profiles",
+        &[("type", "SYSTEM_DEFINED"), ("maxResults", "1")],
+    ) else {
+        return false;
+    };
+    get(client, upstream, url).await.is_ok()
+}
+
 async fn foundation_models(
     client: &reqwest::Client,
     endpoint: &str,
@@ -416,6 +434,34 @@ mod tests {
                 message: "User is not authorized to perform: bedrock:ListInferenceProfiles".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_credential_is_good_when_the_control_plane_serves_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/inference-profiles"))
+            .and(query_param("maxResults", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "inferenceProfileSummaries": [],
+            })))
+            .mount(&server)
+            .await;
+
+        assert!(accepts_credential(&reqwest::Client::new(), &server.uri(), &api_key()).await);
+    }
+
+    #[tokio::test]
+    async fn a_credential_the_control_plane_refuses_is_not_good() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "message": "Authentication failed: Please make sure your API Key is valid.",
+            })))
+            .mount(&server)
+            .await;
+
+        assert!(!accepts_credential(&reqwest::Client::new(), &server.uri(), &api_key()).await);
     }
 
     #[tokio::test]

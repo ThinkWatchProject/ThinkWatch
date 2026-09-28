@@ -245,7 +245,13 @@ mod helper_tests {
                 429,
             ),
             (GatewayError::LocalRateLimited("rule".into()), 429),
-            (GatewayError::UpstreamAuthError, 401),
+            (
+                GatewayError::UpstreamAuthError {
+                    status: 401,
+                    message: "bad key".into(),
+                },
+                401,
+            ),
             (GatewayError::PolicyBlocked("rule".into()), 403),
         ] {
             assert_eq!(
@@ -280,7 +286,10 @@ mod helper_tests {
             GatewayError::UpstreamRateLimited {
                 retry_after_secs: Some(12),
             },
-            GatewayError::UpstreamAuthError,
+            GatewayError::UpstreamAuthError {
+                status: 401,
+                message: "bad key".into(),
+            },
             GatewayError::ProviderTimeout("slow".into()),
             GatewayError::ProviderError("boom".into()),
             GatewayError::ProviderHttpError {

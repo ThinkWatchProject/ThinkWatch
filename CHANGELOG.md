@@ -64,6 +64,15 @@ target.
 - **Typing into a provider's API key field and clearing it again wiped
   the saved key on save.** The field sent `Bearer ` with nothing after
   it. A cleared field now keeps the saved key, as a blank one always did.
+- **Bedrock models the account may not call were imported anyway.**
+  Bedrock refuses such a model — model access not granted, or an IAM
+  or organization policy that denies it — with a 403, and the import
+  probe read every 403 as a credential problem that says nothing about
+  the model. The route was created and failed on first use. Now, when
+  the region's control plane accepts the same credential, the refusal
+  is recorded as the model's, with AWS's reason, and the model is
+  skipped on import like any other refused one. Once access is granted,
+  re-check the provider's models.
 
 ## [2.0.0] — 2026-09-24
 
