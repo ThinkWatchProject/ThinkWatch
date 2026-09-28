@@ -1,19 +1,28 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createQueryClient } from '@/lib/query-client'
 import { RouteEditorDialog } from './RouteEditorDialog'
-import type { RouteRow } from './types'
+import type { ModelRow, RouteRow } from './types'
 import type { Provider } from '../provider-types'
 
 vi.mock('@/lib/api', () => ({
   api: vi.fn(),
   apiPatch: vi.fn(),
   apiPost: vi.fn(),
+  ApiError: class ApiError extends Error {
+    constructor(
+      message: string,
+      public status: number,
+      public type?: string,
+    ) {
+      super(message)
+    }
+  },
 }))
 
-import { api, apiPatch } from '@/lib/api'
+import { api, apiPatch, apiPost, ApiError } from '@/lib/api'
 
 const provider = { id: 'prov-1', name: 'bedrock', display_name: 'Bedrock' } as Provider
 
@@ -27,16 +36,19 @@ const route: RouteRow = {
   enabled: true,
 }
 
+const model = { model_id: 'claude-opus' } as ModelRow
+
 // Mounted closed and then opened, as the Models page does: opening is
-// when the dialog loads the route into its form.
-function renderEditor() {
+// when the dialog loads the route into its form. Edits `route`, or adds
+// one to `target`.
+function renderEditor(target?: ModelRow) {
   const client = createQueryClient()
   const editor = (open: boolean) => (
     <QueryClientProvider client={client}>
       <RouteEditorDialog
         open={open}
-        route={route}
-        targetModel={null}
+        route={target ? null : route}
+        targetModel={target ?? null}
         providers={[provider]}
         routeHealth={{}}
         onClose={vi.fn()}
@@ -45,6 +57,28 @@ function renderEditor() {
     </QueryClientProvider>
   )
   render(editor(false)).rerender(editor(true))
+}
+
+beforeAll(() => {
+  // Radix Select captures the pointer and scrolls its options into view;
+  // jsdom implements neither.
+  Object.assign(Element.prototype, {
+    hasPointerCapture: () => false,
+    setPointerCapture: () => {},
+    releasePointerCapture: () => {},
+    scrollIntoView: () => {},
+  })
+})
+
+/** Add a route for `upstream` on the Bedrock provider, and save. */
+async function addRoute(user: UserEvent, upstream: string) {
+  renderEditor(model)
+  await user.click(screen.getByLabelText('Provider'))
+  await user.click(await screen.findByRole('option', { name: 'Bedrock' }))
+  const field = screen.getByLabelText('Upstream Model')
+  await user.clear(field)
+  await user.type(field, upstream)
+  await user.click(screen.getByRole('button', { name: 'Save' }))
 }
 
 beforeEach(() => {
@@ -102,6 +136,48 @@ describe('RouteEditorDialog', () => {
 
     expect(field).toHaveValue('global.anthropic.claude-sonnet-4-5-20250929-v1:0')
     expect(screen.queryByRole('option')).not.toBeInTheDocument()
+  })
+
+  it('creates a route the provider refused once told to', async () => {
+    const user = userEvent.setup()
+    vi.mocked(apiPost)
+      .mockRejectedValueOnce(
+        new ApiError(
+          "Provider does not serve 'us.anthropic.claude-opus-4-1-20250805-v1:0': refused",
+          400,
+          'model_not_served',
+        ),
+      )
+      .mockResolvedValueOnce({})
+
+    await addRoute(user, 'us.anthropic.claude-opus-4-1-20250805-v1:0')
+    expect(await screen.findByText(/Provider does not serve/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Create anyway' }))
+
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(apiPost).toHaveBeenLastCalledWith(
+      '/api/admin/models/claude-opus/routes',
+      expect.objectContaining({
+        provider_id: 'prov-1',
+        upstream_model: 'us.anthropic.claude-opus-4-1-20250805-v1:0',
+        force: true,
+      }),
+    )
+  })
+
+  // Forcing helps only past the provider's refusal: any other error
+  // would come back the same.
+  it('offers no way past any other error', async () => {
+    const user = userEvent.setup()
+    vi.mocked(apiPost).mockRejectedValueOnce(
+      new ApiError('A route for this model+provider+upstream already exists', 400, 'bad_request'),
+    )
+
+    await addRoute(user, 'amazon.nova-lite-v1:0')
+
+    expect(await screen.findByText(/already exists/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create anyway' })).not.toBeInTheDocument()
+    expect(vi.mocked(apiPost).mock.calls[0][1]).not.toHaveProperty('force')
   })
 
   it('picks a suggestion with the keyboard without saving', async () => {

@@ -421,6 +421,8 @@
     "enableAllRoutes": "全部启用",
     "disableAllRoutes": "全部禁用",
     "routeAdded": "路由已添加",
+    "createAnyway": "仍然创建",
+    "createAnywayHint": "检查时提供商拒绝了这个模型。如果确定它能用，可以仍然创建这条路由。",
     "routeDeleted": "路由已删除",
     "addRouteTitle": "添加提供商路由",
     "editRouteTitle": "编辑路由",

@@ -37,6 +37,15 @@ target.
   with an API key, access keys or the instance role. It lists the models
   above, so a wrong credential or a missing permission shows up before
   any traffic does.
+- **Create anyway, for a route the provider refused.** When the route
+  editor's save is refused because the provider does not serve the
+  model, the error now offers *Create anyway*: the refusal can be
+  stale, or be about the probe's request rather than the model. The
+  route is created, and its `model_route.created` audit row records the
+  refusal it overrode in `refusal_overridden`. On the API, the refusal
+  answers `400` with `error.type` `model_not_served` (it was
+  `bad_request`), and `POST /api/admin/models/{model_id}/routes` takes
+  `"force": true` to create the route anyway.
 
 ### Changed
 
