@@ -61,11 +61,11 @@ describe('CreateProviderDialog', () => {
 
     await user.type(screen.getByLabelText('Name'), 'bedrock-prod')
     await pick(user, 'Provider Type', 'AWS Bedrock')
-    // No key, no way to authenticate the test: signing isn't set up yet.
-    expect(screen.queryByRole('button', { name: 'Test Connection' })).not.toBeInTheDocument()
     await pick(user, 'Authentication Mode', 'Bedrock API Key')
+    // Without the key the test would be signed with the instance role.
+    expect(screen.getByRole('button', { name: 'Test Connection' })).toBeDisabled()
     await user.type(screen.getByLabelText('API Key'), 'ABSK-test')
-    expect(screen.getByRole('button', { name: 'Test Connection' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Test Connection' })).toBeEnabled()
     await user.click(screen.getByRole('button', { name: 'Create Provider' }))
 
     // The key is a bearer token in the headers, and there are no AWS keys.
@@ -75,6 +75,40 @@ describe('CreateProviderDialog', () => {
       provider_type: 'bedrock',
       base_url: 'us-east-1',
       headers: [{ key: 'Authorization', value: 'Bearer ABSK-test' }],
+    })
+  })
+
+  it('tests a Bedrock provider with the access keys typed into the form', async () => {
+    const user = userEvent.setup()
+    renderCreate()
+
+    await pick(user, 'Provider Type', 'AWS Bedrock')
+    const test = screen.getByRole('button', { name: 'Test Connection' })
+    await user.type(screen.getByLabelText('Access Key ID'), 'AKIA-test')
+    expect(test).toBeDisabled()
+    await user.type(screen.getByLabelText('Secret Access Key'), 'secret')
+    await user.click(test)
+
+    expect(apiPost).toHaveBeenCalledWith('/api/admin/providers/test', {
+      provider_type: 'bedrock',
+      base_url: 'us-east-1',
+      headers: [],
+      config: { aws_access_key_id: 'AKIA-test', aws_secret_access_key: 'secret' },
+    })
+  })
+
+  it('tests a Bedrock provider on the instance role with nothing but its region', async () => {
+    const user = userEvent.setup()
+    renderCreate()
+
+    await pick(user, 'Provider Type', 'AWS Bedrock')
+    await pick(user, 'Authentication Mode', 'EC2 Instance Role (IMDSv2)')
+    await user.click(screen.getByRole('button', { name: 'Test Connection' }))
+
+    expect(apiPost).toHaveBeenCalledWith('/api/admin/providers/test', {
+      provider_type: 'bedrock',
+      base_url: 'us-east-1',
+      headers: [],
     })
   })
 
@@ -139,10 +173,19 @@ describe('EditProviderDialog', () => {
     )
   })
 
-  it('offers no key field or test for a Bedrock provider that signs its requests', () => {
+  it('tests a Bedrock provider that signs its requests with the keys it saved', async () => {
+    const user = userEvent.setup()
     renderEdit(bedrock([]))
 
     expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Test Connection' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Test Connection' }))
+
+    // The saved keys never reach the dialog: the server signs with them.
+    expect(apiPost).toHaveBeenCalledWith('/api/admin/providers/test', {
+      provider_type: 'bedrock',
+      base_url: 'us-east-1',
+      headers: [],
+      provider_id: 'prov-1',
+    })
   })
 })

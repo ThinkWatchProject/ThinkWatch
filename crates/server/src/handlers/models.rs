@@ -1378,25 +1378,15 @@ pub async fn list_remote_models(
         .await?
         .ok_or(AppError::NotFound("Provider not found".into()))?;
 
-    // Stored header values are `{"$enc": …}` envelopes, so they have to
-    // be decrypted here — deserializing them straight into
-    // `Vec<ProviderHeader>` fails and yields an empty list, which sent
-    // the model probe upstream with no API key at all.
-    let headers = super::providers::decrypt_headers_from_config(
-        &provider.config_json,
+    // Connect as the gateway does: decrypted headers, and for Bedrock the
+    // saved access keys.
+    let materials = crate::gateway_adapters::ProviderMaterials::from_provider(
+        &provider,
         &state.config.encryption_key,
-        &provider.name,
     );
-    let test_req = super::providers::TestProviderRequest {
-        provider_type: provider.provider_type.clone(),
-        base_url: provider.base_url.clone(),
-        headers,
-        provider_id: Some(provider.id),
-    };
-
     let http_client = (**state.http_client.load()).clone();
     let Json(resp) =
-        super::providers::run_provider_test(test_req, http_client, &state.url_validator).await?;
+        super::providers::run_provider_test(&materials, http_client, &state.url_validator).await?;
     if !resp.success {
         return Err(AppError::BadRequest(format!(
             "Provider unreachable: {}",
@@ -1449,23 +1439,13 @@ pub async fn recheck_provider_models(
         .await?
         .ok_or(AppError::NotFound("Provider not found".into()))?;
 
-    let headers = super::providers::decrypt_headers_from_config(
-        &provider.config_json,
+    let materials = crate::gateway_adapters::ProviderMaterials::from_provider(
+        &provider,
         &state.config.encryption_key,
-        &provider.name,
     );
     let http_client = (**state.http_client.load()).clone();
-    let Json(resp) = super::providers::run_provider_test(
-        super::providers::TestProviderRequest {
-            provider_type: provider.provider_type.clone(),
-            base_url: provider.base_url.clone(),
-            headers,
-            provider_id: Some(provider.id),
-        },
-        http_client,
-        &state.url_validator,
-    )
-    .await?;
+    let Json(resp) =
+        super::providers::run_provider_test(&materials, http_client, &state.url_validator).await?;
     if !resp.success {
         return Err(AppError::BadRequest(format!(
             "Provider unreachable: {}",

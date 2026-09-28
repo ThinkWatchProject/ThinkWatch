@@ -134,31 +134,33 @@ function TestConnectionButton({
   );
 }
 
-async function handleTestConnection(
-  type: string,
-  url: string,
-  hdrs: [string, string][],
-  setTesting: (v: boolean) => void,
-  setTestResult: (v: TestResult | null) => void,
+interface TestRequest {
+  provider_type: string;
+  base_url: string;
+  headers: [string, string][];
+  /** Bedrock access keys, as the create request carries them. */
+  config?: { aws_access_key_id: string; aws_secret_access_key: string };
   /**
    * Set when testing an already-saved provider: the server fills any
-   * blank header value from that provider's stored secrets, which the
-   * edit dialog never sees (they come back redacted).
+   * blank header value, and access keys the request has none of, from
+   * that provider's stored secrets, which the edit dialog never sees
+   * (they come back redacted).
    */
-  providerId?: string,
+  provider_id?: string;
+}
+
+async function handleTestConnection(
+  { headers, ...req }: TestRequest,
+  setTesting: (v: boolean) => void,
+  setTestResult: (v: TestResult | null) => void,
 ) {
   setTesting(true);
   setTestResult(null);
   try {
-    const res = await apiPost<TestResult>(
-      '/api/admin/providers/test',
-      {
-        provider_type: type,
-        base_url: url,
-        headers: hdrs.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
-        provider_id: providerId,
-      },
-    );
+    const res = await apiPost<TestResult>('/api/admin/providers/test', {
+      ...req,
+      headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
+    });
     setTestResult(res);
   } catch (err) {
     setTestResult({ success: false, message: err instanceof Error ? err.message : i18n.t('common.error') });
@@ -200,9 +202,17 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
 
   const apiKeyHeader = apiKeyHeaderFor(providerType, bedrockAuthMode === 'apikey');
   const effectiveBaseUrl = baseUrl || defaultBaseUrl[providerType] || '';
-  // A connection test sends the headers as they are and signs nothing,
-  // so only a Bedrock API key can be tested.
-  const canTest = providerType !== 'bedrock' || bedrockAuthMode === 'apikey';
+  const awsKeys = providerType === 'bedrock' && bedrockAuthMode === 'aksk'
+    ? { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey }
+    : undefined;
+  // Until the chosen credential is filled in, a Bedrock test would be
+  // signed with the instance role, and fail over something this form
+  // never asked for.
+  const credentialMissing = providerType === 'bedrock' && (
+    bedrockAuthMode === 'apikey' ? !headers.some(([k, v]) => k === 'Authorization' && v) :
+    bedrockAuthMode === 'aksk' ? !awsAccessKeyId || !awsSecretKey :
+    false
+  );
 
   const changeBedrockAuthMode = (mode: BedrockAuthMode) => {
     setBedrockAuthMode(mode);
@@ -235,9 +245,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
         provider_type: providerType,
         base_url: effectiveBaseUrl,
         headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
-        ...(providerType === 'bedrock' && bedrockAuthMode === 'aksk' ? {
-          config: { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey },
-        } : {}),
+        ...(awsKeys ? { config: awsKeys } : {}),
       });
       onOpenChange(false);
       resetForm();
@@ -371,13 +379,15 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
             </Alert>
           )}
           <DialogFooter>
-            {canTest && (
-              <TestConnectionButton
-                testing={testing}
-                disabled={testing || !effectiveBaseUrl}
-                onClick={() => handleTestConnection(providerType, effectiveBaseUrl, headers, setTesting, setTestResult)}
-              />
-            )}
+            <TestConnectionButton
+              testing={testing}
+              disabled={testing || !effectiveBaseUrl || credentialMissing}
+              onClick={() => handleTestConnection(
+                { provider_type: providerType, base_url: effectiveBaseUrl, headers, config: awsKeys },
+                setTesting,
+                setTestResult,
+              )}
+            />
             <Button type="submit" disabled={submitting}>
               {submitting ? (
                 <><Loader2 className="mr-1 h-4 w-4 animate-spin" />{t('providers.creating')}</>
@@ -465,8 +475,6 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
   const type = provider?.provider_type ?? '';
   // A Bedrock provider has an API key when it sends `Authorization`.
   const apiKeyHeader = apiKeyHeaderFor(type, editHeaders.some(([k]) => k === 'Authorization'));
-  // The test signs nothing, so a Bedrock provider without a key can't be tested.
-  const canTest = type !== 'bedrock' || apiKeyHeader !== null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -533,13 +541,22 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          {canTest && (
-            <TestConnectionButton
-              testing={testing}
-              disabled={testing || !editBaseUrl}
-              onClick={() => handleTestConnection(provider!.provider_type, editBaseUrl, editHeaders, setTesting, setTestResult, provider!.id)}
-            />
-          )}
+          {/* A saved Bedrock provider's access keys never reach this
+              dialog: the server signs the test with the stored ones. */}
+          <TestConnectionButton
+            testing={testing}
+            disabled={testing || !editBaseUrl}
+            onClick={() => handleTestConnection(
+              {
+                provider_type: provider!.provider_type,
+                base_url: editBaseUrl,
+                headers: editHeaders,
+                provider_id: provider!.id,
+              },
+              setTesting,
+              setTestResult,
+            )}
+          />
           <Button onClick={handleEdit} disabled={editSaving}>
             {editSaving ? t('common.loading') : t('common.save')}
           </Button>

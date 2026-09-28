@@ -150,7 +150,7 @@ impl Upstream {
         }
         if let Some(signer) = self.signer() {
             let signed = signer
-                .sign(&self.client, &url, &body)
+                .sign(&self.client, &reqwest::Method::POST, &url, Some(&body))
                 .await
                 .map_err(|e| GatewayError::ProviderError(e.to_string()))?;
             for (k, v) in signed {
@@ -167,8 +167,9 @@ impl Upstream {
     /// bearer token the provider row sends in its own `Authorization`
     /// header: it is the whole credential, there is nothing to sign, and
     /// signing anyway would add a second `authorization` header, which
-    /// AWS rejects. Without one, every request is SigV4-signed.
-    fn signer(&self) -> Option<&Signer> {
+    /// AWS rejects. Without one, every request is SigV4-signed — those
+    /// to the region's control plane too, such as its model listings.
+    pub fn signer(&self) -> Option<&Signer> {
         match &self.shape {
             Shape::Bedrock { signer }
                 if !self

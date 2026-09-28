@@ -21,12 +21,23 @@ target.
   `Authorization` header is not SigV4-signed; one without it is signed
   as before, with access keys or the instance role. Use a long-term key:
   a short-term one expires within 12 hours.
-- **Test Connection for Bedrock providers with an API key.** It lists the
-  region's foundation models with the key, so a wrong key or a missing
-  permission shows up before any traffic does. Those models are not
-  offered for import: most current models are only served through an
-  inference profile, which that list does not name. Providers signed
-  with access keys or the instance role still have no connection test.
+- **Bedrock models can be imported, and picked in the route editor.** A
+  Bedrock provider now lists what it can be routed to: the region's
+  foundation models that can be invoked on demand and answer in text,
+  and the inference profiles AWS defines, such as
+  `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. A model that is only
+  served through an inference profile, as most current models are, is
+  listed under its profiles' ids and not its own. Whether the account
+  may call a model is still checked one model at a time when it is
+  imported. As for other providers, the route editor offers the list in
+  place of a free-text field. The provider's credential needs
+  `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles`;
+  the `AmazonBedrockLimitedAccess` policy a long-term API key is created
+  with allows both.
+- **Test Connection for Bedrock providers**, however they authenticate:
+  with an API key, access keys or the instance role. It lists the models
+  above, so a wrong credential or a missing permission shows up before
+  any traffic does.
 
 ### Fixed
 
