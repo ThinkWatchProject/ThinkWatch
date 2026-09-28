@@ -90,7 +90,8 @@ If the secret may be in attacker hands, also:
 
 This rotates the AES-256-GCM key that wraps:
 
-- Provider header values (in `providers.config_json` under `headers[]`)
+- Provider header values (in `providers.config_json` under `headers[]`),
+  which hold provider API keys, Bedrock API keys included
 - Bedrock `aws_secret_access_key`
 - MCP OAuth `client_secret` and access / refresh tokens
 - TOTP secret + recovery code blobs

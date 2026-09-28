@@ -1,9 +1,9 @@
 //! AWS SigV4 signing.
 //!
-//! Bedrock is the one upstream that does not take a bearer token: every
-//! request is signed over its method, URL, time and the hash of its body.
-//! So **signing has to happen after the body is final** — change one byte
-//! and the signature no longer matches.
+//! A Bedrock provider without an API key has no bearer token to send:
+//! every request is signed over its method, URL, time and the hash of its
+//! body. So **signing has to happen after the body is final** — change one
+//! byte and the signature no longer matches.
 
 use std::time::SystemTime;
 

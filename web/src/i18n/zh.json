@@ -336,6 +336,8 @@
     "addHeader": "添加请求头",
     "awsAuthMode": "认证方式",
     "awsAuthAkSk": "Access Key / Secret Key",
+    "awsAuthApiKey": "Bedrock API Key",
+    "awsApiKeyHint": "请使用长期 key（以 ABSK 开头），短期 key 最多 12 小时就会过期。长期 key 也有有效期，请在到期前通过「编辑」更换。",
     "awsAuthImdsv2": "EC2 实例角色 (IMDSv2)",
     "awsImdsv2Hint": "凭证将自动从 EC2 实例元数据服务获取。请确保实例绑定了具有 Bedrock 权限的 IAM 角色。",
     "testConnection": "测试连接",

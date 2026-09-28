@@ -19,8 +19,9 @@ pub(crate) struct ProviderMaterials {
     pub(crate) base_url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) api_version: Option<String>,
-    /// `"access_key:secret_key"`, or empty for IMDSv2 mode. Only read
-    /// by the Bedrock adapter.
+    /// `"access_key:secret_key"`, or empty when the provider uses a
+    /// Bedrock API key (an `Authorization` header) or the instance role
+    /// (IMDSv2). Only read by the Bedrock adapter.
     pub(crate) bedrock_credentials: String,
 }
 
@@ -102,7 +103,9 @@ pub(crate) fn build_upstream(m: &ProviderMaterials) -> Arc<Upstream> {
         },
         "bedrock" => {
             // `access_key:secret_key`, or empty for IMDSv2 — the instance
-            // role then supplies rotating credentials.
+            // role then supplies rotating credentials. A provider with a
+            // Bedrock API key in its headers is never signed, whatever
+            // is set here.
             let (access_key_id, secret_access_key) = match m.bedrock_credentials.split_once(':') {
                 Some((a, s)) if !a.is_empty() => (Some(a.to_string()), Some(s.to_string())),
                 _ => (None, None),
