@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { ComboboxInput } from '@/components/combobox-input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,7 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { api, apiPatch, apiPost } from '@/lib/api';
 import { toast } from 'sonner';
 import {
@@ -97,12 +98,12 @@ export function RouteEditorDialog({
     setError('');
   });
 
-  // Pull the upstream-model picker options from the selected provider's
-  // remote catalog. Each lookup costs the backend a call to the
-  // upstream's own model listing, so a provider's list is kept rather
-  // than refetched: switching providers back and forth is instant. A
-  // provider with no /models endpoint, or a temporary fetch failure,
-  // falls back to free input.
+  // Suggest upstream models from the selected provider's remote catalog.
+  // Each lookup costs the backend a call to the upstream's own model
+  // listing, so a provider's list is kept rather than refetched:
+  // switching providers back and forth is instant. The field takes any
+  // name, listed or not — an upstream's listing can leave out a model it
+  // serves, and a provider with no listing has nothing to suggest.
   const pid = form.provider_id;
   const remoteQuery = useQuery({
     queryKey: ['admin', 'providers', pid, 'remote-models'],
@@ -217,49 +218,16 @@ export function RouteEditorDialog({
             )}
             <div className="space-y-2">
               <Label htmlFor="route_upstream">{t('models.col.upstreamModel')}</Label>
-              {(() => {
-                const remote = remoteQuery.data;
-                // Loading: provider picked, fetch in flight.
-                if (remoteQuery.isLoading) {
-                  return (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground h-9 px-3 border rounded-md">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      {t('models.loadingModels')}
-                    </div>
-                  );
-                }
-                // Fetched a usable list → searchable select.
-                if (remote && remote.length > 0) {
-                  return (
-                    <Select
-                      value={form.upstream_model}
-                      onValueChange={(v) => setForm({ ...form, upstream_model: v })}
-                    >
-                      <SelectTrigger id="route_upstream">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {remote.map((m) => (
-                          <SelectItem key={m} value={m}>
-                            <span className="font-mono text-xs">{m}</span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  );
-                }
-                // No provider chosen yet, or remote list unavailable
-                // — fall back to free input so the user is never
-                // blocked from saving a custom upstream name.
-                return (
-                  <Input
-                    id="route_upstream"
-                    value={form.upstream_model}
-                    onChange={(e) => setForm({ ...form, upstream_model: e.target.value })}
-                    placeholder={t('models.upstreamModelHint')}
-                  />
-                );
-              })()}
+              <ComboboxInput
+                id="route_upstream"
+                value={form.upstream_model}
+                onChange={(v) => setForm({ ...form, upstream_model: v })}
+                options={remoteQuery.data ?? []}
+                loading={remoteQuery.isLoading}
+                loadingText={t('models.loadingModels')}
+                placeholder={t('models.upstreamModelHint')}
+                optionClassName="font-mono text-xs"
+              />
             </div>
             <div className="space-y-2">
               <Label htmlFor="route_label">{t('models.routing.labelLabel')}</Label>

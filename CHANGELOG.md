@@ -21,16 +21,15 @@ target.
   `Authorization` header is not SigV4-signed; one without it is signed
   as before, with access keys or the instance role. Use a long-term key:
   a short-term one expires within 12 hours.
-- **Bedrock models can be imported, and picked in the route editor.** A
-  Bedrock provider now lists what it can be routed to: the region's
-  foundation models that can be invoked on demand and answer in text,
-  and the inference profiles AWS defines, such as
+- **Bedrock models can be imported, and are suggested in the route
+  editor.** A Bedrock provider now lists what it can be routed to: the
+  region's foundation models that can be invoked on demand and answer in
+  text, and the inference profiles AWS defines, such as
   `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. A model that is only
   served through an inference profile, as most current models are, is
   listed under its profiles' ids and not its own. Whether the account
   may call a model is still checked one model at a time when it is
-  imported. As for other providers, the route editor offers the list in
-  place of a free-text field. The provider's credential needs
+  imported. The provider's credential needs
   `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles`;
   the `AmazonBedrockLimitedAccess` policy a long-term API key is created
   with allows both.
@@ -38,6 +37,14 @@ target.
   with an API key, access keys or the instance role. It lists the models
   above, so a wrong credential or a missing permission shows up before
   any traffic does.
+
+### Changed
+
+- **The route editor's upstream model field takes any model name.** For
+  a provider that lists its models, the field used to turn into a list
+  to pick from, so a model the listing leaves out could not be routed to
+  from the console. It now suggests the provider's models as you type,
+  and takes whatever is typed.
 
 ### Fixed
 
