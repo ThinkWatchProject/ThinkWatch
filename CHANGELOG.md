@@ -74,6 +74,19 @@ target.
   skipped on import like any other refused one. Once access is granted,
   re-check the provider's models.
 
+### Security
+
+- **Testing a connection with a saved provider's secrets takes
+  `providers:update`.** The test fills each header left blank with the
+  saved provider's secret and sends it to the URL in the request, and
+  `providers:create` was enough to ask for it. So a user allowed only to
+  create providers could send any saved API key to a server of their
+  own. A test that names a saved provider (`provider_id`) now takes
+  `providers:update`, which lets a user point that provider elsewhere
+  anyway; a test without one still takes `providers:create`. A user with
+  `providers:update` alone can now use Test Connection in the Edit
+  dialog, which used to answer `403`.
+
 ## [2.0.0] — 2026-09-24
 
 Callers now get errors in their own API's format, and an upstream that

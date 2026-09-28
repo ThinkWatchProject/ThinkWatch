@@ -38,6 +38,48 @@ async fn create_model(con: &TestClient, model_id: &str) -> String {
     created["id"].as_str().expect("model id").to_string()
 }
 
+/// A console session for a user whose one role allows `actions`.
+async fn session_with(app: &TestApp, admin: &TestClient, actions: &[&str]) -> TestClient {
+    let role: Value = admin
+        .post(
+            "/api/admin/roles",
+            json!({
+                "name": unique_name("catalog-role"),
+                "description": "admin catalog test",
+                "policy_document": {
+                    "Version": "2024-01-01",
+                    "Statement": [{"Sid": "T", "Effect": "Allow", "Action": actions, "Resource": "*"}]
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let user = fixtures::create_user(&app.db, &unique_email(), "Catalog", "TestPwd_1234567!")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+         VALUES ($1, $2, 'global', $1)",
+    )
+    .bind(user.user.id)
+    .bind(Uuid::parse_str(role["id"].as_str().expect("role id")).unwrap())
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": user.user.email, "password": user.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    con
+}
+
 async fn get(con: &TestClient, path: &str) -> Value {
     let resp = con.get(path).await.unwrap();
     resp.assert_ok();
@@ -421,6 +463,79 @@ async fn a_bedrock_provider_takes_a_region_and_an_api_key() {
         .unwrap()
         .assert_status(400);
     }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn testing_with_a_saved_providers_secrets_takes_the_permission_to_edit_it() {
+    // The request names where the test goes, and a saved provider's
+    // secrets go along. Allowed to create providers only, a user could
+    // send any saved key to a server of their own.
+    let app = TestApp::spawn_reaching_loopback().await;
+    let admin = admin_session(&app).await;
+    let upstream = MockProvider::openai_chat_ok("gpt-4o").await;
+    let resp = admin
+        .post(
+            "/api/admin/providers",
+            json!({
+                "name": unique_name("saved-key"),
+                "display_name": "Saved key",
+                "provider_type": "openai",
+                "base_url": upstream.uri(),
+                "headers": [{"key": "Authorization", "value": "Bearer sk-saved"}],
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let saved: Value = resp.json().unwrap();
+    let with_saved_key = json!({
+        "provider_type": "openai",
+        "base_url": upstream.uri(),
+        "headers": [{"key": "Authorization", "value": ""}],
+        "provider_id": saved["id"],
+    });
+    let with_typed_key = json!({
+        "provider_type": "openai",
+        "base_url": upstream.uri(),
+        "headers": [{"key": "Authorization", "value": "Bearer sk-typed"}],
+    });
+
+    let creator = session_with(&app, &admin, &["providers:create"]).await;
+    creator
+        .post("/api/admin/providers/test", with_saved_key.clone())
+        .await
+        .unwrap()
+        .assert_status(403);
+    creator
+        .post("/api/admin/providers/test", with_typed_key.clone())
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // Editing the provider could send its key anywhere anyway
+    let editor = session_with(&app, &admin, &["providers:update"]).await;
+    let resp = editor
+        .post("/api/admin/providers/test", with_saved_key)
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let result: Value = resp.json().unwrap();
+    assert_eq!(result["success"], true, "{result}");
+    editor
+        .post("/api/admin/providers/test", with_typed_key)
+        .await
+        .unwrap()
+        .assert_status(403);
+
+    let sent: Vec<String> = upstream
+        .received_requests()
+        .await
+        .iter()
+        .filter_map(|r| r.headers.get("authorization"))
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(sent, ["Bearer sk-typed", "Bearer sk-saved"]);
 }
 
 #[ignore = "integration test — run via `make test-it`"]

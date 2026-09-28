@@ -550,8 +550,17 @@ pub async fn test_provider(
     State(state): State<AppState>,
     Json(req): Json<TestProviderRequest>,
 ) -> Result<Json<TestProviderResponse>, AppError> {
+    // A test with a saved provider's secrets sends them where the request
+    // says, as saving a new base URL for it would: it takes the permission
+    // to edit the provider. Values typed into the request are the create
+    // dialog's, and take the permission to create one.
+    let permission = if req.provider_id.is_some() {
+        "providers:update"
+    } else {
+        "providers:create"
+    };
     auth_user
-        .require_global_permission(&state.db, "providers:create")
+        .require_global_permission(&state.db, permission)
         .await?;
 
     let stored = match req.provider_id {
