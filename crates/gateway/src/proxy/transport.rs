@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crate::bedrock::sigv4::Signer;
+pub use crate::bedrock::sigv4::{Credential, Signer};
 use crate::call_ctx::CallCtx;
 use crate::error::GatewayError;
 
@@ -340,11 +340,7 @@ mod tests {
         let u = up(
             "us-east-1",
             Shape::Bedrock {
-                signer: Arc::new(Signer {
-                    region: "us-east-1".into(),
-                    access_key_id: None,
-                    secret_access_key: None,
-                }),
+                signer: Arc::new(Signer::new("us-east-1", Credential::InstanceRole)),
             },
         );
         assert_eq!(
@@ -394,11 +390,12 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             Shape::Bedrock {
-                signer: Arc::new(Signer {
-                    region: "us-east-1".into(),
-                    access_key_id: keys.map(|(ak, _)| ak.into()),
-                    secret_access_key: keys.map(|(_, sk)| sk.into()),
-                }),
+                signer: Arc::new(Signer::new(
+                    "us-east-1",
+                    keys.map_or(Credential::InstanceRole, |(ak, sk)| {
+                        Credential::from_keys(ak.into(), sk.into())
+                    }),
+                )),
             },
             "test",
         )
