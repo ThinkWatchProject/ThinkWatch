@@ -47,12 +47,17 @@ impl Signer {
     /// Sign a request and return the headers to add (`authorization` and
     /// `x-amz-*`).
     ///
-    /// `body` must be **exactly what will be sent**: the signature covers its hash.
+    /// `body` is the request's JSON body, which must be **exactly what will
+    /// be sent**: the signature covers its hash, and its `content-type`.
+    /// `None` is a request without one, such as a GET — then the signature
+    /// covers the hash of nothing, and there is no content type to sign.
+    /// The signature covers the method and the whole URL, query included.
     pub async fn sign(
         &self,
         client: &reqwest::Client,
+        method: &reqwest::Method,
         url: &str,
-        body: &[u8],
+        body: Option<&[u8]>,
     ) -> Result<Vec<(String, String)>, SignError> {
         use aws_sigv4::http_request::{
             PayloadChecksumKind, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
@@ -79,11 +84,12 @@ impl Signer {
             .build()
             .map_err(|e| SignError::Signing(e.to_string()))?;
 
+        let content_type = body.map(|_| ("content-type", "application/json"));
         let signable = SignableRequest::new(
-            "POST",
+            method.as_str(),
             url,
-            std::iter::once(("content-type", "application/json")),
-            SignableBody::Bytes(body),
+            content_type.into_iter(),
+            SignableBody::Bytes(body.unwrap_or_default()),
         )
         .map_err(|e| SignError::Signing(e.to_string()))?;
 
@@ -92,10 +98,11 @@ impl Signer {
             .into_parts();
 
         // The signing library only writes onto an http request, so build an empty one to catch it
-        let mut req = http_1x::Request::builder()
-            .method("POST")
-            .uri(url)
-            .header("content-type", "application/json")
+        let mut req = http_1x::Request::builder().method(method.as_str()).uri(url);
+        if let Some((name, value)) = content_type {
+            req = req.header(name, value);
+        }
+        let mut req = req
             .body(())
             .map_err(|e| SignError::Signing(e.to_string()))?;
         instructions.apply_to_request_http1x(&mut req);
@@ -182,13 +189,33 @@ mod tests {
         }
     }
 
+    const CONVERSE: &str = "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse";
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("no {name} in {headers:?}"))
+    }
+
+    /// The `SignedHeaders=` list of an `authorization` header.
+    fn signed_headers(headers: &[(String, String)]) -> &str {
+        let auth = header(headers, "authorization");
+        auth.split("SignedHeaders=")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .unwrap_or_else(|| panic!("no SignedHeaders in {auth}"))
+    }
+
     #[tokio::test]
     async fn signing_produces_an_authorization_header_and_the_payload_hash() {
         let headers = signer()
             .sign(
                 &reqwest::Client::new(),
-                "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse",
-                b"{}",
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
             )
             .await
             .expect("the keys are configured, so IMDS must not be asked");
@@ -208,8 +235,9 @@ mod tests {
         let headers = signer()
             .sign(
                 &reqwest::Client::new(),
-                "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse",
-                b"{}",
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
             )
             .await
             .unwrap();
@@ -226,16 +254,61 @@ mod tests {
         // The signature covers the body — one changed byte must sign
         // differently, or a replayed request with an edited body would pass
         let c = reqwest::Client::new();
-        let url = "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse";
-        let a = signer().sign(&c, url, b"{}").await.unwrap();
-        let b = signer().sign(&c, url, b"{\"x\":1}").await.unwrap();
+        let post = reqwest::Method::POST;
+        let a = signer()
+            .sign(&c, &post, CONVERSE, Some(b"{}"))
+            .await
+            .unwrap();
+        let b = signer()
+            .sign(&c, &post, CONVERSE, Some(b"{\"x\":1}"))
+            .await
+            .unwrap();
 
-        let hash = |h: &[(String, String)]| {
-            h.iter()
-                .find(|(n, _)| n == "x-amz-content-sha256")
-                .map(|(_, v)| v.clone())
-                .unwrap()
-        };
-        assert_ne!(hash(&a), hash(&b));
+        assert_ne!(
+            header(&a, "x-amz-content-sha256"),
+            header(&b, "x-amz-content-sha256")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_json_body_signs_its_content_type() {
+        let headers = signer()
+            .sign(
+                &reqwest::Client::new(),
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            signed_headers(&headers),
+            "content-type;host;x-amz-content-sha256;x-amz-date"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_get_signs_an_empty_payload_and_no_content_type() {
+        // A GET sends neither a body nor a content type, so signing one
+        // would describe a request that is never sent
+        let headers = signer()
+            .sign(
+                &reqwest::Client::new(),
+                &reqwest::Method::GET,
+                "https://bedrock.us-east-1.amazonaws.com/inference-profiles?type=SYSTEM_DEFINED",
+                None,
+            )
+            .await
+            .expect("the keys are configured, so IMDS must not be asked");
+
+        assert_eq!(
+            header(&headers, "x-amz-content-sha256"),
+            // SHA-256 of zero bytes
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            signed_headers(&headers),
+            "host;x-amz-content-sha256;x-amz-date"
+        );
     }
 }

@@ -125,6 +125,9 @@ mod tests {
             status: 503,
             message: "/v1/chat/completions is not available right now".into(),
         }));
-        assert!(!is_protocol_mismatch(&GatewayError::UpstreamAuthError));
+        assert!(!is_protocol_mismatch(&GatewayError::UpstreamAuthError {
+            status: 401,
+            message: "bad key".into(),
+        }));
     }
 }

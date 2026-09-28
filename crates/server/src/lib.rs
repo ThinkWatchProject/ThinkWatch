@@ -4,6 +4,7 @@
 //! as the production `main.rs`.
 
 pub mod app;
+pub mod bedrock_catalog;
 pub mod gateway_adapters;
 pub mod handlers;
 pub mod init;

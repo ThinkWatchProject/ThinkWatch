@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { ComboboxInput } from '@/components/combobox-input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,8 +23,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { AlertCircle, Loader2 } from 'lucide-react';
-import { api, apiPatch, apiPost } from '@/lib/api';
+import { AlertCircle } from 'lucide-react';
+import { api, apiPatch, apiPost, ApiError } from '@/lib/api';
 import { toast } from 'sonner';
 import {
   emptyRouteForm,
@@ -75,6 +76,11 @@ export function RouteEditorDialog({
   const [form, setForm] = useState<RouteFormState>(emptyRouteForm);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  // The provider and upstream model the provider refused on the last
+  // save. While the form still names them, the error offers to create
+  // the route anyway.
+  const [refusedFor, setRefusedFor] = useState<string | null>(null);
+  const routeKey = `${form.provider_id}\u0000${form.upstream_model.trim()}`;
 
   // Reset form on open transition.
   useResetOnChange(`${open}\u0000${route?.id ?? ''}\u0000${targetModel?.model_id ?? ''}`, () => {
@@ -95,14 +101,15 @@ export function RouteEditorDialog({
       setForm(emptyRouteForm);
     }
     setError('');
+    setRefusedFor(null);
   });
 
-  // Pull the upstream-model picker options from the selected provider's
-  // remote catalog. Each lookup costs the backend a call to the
-  // upstream's own model listing, so a provider's list is kept rather
-  // than refetched: switching providers back and forth is instant. A
-  // provider with no /models endpoint, or a temporary fetch failure,
-  // falls back to free input.
+  // Suggest upstream models from the selected provider's remote catalog.
+  // Each lookup costs the backend a call to the upstream's own model
+  // listing, so a provider's list is kept rather than refetched:
+  // switching providers back and forth is instant. The field takes any
+  // name, listed or not — an upstream's listing can leave out a model it
+  // serves, and a provider with no listing has nothing to suggest.
   const pid = form.provider_id;
   const remoteQuery = useQuery({
     queryKey: ['admin', 'providers', pid, 'remote-models'],
@@ -113,9 +120,15 @@ export function RouteEditorDialog({
     select: remoteModelIds,
   });
 
-  const handleSubmit = async (e: FormEvent) => {
+  const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
+    void save(false);
+  };
+
+  /// `force` creates the route even if the provider refuses the model.
+  const save = async (force: boolean) => {
     setError('');
+    setRefusedFor(null);
     // Empty cap → null (unlimited). Non-empty must be a positive integer.
     const parseCap = (s: string): number | null | 'invalid' => {
       const v = s.trim();
@@ -169,6 +182,7 @@ export function RouteEditorDialog({
             notes,
             rpm_cap: rpm,
             tpm_cap: tpm,
+            ...(force ? { force: true } : {}),
           },
         );
         toast.success(t('models.routeAdded'));
@@ -177,6 +191,7 @@ export function RouteEditorDialog({
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
+      if (err instanceof ApiError && err.type === 'model_not_served') setRefusedFor(routeKey);
     } finally {
       setSaving(false);
     }
@@ -197,12 +212,12 @@ export function RouteEditorDialog({
           <div className="space-y-4 py-4">
             {!route && (
               <div className="space-y-2">
-                <Label>{t('models.field.provider')}</Label>
+                <Label htmlFor="route_provider">{t('models.field.provider')}</Label>
                 <Select
                   value={form.provider_id}
                   onValueChange={(v) => setForm({ ...form, provider_id: v })}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="route_provider">
                     <SelectValue placeholder={t('models.selectProvider')} />
                   </SelectTrigger>
                   <SelectContent>
@@ -217,49 +232,16 @@ export function RouteEditorDialog({
             )}
             <div className="space-y-2">
               <Label htmlFor="route_upstream">{t('models.col.upstreamModel')}</Label>
-              {(() => {
-                const remote = remoteQuery.data;
-                // Loading: provider picked, fetch in flight.
-                if (remoteQuery.isLoading) {
-                  return (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground h-9 px-3 border rounded-md">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      {t('models.loadingModels')}
-                    </div>
-                  );
-                }
-                // Fetched a usable list → searchable select.
-                if (remote && remote.length > 0) {
-                  return (
-                    <Select
-                      value={form.upstream_model}
-                      onValueChange={(v) => setForm({ ...form, upstream_model: v })}
-                    >
-                      <SelectTrigger id="route_upstream">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {remote.map((m) => (
-                          <SelectItem key={m} value={m}>
-                            <span className="font-mono text-xs">{m}</span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  );
-                }
-                // No provider chosen yet, or remote list unavailable
-                // — fall back to free input so the user is never
-                // blocked from saving a custom upstream name.
-                return (
-                  <Input
-                    id="route_upstream"
-                    value={form.upstream_model}
-                    onChange={(e) => setForm({ ...form, upstream_model: e.target.value })}
-                    placeholder={t('models.upstreamModelHint')}
-                  />
-                );
-              })()}
+              <ComboboxInput
+                id="route_upstream"
+                value={form.upstream_model}
+                onChange={(v) => setForm({ ...form, upstream_model: v })}
+                options={remoteQuery.data ?? []}
+                loading={remoteQuery.isLoading}
+                loadingText={t('models.loadingModels')}
+                placeholder={t('models.upstreamModelHint')}
+                optionClassName="font-mono text-xs"
+              />
             </div>
             <div className="space-y-2">
               <Label htmlFor="route_label">{t('models.routing.labelLabel')}</Label>
@@ -364,7 +346,25 @@ export function RouteEditorDialog({
             {error && (
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{error}</AlertDescription>
+                <AlertDescription>
+                  <p>{error}</p>
+                  {refusedFor === routeKey && (
+                    // The probe's verdict can be stale, or about its own
+                    // request rather than the model: the admin decides.
+                    <div className="mt-2 space-y-2">
+                      <p className="text-xs">{t('models.createAnywayHint')}</p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={saving}
+                        onClick={() => void save(true)}
+                      >
+                        {t('models.createAnyway')}
+                      </Button>
+                    </div>
+                  )}
+                </AlertDescription>
               </Alert>
             )}
           </div>

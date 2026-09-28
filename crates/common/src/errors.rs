@@ -51,6 +51,12 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
 
+    /// The provider will not serve the model: the import probe found no
+    /// API it answers for it on. A 400 like `BadRequest`, told apart so
+    /// the console can offer to create the route anyway.
+    #[error("{0}")]
+    ModelNotServed(String),
+
     /// Transient dependency failure — DB outage, Redis unreachable,
     /// upstream provider refusing connections, etc. Maps to HTTP 503
     /// so clients can retry with backoff; the message is operator-
@@ -95,6 +101,7 @@ impl IntoResponse for AppError {
                 "Rate limit exceeded".to_string(),
             ),
             AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
+            AppError::ModelNotServed(m) => (StatusCode::BAD_REQUEST, "model_not_served", m.clone()),
             AppError::ServiceUnavailable(m) => {
                 // Log operator-facing reason server-side; clients get a
                 // generic retryable message so we don't leak infra

@@ -19,10 +19,11 @@ pub(crate) struct ProviderMaterials {
     pub(crate) base_url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) api_version: Option<String>,
-    /// `"access_key:secret_key"`, or empty when the provider uses a
-    /// Bedrock API key (an `Authorization` header) or the instance role
-    /// (IMDSv2). Only read by the Bedrock adapter.
-    pub(crate) bedrock_credentials: String,
+    /// Bedrock access keys, `(access_key_id, secret_access_key)`, or
+    /// `None` when the provider uses a Bedrock API key (an
+    /// `Authorization` header) or the instance role (IMDSv2). Only read
+    /// by the Bedrock adapter.
+    pub(crate) aws_keys: Option<(String, String)>,
 }
 
 impl ProviderMaterials {
@@ -65,11 +66,8 @@ impl ProviderMaterials {
                     })
             })
             .unwrap_or_default();
-        let bedrock_credentials = if access_key.is_empty() && secret_key.is_empty() {
-            String::new() // IMDSv2 mode
-        } else {
-            format!("{access_key}:{secret_key}")
-        };
+        // No access key id: IMDSv2 mode
+        let aws_keys = (!access_key.is_empty()).then_some((access_key, secret_key));
 
         Self {
             name: provider.name.clone(),
@@ -81,7 +79,7 @@ impl ProviderMaterials {
                 .get("api_version")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            bedrock_credentials,
+            aws_keys,
         }
     }
 }
@@ -102,14 +100,10 @@ pub(crate) fn build_upstream(m: &ProviderMaterials) -> Arc<Upstream> {
                 .unwrap_or_else(|| AZURE_DEFAULT_API_VERSION.to_string()),
         },
         "bedrock" => {
-            // `access_key:secret_key`, or empty for IMDSv2 — the instance
-            // role then supplies rotating credentials. A provider with a
-            // Bedrock API key in its headers is never signed, whatever
-            // is set here.
-            let (access_key_id, secret_access_key) = match m.bedrock_credentials.split_once(':') {
-                Some((a, s)) if !a.is_empty() => (Some(a.to_string()), Some(s.to_string())),
-                _ => (None, None),
-            };
+            // Without keys the instance role (IMDSv2) supplies rotating
+            // credentials. A provider with a Bedrock API key in its
+            // headers is never signed, whatever is set here.
+            let (access_key_id, secret_access_key) = m.aws_keys.clone().unzip();
             Shape::Bedrock {
                 signer: Arc::new(Signer {
                     // The provider row keeps the region in `base_url`.

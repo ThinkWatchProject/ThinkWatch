@@ -21,12 +21,39 @@ target.
   `Authorization` header is not SigV4-signed; one without it is signed
   as before, with access keys or the instance role. Use a long-term key:
   a short-term one expires within 12 hours.
-- **Test Connection for Bedrock providers with an API key.** It lists the
-  region's foundation models with the key, so a wrong key or a missing
-  permission shows up before any traffic does. Those models are not
-  offered for import: most current models are only served through an
-  inference profile, which that list does not name. Providers signed
-  with access keys or the instance role still have no connection test.
+- **Bedrock models can be imported, and are suggested in the route
+  editor.** A Bedrock provider now lists what it can be routed to: the
+  region's foundation models that can be invoked on demand and answer in
+  text, and the inference profiles AWS defines, such as
+  `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. A model that is only
+  served through an inference profile, as most current models are, is
+  listed under its profiles' ids and not its own. Whether the account
+  may call a model is still checked one model at a time when it is
+  imported. The provider's credential needs
+  `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles`;
+  the `AmazonBedrockLimitedAccess` policy a long-term API key is created
+  with allows both.
+- **Test Connection for Bedrock providers**, however they authenticate:
+  with an API key, access keys or the instance role. It lists the models
+  above, so a wrong credential or a missing permission shows up before
+  any traffic does.
+- **Create anyway, for a route the provider refused.** When the route
+  editor's save is refused because the provider does not serve the
+  model, the error now offers *Create anyway*: the refusal can be
+  stale, or be about the probe's request rather than the model. The
+  route is created, and its `model_route.created` audit row records the
+  refusal it overrode in `refusal_overridden`. On the API, the refusal
+  answers `400` with `error.type` `model_not_served` (it was
+  `bad_request`), and `POST /api/admin/models/{model_id}/routes` takes
+  `"force": true` to create the route anyway.
+
+### Changed
+
+- **The route editor's upstream model field takes any model name.** For
+  a provider that lists its models, the field used to turn into a list
+  to pick from, so a model the listing leaves out could not be routed to
+  from the console. It now suggests the provider's models as you type,
+  and takes whatever is typed.
 
 ### Fixed
 
@@ -46,6 +73,28 @@ target.
 - **Typing into a provider's API key field and clearing it again wiped
   the saved key on save.** The field sent `Bearer ` with nothing after
   it. A cleared field now keeps the saved key, as a blank one always did.
+- **Bedrock models the account may not call were imported anyway.**
+  Bedrock refuses such a model — model access not granted, or an IAM
+  or organization policy that denies it — with a 403, and the import
+  probe read every 403 as a credential problem that says nothing about
+  the model. The route was created and failed on first use. Now, when
+  the region's control plane accepts the same credential, the refusal
+  is recorded as the model's, with AWS's reason, and the model is
+  skipped on import like any other refused one. Once access is granted,
+  re-check the provider's models.
+
+### Security
+
+- **Testing a connection with a saved provider's secrets takes
+  `providers:update`.** The test fills each header left blank with the
+  saved provider's secret and sends it to the URL in the request, and
+  `providers:create` was enough to ask for it. So a user allowed only to
+  create providers could send any saved API key to a server of their
+  own. A test that names a saved provider (`provider_id`) now takes
+  `providers:update`, which lets a user point that provider elsewhere
+  anyway; a test without one still takes `providers:create`. A user with
+  `providers:update` alone can now use Test Connection in the Edit
+  dialog, which used to answer `403`.
 
 ## [2.0.0] — 2026-09-24
 

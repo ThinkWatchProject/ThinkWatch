@@ -32,7 +32,9 @@ use crate::handlers::{
         BatchWeightUpdate, BatchWeightsRequest, CreateModelRequest, RouteHistoryBucket,
         RouteHistoryResponse, UpdateModelRequest,
     },
-    providers::{TestProviderRequest, TestProviderResponse, UpdateProviderRequest},
+    providers::{
+        TestProviderConfig, TestProviderRequest, TestProviderResponse, UpdateProviderRequest,
+    },
     roles::{
         CreateRoleRequest, PermissionDef, RoleHistoryResponse, RoleMember, RoleMembersResponse,
         RoleResponse, RolesListResponse, UpdateRoleRequest,
@@ -230,7 +232,7 @@ use crate::services::team_repository::Team;
             RoleResponse, RolesListResponse, CreateRoleRequest, UpdateRoleRequest,
             PermissionDef, RoleMember, RoleMembersResponse, RoleHistoryResponse,
             // Providers
-            UpdateProviderRequest, TestProviderRequest, TestProviderResponse,
+            UpdateProviderRequest, TestProviderRequest, TestProviderConfig, TestProviderResponse,
             // Models
             ModelRow, CreateModelRequest, UpdateModelRequest,
             BatchWeightUpdate, BatchWeightsRequest,

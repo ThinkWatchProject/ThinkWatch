@@ -44,6 +44,20 @@ async fn mount_family_split_upstream(server: &MockServer) {
         .await;
 }
 
+/// Mount an upstream that refuses `model` on both APIs a custom provider
+/// is probed on, in the words aggregators use.
+async fn mount_refusals(server: &MockServer, model: &str) {
+    for api in ["chat/completions", "responses"] {
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/{api}")))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "message": format!("The model '{model}' does not support the '/v1/{api}' API"),
+            })))
+            .mount(server)
+            .await;
+    }
+}
+
 async fn route_protocol(app: &TestApp, model_id: &str) -> Option<String> {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT upstream_protocol FROM model_routes WHERE model_id = $1",
@@ -115,20 +129,7 @@ async fn a_model_the_upstream_refuses_is_never_imported() {
     let con = admin_session(&app).await;
     let server = MockServer::start().await;
     let refused = unique_name("openai.gpt-refused");
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "message": format!("The model '{refused}' does not support the '/v1/chat/completions' API"),
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "message": format!("The model '{refused}' does not support the '/v1/responses' API"),
-        })))
-        .mount(&server)
-        .await;
+    mount_refusals(&server, &refused).await;
 
     let provider = fixtures::create_provider(
         &app.db,
@@ -257,6 +258,71 @@ async fn rechecking_a_provider_revisits_a_previously_refused_model() {
         probe_verdict(&app, provider.id, model).await.as_deref(),
         Some("ok")
     );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_admin_can_add_a_route_the_upstream_refused_and_it_is_on_record() {
+    // A refusal is a strong hint, not the last word: it can be stale, or
+    // be about the probe's request rather than the model. The admin can
+    // create the route anyway, and the audit log says they did.
+    let app = TestApp::spawn_with_clickhouse().await;
+    let (con, admin) = admin_session_with_user(&app).await;
+    let server = MockServer::start().await;
+    let refused = unique_name("openai.gpt-refused");
+    mount_refusals(&server, &refused).await;
+    let provider = fixtures::create_provider(
+        &app.db,
+        &unique_name("refusing-upstream"),
+        "custom",
+        &server.uri(),
+        None,
+    )
+    .await
+    .unwrap();
+    let model = unique_name("forced");
+    con.post(
+        "/api/admin/models",
+        json!({"model_id": model, "display_name": model}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    let routes = format!("/api/admin/models/{model}/routes");
+    let mut route = json!({"provider_id": provider.id, "upstream_model": refused});
+
+    let resp = con.post(&routes, route.clone()).await.unwrap();
+    resp.assert_status(400);
+    let refusal: Value = resp.json().unwrap();
+    // Told apart from other bad requests, so the console can offer the way past it
+    assert_eq!(refusal["error"]["type"], "model_not_served", "{refusal}");
+
+    route["force"] = json!(true);
+    let resp = con.post(&routes, route).await.unwrap();
+    resp.assert_ok();
+    let created: Value = resp.json().unwrap();
+    assert_eq!(created["upstream_model"], refused.as_str());
+    // No dialect was learned for it
+    assert_eq!(route_protocol(&app, &model).await, None);
+
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    for _ in 0..200 {
+        let rows: Vec<String> = ch
+            .query("SELECT ifNull(detail, '') FROM audit_logs WHERE user_id = ? AND action = ?")
+            .bind(admin.user.id.to_string())
+            .bind("model_route.created")
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if let Some(d) = rows.first() {
+            let detail: Value = serde_json::from_str(d).unwrap();
+            let overridden = detail["refusal_overridden"].as_str().unwrap_or_default();
+            assert!(overridden.contains("does not support"), "{detail}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no model_route.created audit row");
 }
 
 #[ignore = "integration test — run via `make test-it`"]

@@ -39,8 +39,13 @@ pub enum GatewayError {
     /// conservative default downstream.
     #[error("Rate limited by upstream")]
     UpstreamRateLimited { retry_after_secs: Option<u32> },
+    /// Upstream returned 401 or 403: the gateway's credential for this
+    /// route was refused. `status` is which, and `message` the upstream's
+    /// own wording, truncated. Both are for operators and the import
+    /// probe, and stay out of the text the caller sees — an AWS refusal
+    /// names the account and the IAM principal.
     #[error("Authentication failed with upstream")]
-    UpstreamAuthError,
+    UpstreamAuthError { status: u16, message: String },
     /// Local rate limit / budget cap was hit. The String is the rule
     /// label so the response body can tell the caller WHICH limit
     /// fired (e.g. "user requests/5h", "api_key tokens/1d",
@@ -72,7 +77,7 @@ impl GatewayError {
             GatewayError::TransformError(_) => 400,
             GatewayError::NetworkError(_) => 502,
             GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited(_) => 429,
-            GatewayError::UpstreamAuthError => 401,
+            GatewayError::UpstreamAuthError { .. } => 401,
             GatewayError::PolicyBlocked(_) => 403,
         }
     }
@@ -90,7 +95,7 @@ impl GatewayError {
             GatewayError::NetworkError(_) => "NetworkError",
             GatewayError::UpstreamRateLimited { .. } => "UpstreamRateLimited",
             GatewayError::LocalRateLimited(_) => "LocalRateLimited",
-            GatewayError::UpstreamAuthError => "UpstreamAuthError",
+            GatewayError::UpstreamAuthError { .. } => "UpstreamAuthError",
             GatewayError::PolicyBlocked(_) => "PolicyBlocked",
         }
     }

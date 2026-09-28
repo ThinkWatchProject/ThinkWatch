@@ -421,6 +421,8 @@
     "enableAllRoutes": "Enable all",
     "disableAllRoutes": "Disable all",
     "routeAdded": "Route added",
+    "createAnyway": "Create anyway",
+    "createAnywayHint": "The provider refused this model when it was checked. If you know it serves it, create the route anyway.",
     "routeDeleted": "Route deleted",
     "addRouteTitle": "Add Provider Route",
     "editRouteTitle": "Edit Route",

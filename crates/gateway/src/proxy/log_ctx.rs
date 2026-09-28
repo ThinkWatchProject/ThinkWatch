@@ -276,6 +276,12 @@ mod tests {
             GatewayError::UpstreamRateLimited {
                 retry_after_secs: Some(12),
             },
+            GatewayError::UpstreamAuthError {
+                status: 403,
+                message: "bedrock: User: arn:aws:iam::123456789012:user/gateway is not \
+                          authorized to perform: bedrock:InvokeModel"
+                    .into(),
+            },
             GatewayError::ProviderError("boom".into()),
         ] {
             let detail = error_detail("m", Some("p"), 1, &err);
