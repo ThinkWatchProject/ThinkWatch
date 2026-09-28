@@ -11,6 +11,35 @@ target.
 
 ## [Unreleased]
 
+### Added
+
+- **Bedrock providers can authenticate with a Bedrock API key.** Pick
+  *Bedrock API Key* as the authentication mode and paste the key AWS
+  generated. It is kept like any other provider's API key, as an
+  encrypted `Authorization: Bearer` header, and replaced in the
+  provider's Edit dialog. A Bedrock provider that sends an
+  `Authorization` header is not SigV4-signed; one without it is signed
+  as before, with access keys or the instance role. Use a long-term key:
+  a short-term one expires within 12 hours.
+- **Test Connection for Bedrock providers with an API key.** It lists the
+  region's foundation models with the key, so a wrong key or a missing
+  permission shows up before any traffic does. Those models are not
+  offered for import: most current models are only served through an
+  inference profile, which that list does not name. Providers signed
+  with access keys or the instance role still have no connection test.
+
+### Fixed
+
+- **Bedrock providers could not be created or edited in the console.**
+  The region was checked as a URL, so saving failed with
+  `400 Invalid URL`. A Bedrock provider's `base_url` is now checked as an
+  AWS region such as `us-east-1`, and anything else is refused, since the
+  host is built from it. A provider saved with a URL there never reached
+  Bedrock; set its region in the Edit dialog.
+- **Typing into a provider's API key field and clearing it again wiped
+  the saved key on save.** The field sent `Bearer ` with nothing after
+  it. A cleared field now keeps the saved key, as a blank one always did.
+
 ## [2.0.0] — 2026-09-24
 
 Callers now get errors in their own API's format, and an upstream that

@@ -219,6 +219,31 @@ pub fn validate_url(url_str: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Checks an AWS region code such as `us-east-1` or `us-gov-west-1`.
+///
+/// Bedrock providers keep a region where other providers keep a URL, and
+/// the host is built from it: `bedrock-runtime.{region}.amazonaws.com`.
+/// So this is a host check as much as a format one — anything beyond
+/// dash-joined lowercase words and a trailing number could carry the
+/// request, and the credential riding on it, to another host.
+pub fn validate_aws_region(region: &str) -> Result<(), AppError> {
+    let valid = region.rsplit_once('-').is_some_and(|(name, number)| {
+        !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
+            && name.split('-').count() >= 2
+            && name
+                .split('-')
+                .all(|word| !word.is_empty() && word.bytes().all(|b| b.is_ascii_lowercase()))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "Invalid AWS region: expected one like us-east-1".into(),
+        ))
+    }
+}
+
 /// Aggregate "do not connect to" check covering loopback, unspecified
 /// (0.0.0.0 / ::), private ranges, link-local, ULA, IPv4-mapped IPv6,
 /// 6to4, and IPv6 multicast.
@@ -416,6 +441,36 @@ mod tests {
     #[test]
     fn validate_url_rejects_no_host() {
         assert!(validate_url("http://").is_err());
+    }
+
+    #[test]
+    fn validate_aws_region_accepts_region_codes() {
+        for region in [
+            "us-east-1",
+            "eu-central-2",
+            "ap-southeast-7",
+            "us-gov-west-1",
+        ] {
+            assert!(validate_aws_region(region).is_ok(), "{region}");
+        }
+    }
+
+    #[test]
+    fn validate_aws_region_rejects_anything_that_could_change_the_host() {
+        for bad in [
+            "",
+            "us-east",
+            "useast1",
+            "US-EAST-1",
+            "us--east-1",
+            "-us-east-1",
+            "us-east-1.evil.example",
+            "evil.example#",
+            "evil.example/x?-1",
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+        ] {
+            assert!(validate_aws_region(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -336,6 +336,8 @@
     "addHeader": "Add Header",
     "awsAuthMode": "Authentication Mode",
     "awsAuthAkSk": "Access Key / Secret Key",
+    "awsAuthApiKey": "Bedrock API Key",
+    "awsApiKeyHint": "Use a long-term key (it starts with ABSK): a short-term one expires within 12 hours. Long-term keys expire too, so replace it under Edit before then.",
     "awsAuthImdsv2": "EC2 Instance Role (IMDSv2)",
     "awsImdsv2Hint": "Credentials are automatically obtained from the EC2 instance metadata service. Make sure the instance has an IAM role with Bedrock permissions.",
     "testConnection": "Test Connection",

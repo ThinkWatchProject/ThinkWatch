@@ -42,10 +42,24 @@ const authHeaderKey: Record<string, string | null> = {
   custom: null,
 };
 
-const wrapAuthValue = (type: string, token: string) =>
-  type === 'openai' ? `Bearer ${token}` : token;
-const unwrapAuthValue = (type: string, value: string) =>
-  type === 'openai' ? value.replace(/^Bearer\s*/i, '') : value;
+type BedrockAuthMode = 'aksk' | 'apikey' | 'imdsv2';
+
+/**
+ * The header an API key field edits, if the provider has one. A Bedrock
+ * API key is a bearer token in `Authorization`, and a Bedrock provider
+ * that sends one is not SigV4-signed, so Bedrock has the field only when
+ * it authenticates that way.
+ */
+const apiKeyHeaderFor = (type: string, bedrockApiKey: boolean) =>
+  type === 'bedrock' ? (bedrockApiKey ? 'Authorization' : null) : (authHeaderKey[type] ?? null);
+
+// `Authorization` carries a bearer token; the other auth headers take the
+// bare key. An empty field stays empty rather than becoming "Bearer " — a
+// blank value is what keeps a saved secret on edit.
+const wrapAuthValue = (header: string, token: string) =>
+  header === 'Authorization' && token ? `Bearer ${token}` : token;
+const unwrapAuthValue = (header: string, value: string) =>
+  header === 'Authorization' ? value.replace(/^Bearer\s*/i, '') : value;
 
 const defaultBaseUrl: Record<string, string> = {
   openai: 'https://api.openai.com',
@@ -53,6 +67,11 @@ const defaultBaseUrl: Record<string, string> = {
   google: 'https://generativelanguage.googleapis.com',
   bedrock: 'us-east-1',
 };
+
+const baseUrlLabel = (t: (key: string) => string, type: string) =>
+  type === 'bedrock' ? t('providers.awsRegion') :
+  type === 'azure_openai' ? t('providers.azureEndpoint') :
+  t('providers.baseUrl');
 
 function TestResultPanel({ testResult }: { testResult: TestResult | null }) {
   const { t } = useTranslation();
@@ -171,13 +190,26 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
   const [providerType, setProviderType] = useState('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [headers, setHeaders] = useState<[string, string][]>(defaultHeadersForType('openai'));
-  const [bedrockAuthMode, setBedrockAuthMode] = useState<'aksk' | 'imdsv2'>('aksk');
+  const [bedrockAuthMode, setBedrockAuthMode] = useState<BedrockAuthMode>('aksk');
   const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
   const [awsSecretKey, setAwsSecretKey] = useState('');
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  const apiKeyHeader = apiKeyHeaderFor(providerType, bedrockAuthMode === 'apikey');
+  const effectiveBaseUrl = baseUrl || defaultBaseUrl[providerType] || '';
+  // A connection test sends the headers as they are and signs nothing,
+  // so only a Bedrock API key can be tested.
+  const canTest = providerType !== 'bedrock' || bedrockAuthMode === 'apikey';
+
+  const changeBedrockAuthMode = (mode: BedrockAuthMode) => {
+    setBedrockAuthMode(mode);
+    // A Bedrock provider that sends `Authorization` is not signed, so the
+    // key has to go when API key mode does.
+    if (mode !== 'apikey') setHeaders(headers.filter(([k]) => k !== 'Authorization'));
+  };
 
   const resetForm = () => {
     setName('');
@@ -201,7 +233,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
         name,
         display_name: displayName,
         provider_type: providerType,
-        base_url: baseUrl || defaultBaseUrl[providerType] || '',
+        base_url: effectiveBaseUrl,
         headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
         ...(providerType === 'bedrock' && bedrockAuthMode === 'aksk' ? {
           config: { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey },
@@ -242,7 +274,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
           <div className="space-y-2">
             <Label htmlFor="prov-type">{t('providers.providerType')}</Label>
             <Select value={providerType} onValueChange={(v) => { setProviderType(v ?? 'openai'); setHeaders(defaultHeadersForType(v ?? 'openai')); }}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger id="prov-type"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="openai">OpenAI</SelectItem>
                 <SelectItem value="anthropic">Anthropic</SelectItem>
@@ -254,11 +286,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="prov-url">
-              {providerType === 'bedrock' ? t('providers.awsRegion') :
-               providerType === 'azure_openai' ? t('providers.azureEndpoint') :
-               t('providers.baseUrl')}
-            </Label>
+            <Label htmlFor="prov-url">{baseUrlLabel(t, providerType)}</Label>
             <Input id="prov-url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={
               providerType === 'azure_openai' ? 'https://your-resource.openai.azure.com' :
               providerType === 'bedrock' ? 'us-east-1' :
@@ -267,36 +295,15 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
               'https://api.openai.com'
             } />
           </div>
-          {authHeaderKey[providerType] && (
-            <div className="space-y-2">
-              <Label htmlFor="prov-apikey">{t('providers.apiKey')}</Label>
-              <Input
-                id="prov-apikey"
-                type="password"
-                autoComplete="off"
-                value={unwrapAuthValue(providerType, headers.find(([k]) => k === authHeaderKey[providerType])?.[1] ?? '')}
-                onChange={(e) => {
-                  const hk = authHeaderKey[providerType]!;
-                  const wrapped = wrapAuthValue(providerType, e.target.value);
-                  const exists = headers.some(([k]) => k === hk);
-                  if (exists) {
-                    setHeaders(headers.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
-                  } else {
-                    setHeaders([[hk, wrapped], ...headers]);
-                  }
-                }}
-                placeholder={providerType === 'openai' ? 'sk-...' : t('providers.apiKey')}
-              />
-            </div>
-          )}
           {providerType === 'bedrock' && (
             <>
               <div className="space-y-2">
-                <Label>{t('providers.awsAuthMode')}</Label>
-                <Select value={bedrockAuthMode} onValueChange={(v) => setBedrockAuthMode(v as 'aksk' | 'imdsv2')}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                <Label htmlFor="prov-aws-auth">{t('providers.awsAuthMode')}</Label>
+                <Select value={bedrockAuthMode} onValueChange={(v) => changeBedrockAuthMode(v as BedrockAuthMode)}>
+                  <SelectTrigger id="prov-aws-auth"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="aksk">{t('providers.awsAuthAkSk')}</SelectItem>
+                    <SelectItem value="apikey">{t('providers.awsAuthApiKey')}</SelectItem>
                     <SelectItem value="imdsv2">{t('providers.awsAuthImdsv2')}</SelectItem>
                   </SelectContent>
                 </Select>
@@ -318,6 +325,35 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
               )}
             </>
           )}
+          {apiKeyHeader && (
+            <div className="space-y-2">
+              <Label htmlFor="prov-apikey">{t('providers.apiKey')}</Label>
+              <Input
+                id="prov-apikey"
+                type="password"
+                autoComplete="off"
+                required={providerType === 'bedrock'}
+                value={unwrapAuthValue(apiKeyHeader, headers.find(([k]) => k === apiKeyHeader)?.[1] ?? '')}
+                onChange={(e) => {
+                  const wrapped = wrapAuthValue(apiKeyHeader, e.target.value);
+                  const exists = headers.some(([k]) => k === apiKeyHeader);
+                  if (exists) {
+                    setHeaders(headers.map(([k, v]) => k === apiKeyHeader ? [k, wrapped] : [k, v]));
+                  } else {
+                    setHeaders([[apiKeyHeader, wrapped], ...headers]);
+                  }
+                }}
+                placeholder={
+                  providerType === 'openai' ? 'sk-...' :
+                  providerType === 'bedrock' ? 'ABSK...' :
+                  t('providers.apiKey')
+                }
+              />
+              {providerType === 'bedrock' && (
+                <p className="text-xs text-muted-foreground">{t('providers.awsApiKeyHint')}</p>
+              )}
+            </div>
+          )}
           <div className="space-y-2">
             <Label>{t('providers.headers')}</Label>
             <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>
@@ -335,11 +371,13 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
             </Alert>
           )}
           <DialogFooter>
-            <TestConnectionButton
-              testing={testing}
-              disabled={testing || !baseUrl}
-              onClick={() => handleTestConnection(providerType, baseUrl, headers, setTesting, setTestResult)}
-            />
+            {canTest && (
+              <TestConnectionButton
+                testing={testing}
+                disabled={testing || !effectiveBaseUrl}
+                onClick={() => handleTestConnection(providerType, effectiveBaseUrl, headers, setTesting, setTestResult)}
+              />
+            )}
             <Button type="submit" disabled={submitting}>
               {submitting ? (
                 <><Loader2 className="mr-1 h-4 w-4 animate-spin" />{t('providers.creating')}</>
@@ -424,6 +462,12 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
     }
   };
 
+  const type = provider?.provider_type ?? '';
+  // A Bedrock provider has an API key when it sends `Authorization`.
+  const apiKeyHeader = apiKeyHeaderFor(type, editHeaders.some(([k]) => k === 'Authorization'));
+  // The test signs nothing, so a Bedrock provider without a key can't be tested.
+  const canTest = type !== 'bedrock' || apiKeyHeader !== null;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -437,28 +481,28 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
             <Input value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} />
           </div>
           <div className="space-y-2">
-            <Label>{t('providers.baseUrl')}</Label>
-            <Input value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} />
+            <Label htmlFor="edit-prov-url">{baseUrlLabel(t, type)}</Label>
+            <Input id="edit-prov-url" value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} />
           </div>
-          {provider && authHeaderKey[provider.provider_type] && (
+          {apiKeyHeader && (
             <div className="space-y-2">
-              <Label>{t('providers.apiKey')}</Label>
+              <Label htmlFor="edit-prov-apikey">{t('providers.apiKey')}</Label>
               <Input
+                id="edit-prov-apikey"
                 type="password"
                 autoComplete="off"
-                value={unwrapAuthValue(provider.provider_type, editHeaders.find(([k]) => k === authHeaderKey[provider.provider_type])?.[1] ?? '')}
+                value={unwrapAuthValue(apiKeyHeader, editHeaders.find(([k]) => k === apiKeyHeader)?.[1] ?? '')}
                 onChange={(e) => {
-                  const hk = authHeaderKey[provider.provider_type]!;
-                  const wrapped = wrapAuthValue(provider.provider_type, e.target.value);
-                  const exists = editHeaders.some(([k]) => k === hk);
+                  const wrapped = wrapAuthValue(apiKeyHeader, e.target.value);
+                  const exists = editHeaders.some(([k]) => k === apiKeyHeader);
                   if (exists) {
-                    setEditHeaders(editHeaders.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                    setEditHeaders(editHeaders.map(([k, v]) => k === apiKeyHeader ? [k, wrapped] : [k, v]));
                   } else {
-                    setEditHeaders([[hk, wrapped], ...editHeaders]);
+                    setEditHeaders([[apiKeyHeader, wrapped], ...editHeaders]);
                   }
                 }}
                 placeholder={
-                  editStoredKeys.has(authHeaderKey[provider.provider_type]!)
+                  editStoredKeys.has(apiKeyHeader)
                     ? t('providers.headerValueStored')
                     : t('providers.apiKey')
                 }
@@ -489,11 +533,13 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <TestConnectionButton
-            testing={testing}
-            disabled={testing || !editBaseUrl}
-            onClick={() => handleTestConnection(provider!.provider_type, editBaseUrl, editHeaders, setTesting, setTestResult, provider!.id)}
-          />
+          {canTest && (
+            <TestConnectionButton
+              testing={testing}
+              disabled={testing || !editBaseUrl}
+              onClick={() => handleTestConnection(provider!.provider_type, editBaseUrl, editHeaders, setTesting, setTestResult, provider!.id)}
+            />
+          )}
           <Button onClick={handleEdit} disabled={editSaving}>
             {editSaving ? t('common.loading') : t('common.save')}
           </Button>

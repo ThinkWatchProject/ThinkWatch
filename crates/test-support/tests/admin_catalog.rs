@@ -365,6 +365,66 @@ async fn a_provider_edit_forgets_learned_protocols_and_a_delete_drops_its_routes
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
+async fn a_bedrock_provider_takes_a_region_and_an_api_key() {
+    // The production URL check, which would refuse a bare region: so
+    // this also shows Bedrock never goes through it.
+    let app = TestApp::spawn().await;
+    let (con, _) = admin_session_with_user(&app).await;
+    let bedrock = |base_url: &str| {
+        json!({
+            "name": unique_name("bedrock"),
+            "display_name": "Bedrock",
+            "provider_type": "bedrock",
+            "base_url": base_url,
+            "headers": [{"key": "Authorization", "value": "Bearer ABSK-test-key"}],
+        })
+    };
+
+    let resp = con
+        .post("/api/admin/providers", bedrock("us-east-1"))
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let created: Value = resp.json().unwrap();
+    // The key is a header like any other provider's: stored encrypted,
+    // read back redacted.
+    let header = &created["config_json"]["headers"][0];
+    assert_eq!(header["key"], "Authorization");
+    assert_eq!(header["value"], "");
+    assert_eq!(header["encrypted"], true);
+    let provider = format!("/api/admin/providers/{}", created["id"].as_str().unwrap());
+
+    con.patch(&provider, json!({"base_url": "eu-west-1"}))
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // The host is built from the region, so nothing else passes.
+    for bad in [
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "us-east-1.evil.example",
+        "evil.example#",
+    ] {
+        con.post("/api/admin/providers", bedrock(bad))
+            .await
+            .unwrap()
+            .assert_status(400);
+        con.patch(&provider, json!({"base_url": bad}))
+            .await
+            .unwrap()
+            .assert_status(400);
+        con.post(
+            "/api/admin/providers/test",
+            json!({"provider_type": "bedrock", "base_url": bad}),
+        )
+        .await
+        .unwrap()
+        .assert_status(400);
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
 async fn the_platform_price_baseline_is_read_and_patched() {
     let app = TestApp::spawn().await;
     let (con, _) = admin_session_with_user(&app).await;

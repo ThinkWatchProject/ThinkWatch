@@ -203,6 +203,22 @@ fn encrypt_aws_secret_in_config(
     Ok(())
 }
 
+/// Check a provider's `base_url` before it is stored or called.
+///
+/// Bedrock keeps an AWS region there instead of a URL, and builds its
+/// host from it, so it gets a region check rather than the URL one.
+fn validate_base_url(
+    provider_type: &str,
+    base_url: &str,
+    validate_url: &think_watch_common::validation::UrlValidator,
+) -> Result<(), AppError> {
+    if provider_type == "bedrock" {
+        think_watch_common::validation::validate_aws_region(base_url)
+    } else {
+        validate_url(base_url)
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/admin/providers",
@@ -253,7 +269,7 @@ pub async fn create_provider(
     }
 
     // SSRF prevention: validate base_url
-    (state.url_validator)(&req.base_url)?;
+    validate_base_url(&req.provider_type, &req.base_url, &state.url_validator)?;
 
     // Store unified headers in config_json, encrypting every header
     // value at rest. AWS bedrock secrets (when nested in `config`) get
@@ -289,6 +305,7 @@ pub async fn create_provider(
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateProviderRequest {
     pub display_name: Option<String>,
+    /// The upstream's URL, or for Bedrock its AWS region (`us-east-1`).
     pub base_url: Option<String>,
     /// Unified request headers (auth + custom + identity templates).
     pub headers: Option<Vec<ProviderHeader>>,
@@ -330,7 +347,7 @@ pub async fn update_provider(
     let base_url = req.base_url.as_deref().unwrap_or(&existing.base_url);
 
     if req.base_url.is_some() {
-        (state.url_validator)(base_url)?;
+        validate_base_url(&existing.provider_type, base_url, &state.url_validator)?;
     }
 
     // Update headers in config_json if provided. Encrypt every header
@@ -467,6 +484,7 @@ pub async fn delete_provider(
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct TestProviderRequest {
     pub provider_type: String,
+    /// The upstream's URL, or for Bedrock its AWS region (`us-east-1`).
     pub base_url: String,
     /// Unified request headers (auth + custom).
     #[serde(default)]
@@ -553,16 +571,7 @@ pub(crate) async fn run_provider_test(
     if req.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));
     }
-    validate(&req.base_url)?;
-
-    // Provider-specific probe URL. We always hit a cheap, read-only
-    // endpoint that requires auth so a wrong key is detected too.
-    let path = match req.provider_type.as_str() {
-        "google" => "/v1beta/models",
-        // anthropic / openai / azure / custom — all answer /v1/models
-        _ => "/v1/models",
-    };
-    let url = tw_dialect::url::upstream_url(&req.base_url, path, None);
+    let url = probe_url(&req.provider_type, &req.base_url, validate)?;
 
     // `client` is now passed in from `test_provider` — uses the
     // shared http_client so this endpoint inherits the central
@@ -588,10 +597,18 @@ pub(crate) async fn run_provider_test(
                 // Extract model list from standard shapes:
                 // OpenAI/Anthropic: { "data": [{ "id": "..." }, ...] }
                 // Google:           { "models": [{ "name": "models/..." }, ...] }
-                let models_array = body
-                    .get("data")
-                    .and_then(|v| v.as_array())
-                    .or_else(|| body.get("models").and_then(|v| v.as_array()));
+                //
+                // Bedrock's list is left unread. It names base model ids,
+                // and most current models are only served through an
+                // inference profile, so it would offer the route editor
+                // ids that fail when called.
+                let models_array = if req.provider_type == "bedrock" {
+                    None
+                } else {
+                    body.get("data")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.get("models").and_then(|v| v.as_array()))
+                };
 
                 let (model_count, models) = if let Some(arr) = models_array {
                     let ids: Vec<String> = arr
@@ -623,6 +640,8 @@ pub(crate) async fn run_provider_test(
                 let upstream_err = body
                     .get("error")
                     .and_then(|e| e.get("message"))
+                    // AWS puts it at the top level
+                    .or_else(|| body.get("message").or_else(|| body.get("Message")))
                     .and_then(|m| m.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string());
@@ -645,6 +664,26 @@ pub(crate) async fn run_provider_test(
             models: None,
         })),
     }
+}
+
+/// Where a connection test goes: the provider's model listing, a cheap,
+/// read-only endpoint that requires auth, so a wrong key is detected too.
+///
+/// Bedrock's listing is its control plane's, and the test sends the
+/// provider's headers there as they are, unsigned. So only a Bedrock API
+/// key can be tested; access keys and the instance role are not.
+fn probe_url(
+    provider_type: &str,
+    base_url: &str,
+    validate: &think_watch_common::validation::UrlValidator,
+) -> Result<String, AppError> {
+    validate_base_url(provider_type, base_url, validate)?;
+    Ok(match provider_type {
+        "bedrock" => format!("https://bedrock.{base_url}.amazonaws.com/foundation-models"),
+        "google" => tw_dialect::url::upstream_url(base_url, "/v1beta/models", None),
+        // anthropic / openai / azure / custom — all answer /v1/models
+        _ => tw_dialect::url::upstream_url(base_url, "/v1/models", None),
+    })
 }
 
 #[cfg(test)]
@@ -749,6 +788,36 @@ mod tests {
         let first = cfg["aws_secret_access_key"].clone();
         encrypt_aws_secret_in_config(&mut cfg, key).unwrap();
         assert_eq!(cfg["aws_secret_access_key"], first);
+    }
+
+    /// A URL check that fails if it is asked at all.
+    fn refuse_urls() -> think_watch_common::validation::UrlValidator {
+        std::sync::Arc::new(|url: &str| {
+            Err(AppError::BadRequest(format!("URL check asked about {url}")))
+        })
+    }
+
+    #[test]
+    fn a_bedrock_test_goes_to_the_regions_model_listing() {
+        // A region is not a URL, so the URL check is never asked
+        assert_eq!(
+            probe_url("bedrock", "eu-west-1", &refuse_urls()).unwrap(),
+            "https://bedrock.eu-west-1.amazonaws.com/foundation-models"
+        );
+    }
+
+    #[test]
+    fn a_bedrock_test_refuses_anything_but_a_region() {
+        let allow_urls: think_watch_common::validation::UrlValidator =
+            std::sync::Arc::new(|_: &str| Ok(()));
+        for bad in ["https://bedrock.us-east-1.amazonaws.com", "evil.example#"] {
+            assert!(probe_url("bedrock", bad, &allow_urls).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn other_providers_still_go_through_the_url_check() {
+        assert!(probe_url("openai", "https://api.openai.com", &refuse_urls()).is_err());
     }
 
     #[test]

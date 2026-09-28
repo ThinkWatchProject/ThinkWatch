@@ -250,6 +250,7 @@ pub struct CreateProviderRequest {
     pub name: String,
     pub display_name: String,
     pub provider_type: String,
+    /// The upstream's URL, or for Bedrock its AWS region (`us-east-1`).
     pub base_url: String,
     /// Unified request headers (auth + custom + identity templates).
     /// Stored in config_json.headers as `[{key, value}]`.
