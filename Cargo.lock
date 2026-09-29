@@ -1779,7 +1779,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2731,7 +2731,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2769,7 +2769,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -4670,8 +4670,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.54.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fbedrock-shared-crate#f44dc980b57113c89e590525bb20a91b1cb21713"
+version = "0.55.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.55.0#5d3db23d530ededa14e0bc991eb53766f054f7b3"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4685,16 +4685,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.54.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fbedrock-shared-crate#f44dc980b57113c89e590525bb20a91b1cb21713"
+version = "0.55.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.55.0#5d3db23d530ededa14e0bc991eb53766f054f7b3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.54.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fbedrock-shared-crate#f44dc980b57113c89e590525bb20a91b1cb21713"
+version = "0.55.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.55.0#5d3db23d530ededa14e0bc991eb53766f054f7b3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4702,8 +4702,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.54.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fbedrock-shared-crate#f44dc980b57113c89e590525bb20a91b1cb21713"
+version = "0.55.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.55.0#5d3db23d530ededa14e0bc991eb53766f054f7b3"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -5114,7 +5114,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
