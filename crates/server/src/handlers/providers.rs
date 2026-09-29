@@ -655,10 +655,10 @@ pub(crate) async fn run_provider_test(
                 status: 200,
                 models: Some(models),
             },
-            Err(crate::bedrock_catalog::Failure::Status { status, message }) => {
-                Listing::Refused { status, message }
-            }
-            Err(crate::bedrock_catalog::Failure::Request(e)) => Listing::Failed(e),
+            Err(tw_bedrock::catalog::Failure::Status {
+                status, message, ..
+            }) => Listing::Refused { status, message },
+            Err(tw_bedrock::catalog::Failure::Request(e)) => Listing::Failed(e),
         }
     } else {
         let url = probe_url(&m.provider_type, &m.base_url, validate)?;

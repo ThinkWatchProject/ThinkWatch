@@ -1,13 +1,17 @@
-//! AWS SigV4 signing.
+//! AWS SigV4 signing for a Bedrock provider.
 //!
 //! A Bedrock provider without an API key has no bearer token to send:
 //! every request is signed over its method, URL, time and the hash of its
 //! body. So **signing has to happen after the body is final** — change one
 //! byte and the signature no longer matches.
+//!
+//! The signing itself is `tw_bedrock::sign`, shared with the desktop
+//! gateway. What stays here is where the credentials come from: the keys
+//! on the provider row, or else the instance role through IMDSv2.
 
 use std::time::{Duration, SystemTime};
 
-use aws_credential_types::Credentials;
+use tw_bedrock::Credentials;
 
 /// What went wrong while signing.
 #[derive(Debug)]
@@ -131,62 +135,16 @@ impl Signer {
         url: &str,
         body: Option<&[u8]>,
     ) -> Result<Vec<(String, String)>, SignError> {
-        use aws_sigv4::http_request::{
-            PayloadChecksumKind, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
-            sign,
-        };
-        use aws_sigv4::sign::v4;
-
         let credentials = self.credentials(client).await?;
-
-        let identity = credentials.into();
-        let mut settings = SigningSettings::default();
-        settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
-        settings.signature_location = SignatureLocation::Headers;
-
-        let params = v4::SigningParams::builder()
-            .identity(&identity)
-            .region(&self.region)
-            .name("bedrock")
-            .time(SystemTime::now())
-            .settings(settings)
-            .build()
-            .map_err(|e| SignError::Signing(e.to_string()))?;
-
-        let content_type = body.map(|_| ("content-type", "application/json"));
-        let signable = SignableRequest::new(
+        tw_bedrock::sign::sign(
+            &credentials,
+            &self.region,
             method.as_str(),
             url,
-            content_type.into_iter(),
-            SignableBody::Bytes(body.unwrap_or_default()),
+            body,
+            SystemTime::now(),
         )
-        .map_err(|e| SignError::Signing(e.to_string()))?;
-
-        let (instructions, _signature) = sign(signable, &params.into())
-            .map_err(|e| SignError::Signing(e.to_string()))?
-            .into_parts();
-
-        // The signing library only writes onto an http request, so build an empty one to catch it
-        let mut req = http_1x::Request::builder().method(method.as_str()).uri(url);
-        if let Some((name, value)) = content_type {
-            req = req.header(name, value);
-        }
-        let mut req = req
-            .body(())
-            .map_err(|e| SignError::Signing(e.to_string()))?;
-        instructions.apply_to_request_http1x(&mut req);
-
-        // Only the signed ones. **The other headers belong to the caller** —
-        // returning all of them would overwrite what it set itself
-        Ok(req
-            .headers()
-            .iter()
-            .filter(|(n, _)| {
-                let n = n.as_str();
-                n == "authorization" || n.starts_with("x-amz-")
-            })
-            .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or_default().to_string()))
-            .collect())
+        .map_err(|e| SignError::Signing(e.0))
     }
 
     /// The credentials this upstream signs with.
@@ -195,13 +153,11 @@ impl Signer {
             Credential::Keys {
                 access_key_id,
                 secret_access_key,
-            } => Ok(Credentials::new(
-                access_key_id,
-                secret_access_key,
-                None,
-                None,
-                "think-watch",
-            )),
+            } => Ok(Credentials {
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: None,
+            }),
             Credential::Unusable(why) => Err(SignError::Credentials(why.clone())),
             Credential::InstanceRole => {
                 let mut lease = self.lease.lock().await;
@@ -291,13 +247,11 @@ impl Signer {
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(SystemTime::from);
         Ok((
-            Credentials::new(
-                field("AccessKeyId")?,
-                field("SecretAccessKey")?,
-                creds["Token"].as_str().map(str::to_string),
-                None,
-                "imdsv2",
-            ),
+            Credentials {
+                access_key_id: field("AccessKeyId")?.to_string(),
+                secret_access_key: field("SecretAccessKey")?.to_string(),
+                session_token: creds["Token"].as_str().map(str::to_string),
+            },
             expires,
         ))
     }
@@ -498,8 +452,8 @@ mod tests {
         let c = reqwest::Client::new();
         for _ in 0..3 {
             let got = s.credentials(&c).await.unwrap();
-            assert_eq!(got.access_key_id(), "ASIAROLE");
-            assert_eq!(got.session_token(), Some("role-token"));
+            assert_eq!(got.access_key_id, "ASIAROLE");
+            assert_eq!(got.session_token.as_deref(), Some("role-token"));
         }
         assert_eq!(
             trips.load(Ordering::SeqCst),

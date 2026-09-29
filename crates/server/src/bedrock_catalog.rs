@@ -1,48 +1,27 @@
 //! The models a Bedrock provider can be routed to.
 //!
-//! Bedrock's list of foundation models is not that list on its own. It
-//! names base model ids, and most current models — Claude 3.7 and later,
-//! among others — are not served under their base id at all: they are
-//! invoked through an inference profile such as
-//! `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, which spreads the calls
-//! over several regions. So the catalog is the union of two listings on the
-//! region's control plane, `bedrock.{region}.amazonaws.com`:
+//! The catalog itself — which listings make it up, how they page, how each
+//! request is authenticated — is `tw_bedrock::catalog`, shared with the
+//! desktop gateway: the region's foundation models that can be invoked on
+//! demand and answer in text, and the inference profiles AWS defines. What
+//! this side adds is the provider: its headers, and, when it signs, its
+//! credentials — the keys on its row, or else the instance role.
 //!
-//! - the foundation models that can be invoked on demand and answer in
-//!   text (`ListFoundationModels`), and
-//! - the inference profiles AWS defines (`ListInferenceProfiles`).
-//!
-//! Neither says whether *this* account may call a model, or over which API.
-//! The protocol probe settles that, one model at a time, when it is
-//! imported.
+//! Neither listing says whether *this* account may call a model, or over
+//! which API. The protocol probe settles that, one model at a time, when it
+//! is imported.
 
-use std::collections::BTreeSet;
-
-use serde_json::Value;
 use think_watch_common::errors::AppError;
 use think_watch_gateway::proxy::transport::Upstream;
-
-/// The most pages of inference profiles one listing reads. A page holds up
-/// to 1000 and a region has a few hundred profiles at most, so only a
-/// listing that never ends gets here.
-const MAX_PROFILE_PAGES: usize = 10;
+use tw_bedrock::Credentials;
+use tw_bedrock::catalog::{Auth, Failure, Profiles};
 
 /// The region's control plane, where Bedrock lists its models.
 ///
 /// The host is built from the region, so nothing but a region is accepted.
 pub(crate) fn endpoint(region: &str) -> Result<String, AppError> {
     think_watch_common::validation::validate_aws_region(region)?;
-    Ok(format!("https://bedrock.{region}.amazonaws.com"))
-}
-
-/// Why the catalog could not be listed.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Failure {
-    /// AWS answered, and refused.
-    Status { status: u16, message: String },
-    /// Nothing to read: the request could not be signed or sent, or what
-    /// came back was not a listing.
-    Request(String),
+    Ok(tw_bedrock::endpoint::control_base(region))
 }
 
 /// Every model id `upstream` can be routed to, sorted.
@@ -50,20 +29,19 @@ pub(crate) enum Failure {
 /// `endpoint` is [`endpoint`] for the provider's region. Requests are
 /// authenticated as the gateway authenticates the provider's traffic: its
 /// own headers, signed unless one of them is a Bedrock API key.
-///
-/// Both listings have to succeed. Base ids alone would offer exactly the
-/// ids that most current models are not served under.
 pub(crate) async fn list_models(
     client: &reqwest::Client,
     endpoint: &str,
     upstream: &Upstream,
 ) -> Result<Vec<String>, Failure> {
-    let (models, profiles) = tokio::try_join!(
-        foundation_models(client, endpoint, upstream),
-        inference_profiles(client, endpoint, upstream),
-    )?;
-    let ids: BTreeSet<String> = models.into_iter().chain(profiles).collect();
-    Ok(ids.into_iter().collect())
+    let credentials = credentials(client, upstream).await?;
+    tw_bedrock::catalog::list_models(
+        client,
+        endpoint,
+        &auth(upstream, credentials.as_ref()),
+        Profiles::SystemDefined,
+    )
+    .await
 }
 
 /// Does the control plane accept `upstream`'s credential? One small
@@ -74,134 +52,39 @@ pub(crate) async fn accepts_credential(
     endpoint: &str,
     upstream: &Upstream,
 ) -> bool {
-    let Ok(url) = listing_url(
-        endpoint,
-        "inference-profiles",
-        &[("type", "SYSTEM_DEFINED"), ("maxResults", "1")],
-    ) else {
+    let Ok(credentials) = credentials(client, upstream).await else {
         return false;
     };
-    get(client, upstream, url).await.is_ok()
-}
-
-async fn foundation_models(
-    client: &reqwest::Client,
-    endpoint: &str,
-    upstream: &Upstream,
-) -> Result<Vec<String>, Failure> {
-    let url = listing_url(
-        endpoint,
-        "foundation-models",
-        &[
-            ("byInferenceType", "ON_DEMAND"),
-            ("byOutputModality", "TEXT"),
-        ],
-    )?;
-    let listing = get(client, upstream, url).await?;
-    ids(&listing, "modelSummaries", "modelId")
-}
-
-async fn inference_profiles(
-    client: &reqwest::Client,
-    endpoint: &str,
-    upstream: &Upstream,
-) -> Result<Vec<String>, Failure> {
-    let mut profiles = Vec::new();
-    let mut next_token: Option<String> = None;
-    for _ in 0..MAX_PROFILE_PAGES {
-        // `type` is the API's `typeEquals` filter
-        let mut query = vec![("type", "SYSTEM_DEFINED"), ("maxResults", "1000")];
-        if let Some(token) = &next_token {
-            query.push(("nextToken", token));
-        }
-        let url = listing_url(endpoint, "inference-profiles", &query)?;
-        let page = get(client, upstream, url).await?;
-        profiles.extend(ids(
-            &page,
-            "inferenceProfileSummaries",
-            "inferenceProfileId",
-        )?);
-        next_token = page
-            .get("nextToken")
-            .and_then(Value::as_str)
-            .filter(|t| !t.is_empty())
-            .map(str::to_string);
-        if next_token.is_none() {
-            return Ok(profiles);
-        }
-    }
-    Err(Failure::Request(format!(
-        "the inference profile listing did not end after {MAX_PROFILE_PAGES} pages"
-    )))
-}
-
-/// `{endpoint}/{path}?{query}`, the query percent-encoded: a `nextToken`
-/// can hold `+`, `/` and `=`, and the signature covers the query exactly as
-/// AWS decodes it.
-fn listing_url(
-    endpoint: &str,
-    path: &str,
-    query: &[(&str, &str)],
-) -> Result<reqwest::Url, Failure> {
-    reqwest::Url::parse_with_params(&format!("{endpoint}/{path}"), query)
-        .map_err(|e| Failure::Request(format!("{endpoint}/{path}: {e}")))
-}
-
-/// GET one listing and read it as JSON.
-async fn get(
-    client: &reqwest::Client,
-    upstream: &Upstream,
-    url: reqwest::Url,
-) -> Result<Value, Failure> {
-    let mut req = client.get(url.clone());
-    for (k, v) in &upstream.headers {
-        req = req.header(k, v);
-    }
-    if let Some(signer) = upstream.signer() {
-        let signed = signer
-            .sign(client, &reqwest::Method::GET, url.as_str(), None)
-            .await
-            .map_err(|e| Failure::Request(e.to_string()))?;
-        for (k, v) in signed {
-            req = req.header(k, v);
-        }
-    }
-
-    let resp = req
-        .send()
+    tw_bedrock::catalog::accepts_credential(client, endpoint, &auth(upstream, credentials.as_ref()))
         .await
-        .map_err(|e| Failure::Request(e.to_string()))?;
-    let status = resp.status();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
-    if status.is_success() {
-        return Ok(body);
-    }
-    // AWS names the problem in `message`, or `Message` for some errors
-    let message = body
-        .get("message")
-        .or_else(|| body.get("Message"))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| status.canonical_reason().unwrap_or("error"));
-    Err(Failure::Status {
-        status: status.as_u16(),
-        message: message.to_string(),
-    })
 }
 
-/// The `id` of every entry in a listing's `list`.
-///
-/// A listing without its array is not one to trust, so it fails rather
-/// than reading as empty.
-fn ids(listing: &Value, list: &str, id: &str) -> Result<Vec<String>, Failure> {
-    let entries = listing
-        .get(list)
-        .and_then(Value::as_array)
-        .ok_or_else(|| Failure::Request(format!("the listing has no {list}")))?;
-    Ok(entries
-        .iter()
-        .filter_map(|entry| entry.get(id).and_then(Value::as_str))
-        .map(str::to_string)
-        .collect())
+/// The credentials the listings are signed with, when the provider signs:
+/// the keys on its row, or the instance role's. `None` for a provider that
+/// sends a Bedrock API key.
+async fn credentials(
+    client: &reqwest::Client,
+    upstream: &Upstream,
+) -> Result<Option<Credentials>, Failure> {
+    match upstream.signer() {
+        Some(signer) => signer
+            .credentials(client)
+            .await
+            .map(Some)
+            .map_err(|e| Failure::Request(e.to_string())),
+        None => Ok(None),
+    }
+}
+
+fn auth<'a>(upstream: &'a Upstream, credentials: Option<&'a Credentials>) -> Auth<'a> {
+    Auth {
+        headers: &upstream.headers,
+        credentials,
+        region: upstream
+            .signer()
+            .map(|s| s.region.as_str())
+            .unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
@@ -209,9 +92,10 @@ mod tests {
     use std::sync::Arc;
 
     use hmac::{Hmac, Mac, digest::KeyInit};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use think_watch_gateway::proxy::transport::{Credential, Shape, Signer};
+    use tw_bedrock::catalog::MAX_PROFILE_PAGES;
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -300,35 +184,6 @@ mod tests {
         ] {
             assert!(endpoint(bad).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn a_page_token_is_percent_encoded_into_the_query() {
-        let url = listing_url(
-            "https://bedrock.us-east-1.amazonaws.com",
-            "inference-profiles",
-            &[("type", "SYSTEM_DEFINED"), ("nextToken", TOKEN)],
-        )
-        .unwrap();
-        assert_eq!(
-            url.as_str(),
-            "https://bedrock.us-east-1.amazonaws.com/inference-profiles\
-             ?type=SYSTEM_DEFINED&nextToken=page%2B2%2Fof%3D2%3D%3D"
-        );
-    }
-
-    #[test]
-    fn a_listing_without_its_array_fails_rather_than_reading_as_empty() {
-        assert_eq!(
-            ids(
-                &json!({"modelSummaries": [{"modelId": "a"}, {}]}),
-                "modelSummaries",
-                "modelId"
-            ),
-            Ok(vec!["a".to_string()])
-        );
-        assert!(ids(&json!({"message": "?"}), "modelSummaries", "modelId").is_err());
-        assert!(ids(&Value::Null, "modelSummaries", "modelId").is_err());
     }
 
     #[tokio::test]
@@ -432,6 +287,7 @@ mod tests {
             failure,
             Failure::Status {
                 status: 403,
+                kind: None,
                 message: "User is not authorized to perform: bedrock:ListInferenceProfiles".into(),
             }
         );

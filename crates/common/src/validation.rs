@@ -227,21 +227,8 @@ pub fn validate_url(url_str: &str) -> Result<(), AppError> {
 /// dash-joined lowercase words and a trailing number could carry the
 /// request, and the credential riding on it, to another host.
 pub fn validate_aws_region(region: &str) -> Result<(), AppError> {
-    let valid = region.rsplit_once('-').is_some_and(|(name, number)| {
-        !number.is_empty()
-            && number.bytes().all(|b| b.is_ascii_digit())
-            && name.split('-').count() >= 2
-            && name
-                .split('-')
-                .all(|word| !word.is_empty() && word.bytes().all(|b| b.is_ascii_lowercase()))
-    });
-    if valid {
-        Ok(())
-    } else {
-        Err(AppError::BadRequest(
-            "Invalid AWS region: expected one like us-east-1".into(),
-        ))
-    }
+    tw_bedrock::endpoint::validate_region(region)
+        .map_err(|_| AppError::BadRequest("Invalid AWS region: expected one like us-east-1".into()))
 }
 
 /// Aggregate "do not connect to" check covering loopback, unspecified

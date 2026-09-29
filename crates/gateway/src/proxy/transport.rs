@@ -172,10 +172,7 @@ impl Upstream {
     pub fn signer(&self) -> Option<&Signer> {
         match &self.shape {
             Shape::Bedrock { signer }
-                if !self
-                    .headers
-                    .iter()
-                    .any(|(k, _)| k.eq_ignore_ascii_case("authorization")) =>
+                if !tw_bedrock::carries_api_key(self.headers.iter().map(|(k, _)| k.as_str())) =>
             {
                 Some(signer)
             }
@@ -194,10 +191,11 @@ impl Upstream {
                     self.base_url
                 )
             }
-            Shape::Bedrock { signer } => format!(
-                "https://bedrock-runtime.{}.amazonaws.com/{}",
-                signer.region,
-                path.trim_start_matches('/')
+            // The model id goes into the path escaped: an ARN's `/` would
+            // otherwise add a path segment.
+            Shape::Bedrock { signer } => tw_bedrock::endpoint::runtime_url(
+                &tw_bedrock::endpoint::runtime_base(&signer.region),
+                path,
             ),
             _ => tw_dialect::url::upstream_url(&self.base_url, path, query),
         }
@@ -346,6 +344,25 @@ mod tests {
         assert_eq!(
             u.url(b"{}", "/model/anthropic.claude-v2/converse", None),
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2/converse"
+        );
+    }
+
+    #[test]
+    fn a_bedrock_arn_keeps_its_slash_inside_the_model_segment() {
+        let u = up(
+            "us-east-2",
+            Shape::Bedrock {
+                signer: Arc::new(Signer::new("us-east-2", Credential::InstanceRole)),
+            },
+        );
+        assert_eq!(
+            u.url(
+                b"{}",
+                "/model/arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/a1b2/converse",
+                None
+            ),
+            "https://bedrock-runtime.us-east-2.amazonaws.com/model/\
+             arn:aws:bedrock:us-east-2:123456789012:application-inference-profile%2Fa1b2/converse"
         );
     }
 

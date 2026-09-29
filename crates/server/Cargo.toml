@@ -17,6 +17,7 @@ think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
 tw-dialect = { workspace = true }
+tw-bedrock = { workspace = true }
 tw-guard = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }
