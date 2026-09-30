@@ -8,7 +8,8 @@
 //
 // Auth model:
 //   - `teams:read` — list / get a team's metadata + member list.
-//     Required at GLOBAL scope to list ALL teams. Members of a
+//     Required at GLOBAL scope to list ALL teams; scoped to a team
+//     it covers that one team (the seeded `team_manager`). Members of a
 //     team can ALSO read their own team's metadata + roster as a
 //     baseline knowledge right (no perm needed) — see
 //     `caller_can_view_team`.
@@ -95,9 +96,9 @@ async fn caller_is_team_member(
     Ok(exists)
 }
 
-/// Allow a team read if caller has `teams:read` globally OR is a
-/// member of the team in question. Members of a team always have
-/// read access to their own team's metadata + roster.
+/// Allow a team read if caller holds `teams:read` globally or scoped
+/// to this team, OR is a member of the team in question. Members of a
+/// team always have read access to their own team's metadata + roster.
 async fn assert_can_view_team(
     auth_user: &AuthUser,
     pool: &sqlx::PgPool,
@@ -106,7 +107,9 @@ async fn assert_can_view_team(
     if caller_is_team_member(pool, auth_user.claims.sub, team_id).await? {
         return Ok(());
     }
-    auth_user.assert_scope_global(pool, "teams:read").await
+    auth_user
+        .assert_scope_for_team(pool, "teams:read", team_id)
+        .await
 }
 
 // ----------------------------------------------------------------------------

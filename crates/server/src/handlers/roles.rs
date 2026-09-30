@@ -96,16 +96,14 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     // Teams are the unit of "scoped admin": a custom role with
     // `team_members:write` granted in scope `team:<id>` lets the
     // holder add/remove members of that team without touching any
-    // other team. The CRUD perms below operate on the team
-    // catalog itself (rename, delete) and live at global scope
-    // because they're platform-wide bookkeeping.
+    // other team. `teams:read` at team scope shows that one team
+    // and its roster (the seeded team_manager holds both); at
+    // global scope it lists every team. Create / delete operate on
+    // the team catalog itself and need global scope.
     p("teams:read", "teams", "read"),
     p("teams:create", "teams", "create"),
     p("teams:update", "teams", "update"),
     d("teams:delete", "teams", "delete"),
-    // Membership management is the only perm intended to be
-    // granted at team scope. The handler accepts it at global
-    // scope too for super_admin convenience.
     d("team_members:write", "team_members", "write"),
     // --- Providers (AI upstream) ---
     p("providers:read", "providers", "read"),
@@ -130,8 +128,6 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     p("users:create", "users", "create"),
     p("users:update", "users", "update"),
     d("users:delete", "users", "delete"),
-    p("team:read", "team", "read"),
-    p("team:write", "team", "write"),
     // --- Sessions (revoke other users) ---
     d("sessions:revoke", "sessions", "revoke"),
     // --- Roles & permissions (self-modifying — always dangerous) ---
@@ -149,12 +145,9 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     p("analytics:read_own", "analytics", "read_own"),
     p("analytics:read_team", "analytics", "read_team"),
     p("analytics:read_all", "analytics", "read_all"),
-    p("audit_logs:read_own", "audit_logs", "read_own"),
-    p("audit_logs:read_team", "audit_logs", "read_team"),
-    p("audit_logs:read_all", "audit_logs", "read_all"),
-    // --- Gateway logs (raw request bodies — sensitive) ---
-    p("logs:read_own", "logs", "read_own"),
-    p("logs:read_team", "logs", "read_team"),
+    // --- Logs (gateway, MCP, audit, access and app logs) ---
+    // Every log endpoint is platform-wide and needs this at global
+    // scope; there is no per-user or per-team log view.
     d("logs:read_all", "logs", "read_all"),
     // Reading the raw request/response payload (prompts, completions,
     // tool arguments, tool results) is a strictly stronger right than
@@ -194,6 +187,53 @@ pub(super) fn is_known_permission(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 
+/// Keys that earlier releases put in the catalog and in the seeded
+/// system roles, but that no handler ever checked:
+///
+///   - `team:read` / `team:write` predate the `teams:*` and
+///     `team_members:write` permissions the team handlers enforce.
+///   - `logs:read_own` / `logs:read_team` and `audit_logs:*` — every
+///     log endpoint (audit logs included) is gated on `logs:read_all`
+///     at global scope; no own- or team-filtered log view exists.
+///
+/// They are gone from the catalog, so the role editor no longer
+/// offers them. Stored policies may still name them (the seeds only
+/// insert missing roles, and custom roles could grant them), so the
+/// startup check tolerates them with a warning instead of refusing to
+/// boot. `db/release_migrations/2026-09-30_retire_unchecked_permissions.sql`
+/// strips them.
+pub(super) const RETIRED_PERMISSIONS: &[&str] = &[
+    "team:read",
+    "team:write",
+    "logs:read_own",
+    "logs:read_team",
+    "audit_logs:read_own",
+    "audit_logs:read_team",
+    "audit_logs:read_all",
+];
+
+/// Split the permissions named by stored role policies into
+/// `(unknown, retired)` entries, each formatted `"role: perm"`.
+fn classify_role_permissions(rows: &[(String, serde_json::Value)]) -> (Vec<String>, Vec<String>) {
+    let all_perm_keys: Vec<&str> = PERMISSIONS.iter().map(|p| p.key).collect();
+    let mut unknown = Vec::new();
+    let mut retired = Vec::new();
+    for (role_name, doc) in rows {
+        for perm in think_watch_common::limits::extract_permissions(doc, &all_perm_keys) {
+            if is_known_permission(&perm) {
+                continue;
+            }
+            let entry = format!("{role_name}: {perm}");
+            if RETIRED_PERMISSIONS.contains(&perm.as_str()) {
+                retired.push(entry);
+            } else {
+                unknown.push(entry);
+            }
+        }
+    }
+    (unknown, retired)
+}
+
 /// Default policy document for each seeded system role.
 ///
 /// This is the **single source of truth** for "what should this
@@ -212,19 +252,19 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &str)] = &[
     ),
     (
         "admin",
-        r#"{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}"#,
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}"#,
     ),
     (
         "team_manager",
-        r#"{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","team:read","team:write","analytics:read_team","audit_logs:read_team","logs:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}"#,
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","teams:read","analytics:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}"#,
     ),
     (
         "developer",
-        r#"{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}"#,
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own"],"Resource":"*"}]}"#,
     ),
     (
         "viewer",
-        r#"{"Version":"2024-01-01","Statement":[{"Sid":"ViewerAccess","Effect":"Allow","Action":["api_keys:read","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}"#,
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"ViewerAccess","Effect":"Allow","Action":["api_keys:read","providers:read","models:read","mcp_servers:read","analytics:read_own"],"Resource":"*"}]}"#,
     ),
 ];
 
@@ -246,15 +286,14 @@ fn system_role_default_policy(name: &str) -> Option<serde_json::Value> {
 /// fail-fast.
 pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     let rows = repo::policy_documents(pool).await?;
-    let all_perm_keys: Vec<&str> = PERMISSIONS.iter().map(|p| p.key).collect();
-    let mut unknown: Vec<String> = Vec::new();
-    for (role_name, doc) in &rows {
-        let perms = think_watch_common::limits::extract_permissions(doc, &all_perm_keys);
-        for perm in &perms {
-            if !is_known_permission(perm) {
-                unknown.push(format!("{role_name}: {perm}"));
-            }
-        }
+    let (unknown, retired) = classify_role_permissions(&rows);
+    if !retired.is_empty() {
+        tracing::warn!(
+            "Roles still grant retired permissions that nothing checks: {}. \
+             Apply db/release_migrations/2026-09-30_retire_unchecked_permissions.sql \
+             to remove them.",
+            retired.join(", "),
+        );
     }
     if !unknown.is_empty() {
         anyhow::bail!(
@@ -901,6 +940,73 @@ mod tests {
         assert!(is_known_permission("api_keys:read"));
         assert!(is_known_permission("api_keys:rotate"));
         assert!(is_known_permission("settings:write"));
+    }
+
+    #[test]
+    fn unchecked_log_and_team_permissions_are_not_in_catalog() {
+        // No handler checks these; the catalog must not offer them.
+        for key in [
+            "team:read",
+            "team:write",
+            "logs:read_own",
+            "logs:read_team",
+            "audit_logs:read_own",
+            "audit_logs:read_team",
+            "audit_logs:read_all",
+        ] {
+            assert!(!is_known_permission(key), "{key} is still in the catalog");
+        }
+    }
+
+    #[test]
+    fn team_manager_default_grants_the_team_read_the_handlers_check() {
+        // The team handlers gate listing a team, its roster and its
+        // roles on `teams:read`; the seeded team_manager must hold it.
+        let policy = system_role_default_policy("team_manager").unwrap();
+        let actions: Vec<&str> = policy["Statement"][0]["Action"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(actions.contains(&"teams:read"), "{actions:?}");
+        assert!(actions.contains(&"team_members:write"), "{actions:?}");
+    }
+
+    #[test]
+    fn stored_roles_naming_retired_permissions_still_validate() {
+        // An install upgraded without the release migration still has
+        // the old seeds; that must warn, not refuse to boot.
+        let rows = vec![
+            (
+                "team_manager".to_string(),
+                serde_json::json!({"Statement": [{"Effect": "Allow",
+                    "Action": ["team:read", "team:write", "logs:read_team", "teams:read"],
+                    "Resource": "*"}]}),
+            ),
+            (
+                "custom".to_string(),
+                serde_json::json!({"Statement": [{"Effect": "Allow",
+                    "Action": ["audit_logs:read_all", "nope:read"], "Resource": "*"}]}),
+            ),
+        ];
+        let (unknown, retired) = classify_role_permissions(&rows);
+        assert_eq!(unknown, vec!["custom: nope:read".to_string()]);
+        assert_eq!(
+            retired,
+            vec![
+                "team_manager: logs:read_team".to_string(),
+                "team_manager: team:read".to_string(),
+                "team_manager: team:write".to_string(),
+                "custom: audit_logs:read_all".to_string(),
+            ]
+        );
+        for key in RETIRED_PERMISSIONS {
+            assert!(
+                !is_known_permission(key),
+                "{key} is retired but in the catalog"
+            );
+        }
     }
 
     #[test]

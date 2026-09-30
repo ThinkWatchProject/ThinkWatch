@@ -204,8 +204,6 @@ export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
       'providers:read',
       'mcp_servers:read',
       'analytics:read_own',
-      'audit_logs:read_own',
-      'logs:read_own',
     ],
   },
   // Read-only across the surface a non-admin can browse.
@@ -219,8 +217,6 @@ export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
       'mcp_servers:read',
       'roles:read',
       'analytics:read_own',
-      'audit_logs:read_own',
-      'logs:read_own',
       'settings:read',
       'log_forwarders:read',
       'webhooks:read',
@@ -253,7 +249,6 @@ export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
       'mcp_servers:update',
       'mcp_servers:delete',
       'analytics:read_all',
-      'audit_logs:read_all',
       'logs:read_all',
       'log_forwarders:read',
       'log_forwarders:write',
@@ -269,7 +264,7 @@ export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
   // Analytics-only viewer (e.g. an SRE dashboard or finance owner).
   {
     id: 'analytics_only',
-    permissions: ['analytics:read_all', 'audit_logs:read_all', 'logs:read_all'],
+    permissions: ['analytics:read_all', 'logs:read_all'],
   },
 ];
 
