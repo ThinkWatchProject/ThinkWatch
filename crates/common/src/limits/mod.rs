@@ -351,48 +351,40 @@ pub fn extract_surface_constraints(doc: &serde_json::Value) -> SurfaceConstraint
     }
 }
 
-/// Extract the effective model scope from a parsed PolicyDocument.
-/// Looks at Allow statements whose Action matches `ai_gateway:use` and
-/// collects Resource entries that start with `model:`. Returns `None`
-/// when any matching statement has Resource `"*"` (unrestricted).
-pub fn extract_allowed_models(doc: &serde_json::Value) -> Option<Vec<String>> {
-    let statements = doc.get("Statement").and_then(|s| s.as_array())?;
-    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut found_any = false;
-
-    for stmt in statements {
-        let effect = stmt.get("Effect").and_then(|e| e.as_str()).unwrap_or("");
-        if effect != "Allow" {
-            continue;
-        }
-        let actions = stmt_actions(stmt);
-        if !action_matches_any(&actions, "ai_gateway:use") {
-            continue;
-        }
-        found_any = true;
-        let resources = stmt_resources(stmt);
-        for r in &resources {
-            if r == "*" {
-                return None;
-            }
-            if let Some(model) = r.strip_prefix("model:") {
-                models.insert(model.to_string());
-            }
-        }
-    }
-    if !found_any {
-        return None;
-    }
-    Some(models.into_iter().collect())
+/// What one policy document grants on one gateway surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceScope {
+    /// No Allow statement grants the surface's `*_gateway:use` action.
+    /// The role contributes nothing to that gateway.
+    NotGranted,
+    /// Granted on every resource (`Resource: "*"`).
+    All,
+    /// Granted on these resources only (the `model:` / `mcp_tool:`
+    /// prefix stripped). May be empty: the action is granted but on no
+    /// resource of this kind.
+    Only(Vec<String>),
 }
 
-/// Extract the effective MCP tool scope from a parsed PolicyDocument.
-/// Same logic as `extract_allowed_models` but for `mcp_gateway:use`
-/// statements and `mcp_tool:` resource prefixes.
-pub fn extract_allowed_mcp_tools(doc: &serde_json::Value) -> Option<Vec<String>> {
-    let statements = doc.get("Statement").and_then(|s| s.as_array())?;
-    let mut tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut found_any = false;
+/// The model scope a policy document grants: Allow statements whose
+/// Action matches `ai_gateway:use`, Resource entries `model:<id>`.
+/// A document that never grants `ai_gateway:use` grants no models.
+pub fn extract_model_scope(doc: &serde_json::Value) -> ResourceScope {
+    extract_resource_scope(doc, "ai_gateway:use", "model:")
+}
+
+/// The MCP tool scope a policy document grants: Allow statements whose
+/// Action matches `mcp_gateway:use`, Resource entries `mcp_tool:<pattern>`.
+/// A document that never grants `mcp_gateway:use` grants no tools.
+pub fn extract_mcp_tool_scope(doc: &serde_json::Value) -> ResourceScope {
+    extract_resource_scope(doc, "mcp_gateway:use", "mcp_tool:")
+}
+
+fn extract_resource_scope(doc: &serde_json::Value, action: &str, prefix: &str) -> ResourceScope {
+    let Some(statements) = doc.get("Statement").and_then(|s| s.as_array()) else {
+        return ResourceScope::NotGranted;
+    };
+    let mut items: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut granted = false;
 
     for stmt in statements {
         let effect = stmt.get("Effect").and_then(|e| e.as_str()).unwrap_or("");
@@ -400,24 +392,24 @@ pub fn extract_allowed_mcp_tools(doc: &serde_json::Value) -> Option<Vec<String>>
             continue;
         }
         let actions = stmt_actions(stmt);
-        if !action_matches_any(&actions, "mcp_gateway:use") {
+        if !action_matches_any(&actions, action) {
             continue;
         }
-        found_any = true;
-        let resources = stmt_resources(stmt);
-        for r in &resources {
+        granted = true;
+        for r in &stmt_resources(stmt) {
             if r == "*" {
-                return None;
+                return ResourceScope::All;
             }
-            if let Some(tool) = r.strip_prefix("mcp_tool:") {
-                tools.insert(tool.to_string());
+            if let Some(item) = r.strip_prefix(prefix) {
+                items.insert(item.to_string());
             }
         }
     }
-    if !found_any {
-        return None;
+    if granted {
+        ResourceScope::Only(items.into_iter().collect())
+    } else {
+        ResourceScope::NotGranted
     }
-    Some(tools.into_iter().collect())
 }
 
 /// Extract the flat set of permission strings from a parsed
@@ -479,8 +471,16 @@ fn stmt_resources(stmt: &serde_json::Value) -> Vec<String> {
     }
 }
 
+/// True when any action pattern covers `target`: `"*"`, the exact
+/// action, or a `<resource>:*` wildcard (what `extract_permissions` and
+/// the console's permission check also accept).
 fn action_matches_any(actions: &[String], target: &str) -> bool {
-    actions.iter().any(|a| a == "*" || a == target)
+    actions.iter().any(|a| {
+        a == "*"
+            || a == target
+            || a.strip_suffix('*')
+                .is_some_and(|prefix| prefix.ends_with(':') && target.starts_with(prefix))
+    })
 }
 
 fn append_constraints(block: &mut SurfaceBlock, constraints: &PolicyConstraints) {
@@ -870,12 +870,24 @@ pub async fn upsert_rule(pool: &PgPool, req: UpsertRule) -> Result<RateLimitRule
     row_to_rule(row).ok_or_else(|| sqlx::Error::Protocol("rule row decode failed".into()))
 }
 
-pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
-    let n = sqlx::query("DELETE FROM rate_limit_rules WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
+/// Delete one rule, but only if it belongs to the given subject. The
+/// caller has authorized the subject, not the row id, so a row id
+/// that belongs to someone else must not match.
+pub async fn delete_rule(
+    pool: &PgPool,
+    id: Uuid,
+    subject_kind: RateLimitSubject,
+    subject_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let n = sqlx::query(
+        "DELETE FROM rate_limit_rules WHERE id = $1 AND subject_kind = $2 AND subject_id = $3",
+    )
+    .bind(id)
+    .bind(subject_kind.as_str())
+    .bind(subject_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(n > 0)
 }
 
@@ -970,12 +982,23 @@ pub async fn upsert_cap(pool: &PgPool, req: UpsertCap) -> Result<BudgetCap, sqlx
     row_to_cap(row).ok_or_else(|| sqlx::Error::Protocol("cap row decode failed".into()))
 }
 
-pub async fn delete_cap(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
-    let n = sqlx::query("DELETE FROM budget_caps WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
+/// Delete one cap, but only if it belongs to the given subject — see
+/// [`delete_rule`].
+pub async fn delete_cap(
+    pool: &PgPool,
+    id: Uuid,
+    subject_kind: BudgetSubject,
+    subject_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let n = sqlx::query(
+        "DELETE FROM budget_caps WHERE id = $1 AND subject_kind = $2 AND subject_id = $3",
+    )
+    .bind(id)
+    .bind(subject_kind.as_str())
+    .bind(subject_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(n > 0)
 }
 
@@ -1606,16 +1629,16 @@ mod tests {
     }
 
     #[test]
-    fn extract_allowed_models_unrestricted() {
+    fn model_scope_unrestricted() {
         let doc = serde_json::json!({
             "Version": "2024-01-01",
             "Statement": [{"Effect":"Allow","Action":"ai_gateway:use","Resource":"*"}]
         });
-        assert_eq!(extract_allowed_models(&doc), None);
+        assert_eq!(extract_model_scope(&doc), ResourceScope::All);
     }
 
     #[test]
-    fn extract_allowed_models_scoped() {
+    fn model_scope_scoped() {
         let doc = serde_json::json!({
             "Version": "2024-01-01",
             "Statement": [{
@@ -1624,8 +1647,57 @@ mod tests {
                 "Resource":["model:gpt-4o","model:claude-sonnet-4-20250514"]
             }]
         });
-        let models = extract_allowed_models(&doc).unwrap();
-        assert_eq!(models, vec!["claude-sonnet-4-20250514", "gpt-4o"]);
+        assert_eq!(
+            extract_model_scope(&doc),
+            ResourceScope::Only(vec!["claude-sonnet-4-20250514".into(), "gpt-4o".into()])
+        );
+    }
+
+    #[test]
+    fn a_document_without_gateway_use_grants_nothing() {
+        // The built-in viewer: Resource "*", but no gateway action.
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Allow","Action":["providers:read","analytics:read_own"],"Resource":"*"}]
+        });
+        assert_eq!(extract_model_scope(&doc), ResourceScope::NotGranted);
+        assert_eq!(extract_mcp_tool_scope(&doc), ResourceScope::NotGranted);
+        // A Deny is not a grant either.
+        let deny = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Deny","Action":"ai_gateway:use","Resource":"*"}]
+        });
+        assert_eq!(extract_model_scope(&deny), ResourceScope::NotGranted);
+    }
+
+    #[test]
+    fn gateway_use_granted_on_other_resources_only_is_an_empty_scope() {
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use"],"Resource":["mcp_tool:srv__read"]}]
+        });
+        assert_eq!(extract_model_scope(&doc), ResourceScope::Only(vec![]));
+        assert_eq!(
+            extract_mcp_tool_scope(&doc),
+            ResourceScope::Only(vec!["srv__read".into()])
+        );
+    }
+
+    #[test]
+    fn action_wildcards_grant_gateway_use() {
+        for action in ["*", "ai_gateway:*"] {
+            let doc = serde_json::json!({
+                "Version": "2024-01-01",
+                "Statement": [{"Effect":"Allow","Action":action,"Resource":"*"}]
+            });
+            assert_eq!(extract_model_scope(&doc), ResourceScope::All, "{action}");
+        }
+        let other = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Allow","Action":"mcp_gateway:*","Resource":"*"}]
+        });
+        assert_eq!(extract_model_scope(&other), ResourceScope::NotGranted);
+        assert_eq!(extract_mcp_tool_scope(&other), ResourceScope::All);
     }
 
     #[test]

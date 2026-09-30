@@ -11,6 +11,197 @@ target.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-10-01
+
+This release fixes authorization. The gateways never checked
+`ai_gateway:use` or `mcp_gateway:use`, so a user with no role, or with
+only roles that grant neither, could call every model and MCP tool; a
+role granted at the scope of one team widened model and tool access
+platform-wide; and an API key whose allow-list came out empty could
+call any model. The gateways now require the permission and count only
+the roles that grant it. The seeded `team_manager` role now works when
+granted at team scope, and seven permissions that nothing ever checked
+are retired. Some users lose gateway access on upgrade: read the first
+section before deploying. There is one manual database script and no
+schema, setting, environment variable or Helm value change.
+
+### Read before upgrading
+
+- **Users without a role that grants gateway use lose gateway access.**
+  A request to the AI gateway is refused with `403` unless a role held
+  by the key's owner grants `ai_gateway:use`, and a request to the MCP
+  gateway unless one grants `mcp_gateway:use`. The body names the
+  missing permission, in the error format of the caller's API. The
+  built-in `developer`, `admin`, `super_admin` and `team_manager` roles
+  grant both; `viewer` grants neither. Three groups of users are
+  refused after the upgrade where 2.1.0 let them through:
+  - users with no role at all;
+  - users whose roles are only `viewer`, or custom roles without these
+    actions;
+  - users whose only gateway role is assigned at team scope (see the
+    third item below).
+
+  Find them before upgrading. This query lists every active user with a
+  live key for a gateway that none of their roles will grant (it counts
+  global assignments and roles attached to the user's teams, which is
+  what the gateways now read; it does not account for `Deny`
+  statements):
+
+  ```sql
+  WITH grants AS (
+    SELECT id AS role_id,
+           jsonb_path_exists(policy_document,
+             '$.Statement[*] ? (@.Effect == "Allow").Action[*] ? (@ == "*" || @ == "ai_gateway:*" || @ == "ai_gateway:use")') AS ai,
+           jsonb_path_exists(policy_document,
+             '$.Statement[*] ? (@.Effect == "Allow").Action[*] ? (@ == "*" || @ == "mcp_gateway:*" || @ == "mcp_gateway:use")') AS mcp
+      FROM rbac_roles
+  ),
+  held AS (
+    SELECT user_id, role_id FROM rbac_role_assignments WHERE scope_kind = 'global'
+    UNION
+    SELECT tm.user_id, tra.role_id
+      FROM team_members tm JOIN team_role_assignments tra USING (team_id)
+  ),
+  access AS (
+    SELECT h.user_id, bool_or(g.ai) AS ai, bool_or(g.mcp) AS mcp
+      FROM held h JOIN grants g USING (role_id) GROUP BY h.user_id
+  )
+  SELECT u.email, s.surface
+    FROM api_keys k
+    JOIN users u ON u.id = k.user_id
+    CROSS JOIN LATERAL unnest(k.surfaces) AS s(surface)
+    LEFT JOIN access a ON a.user_id = u.id
+   WHERE k.is_active AND k.deleted_at IS NULL
+     AND u.is_active AND u.deleted_at IS NULL
+     AND NOT COALESCE(CASE s.surface WHEN 'ai_gateway' THEN a.ai
+                                     WHEN 'mcp_gateway' THEN a.mcp END, false)
+   GROUP BY u.email, s.surface
+   ORDER BY u.email, s.surface;
+  ```
+
+  Give each of them `developer` (or a custom role with the actions)
+  either at global scope (Users → edit the user's roles, scope
+  *Global*), or by attaching the role to a team they belong to (Teams →
+  the team → Roles), which every member of that team inherits. The
+  change takes effect within a minute; each user's permissions are
+  cached for 60 seconds.
+
+  If SSO users are meant to use the gateway from their first sign-in,
+  set *Default Role for New Users* (`auth.default_role`) in Settings to
+  `developer`. It is empty by default, and it applies only to accounts
+  created after it is set; existing users need the grant above.
+- **A role that does not grant gateway use no longer widens model or
+  tool access.** Model and MCP tool scopes are now the union over the
+  roles that grant `ai_gateway:use` / `mcp_gateway:use` only. A role
+  without those actions (such as `viewer`) used to count as
+  "unrestricted", so adding it to a user limited to some models opened
+  every model to them. Users relying on that lose the extra models.
+- **A role assigned at team scope no longer grants gateway access.** An
+  assignment with scope `team:<id>` administers that team from the
+  console (team roster, team limits); it no longer contributes models,
+  MCP tools or gateway use, which it used to do for every request the
+  user made, member of the team or not. Roles attached to a team itself
+  (Teams → Roles), which every member inherits, still count. A user
+  whose only gateway role was a team-scoped `developer` or
+  `team_manager` needs that role at global scope, or attached to their
+  team. The role assignment editor now says this under the scope
+  picker.
+- **An empty model allow-list allows nothing.** A key whose
+  `allowed_models` is `[]`, or whose list shares no model with what its
+  owner's roles grant, used to call any model; it now calls none, as
+  `allowed_mcp_tools: []` already did on the MCP gateway. The console
+  never saves `[]` (clearing the picker sends `null`), so only keys
+  written through the API are affected. To find them:
+  `SELECT id, name, user_id FROM api_keys WHERE allowed_models = '{}' AND is_active AND deleted_at IS NULL;`
+  Set such a key's list to `null` to leave it bounded by its owner's
+  roles only. Model entries still match by prefix, and a key narrowed to
+  `gpt-4o-mini` under a role granting `gpt-4o` keeps `gpt-4o-mini`.
+- **Run `db/release_migrations/2026-09-30_retire_unchecked_permissions.sql`
+  once, after deploying.** The server does not apply it. It adds
+  `teams:read` to the `team_manager` role and removes the seven retired
+  permissions (see *Changed*) from every role, system and custom. It is
+  idempotent and changes no access for any other role, since nothing
+  checked the removed keys. Without it, the server still starts and
+  works, but:
+  - `team_manager` keeps the old `team:read` it cannot use, so a team
+    manager who is not a member of the team they manage still gets
+    `403` opening it, its roster or its roles;
+  - every start logs a warning listing the roles that still name
+    retired permissions.
+
+  *Reset to defaults* on a system role in the console has the same
+  effect for that one role, but does not clean custom roles.
+- **A team-scoped `rate_limits:write` now takes effect.** It used to
+  require global scope for every subject, so the seeded `team_manager`
+  granted at team scope could not touch any limit. It now covers the
+  rate limits and budget caps of users in that team and of the API keys
+  they own, never the holder's own user or keys; role subjects still
+  need global scope. Anyone holding `team_manager` (or a custom role
+  with `rate_limits:write`) at team scope can now change, lift or
+  delete the limits of every member of that team, administrators
+  included. Review team-scoped assignments of these roles before
+  upgrading.
+
+### Security
+
+- **Gateway use is checked, and a missing grant means no access.** See
+  the first three items above: a user with no role, or only roles
+  without gateway use, could call every model and MCP tool; a
+  `viewer`-style role widened a restricted user to every model; a role
+  granted at the scope of any team, even one the user was not a member
+  of, widened model and tool access platform-wide. An explicit `Deny`
+  on `ai_gateway:use` or `mcp_gateway:use` now closes that gateway.
+  Action wildcards (`ai_gateway:*`, `*`) grant it, as they already did
+  for console permissions.
+- **A key narrowed inside a prefix grant is no longer unrestricted.**
+  The key's allow-list was intersected with its owner's role grants
+  entry by entry, as literal strings. A key limited to `gpt-4o-mini`
+  under a role granting `gpt-4o` (a prefix) came out with an empty list,
+  which the gateway read as "no restriction", so the key could call
+  every model. The intersection now keeps an entry of either side that
+  the other side covers, by prefix for models and by `<server>__*`
+  pattern for MCP tools, and an empty result allows nothing.
+
+### Fixed
+
+- **The seeded `team_manager` role works at team scope.** It granted
+  `team:read`, but the team handlers check `teams:read`, so a team
+  manager got `403` listing teams and opening the team, its roster or
+  its roles. It now grants `teams:read`, and opening a team accepts
+  `teams:read` scoped to that team, where it used to require global
+  scope. Existing installations need the release migration above.
+- **Bulk disable and delete work on API keys' limits.** The bulk
+  disable and delete routes for rate-limit rules and budget caps
+  rejected every row stored for an API key (`api_key_lineage`, the kind
+  a key's limits are stored under) as an unknown subject kind.
+- **The console's effective-permissions preview shows real gateway
+  access.** It now counts only roles that grant gateway use and skips
+  team-scoped assignments, as the gateways do, where it used to count
+  every assigned role.
+
+### Changed
+
+- **Seven permissions that nothing checked are retired**: `team:read`,
+  `team:write`, `logs:read_own`, `logs:read_team`,
+  `audit_logs:read_own`, `audit_logs:read_team` and
+  `audit_logs:read_all`. Every log endpoint, audit logs included, is
+  gated on `logs:read_all` at global scope, and no own- or team-filtered
+  log view exists, so these grants never did anything. They are gone
+  from the permission catalog, the role editor and the seeded roles.
+  Roles that still name them load, and the server logs a warning at
+  start instead of refusing to boot.
+- **Deleting one rate-limit rule or budget cap is bound to the subject
+  in the path.** `DELETE` on
+  `/api/admin/limits/{kind}/{id}/rules/{rule_id}` and
+  `/api/admin/limits/{kind}/{id}/budgets/{cap_id}` now answers `404` when the rule or cap belongs to a different
+  subject; it used to delete any row id once the path's subject was
+  authorized.
+- **Creating or editing a key with an explicit allow-list checks it
+  against gateway-granting roles only.** An `allowed_models` or
+  `allowed_mcp_tools` entry is refused with `400` when no role of the
+  owner that grants the gateway covers it, so a user without a gateway
+  role can no longer save a non-empty list.
+
 ## [2.1.0] — 2026-09-30
 
 Amazon Bedrock becomes a provider you can run from the console. It
@@ -716,7 +907,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.2.0
 [2.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.1.0
 [2.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.0.0
 [1.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.1.0

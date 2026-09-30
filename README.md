@@ -41,7 +41,7 @@
 - **One key for AI and MCP.** Users receive `tw-` virtual keys that can be scoped to the AI gateway, the MCP gateway or both. Keys are stored only as hashes and rotate with a grace period.
 - **Rate limits and budgets.** Sliding windows from one minute to one week limit requests or tokens, and daily, weekly or monthly budgets cap spending. Both attach to users, API keys or roles, and rate limits apply to MCP tool calls as well as model requests.
 - **Cost accounting that finance can use.** Spend is reported by model, user, provider and cost center, with CSV chargeback reports and a month-end forecast. Per-model weights make expensive models count for more against the same quota.
-- **Audit trail in ClickHouse.** Every model request and tool call is recorded with user, parameters, response, latency and errors, with PII redacted before storage. Events can be forwarded to a SIEM over Syslog, Kafka (through a REST proxy) or signed webhooks.
+- **Audit trail in ClickHouse.** Every model request and tool call is recorded with user, parameters, response, latency and errors, and request bodies can be PII-redacted before storage (off by default). Events can be forwarded to a SIEM over Syslog, Kafka (through a REST proxy) or signed webhooks.
 - **One endpoint for every client.** OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini requests are served on one port and converted to whatever the upstream speaks. Routing spreads traffic by weight, latency or health, and a circuit breaker takes failing upstreams out of rotation.
 
 ## Quick start
@@ -60,7 +60,7 @@ cd web && pnpm install && pnpm dev
 # 4. Complete the setup wizard at http://localhost:5173/setup
 ```
 
-The setup wizard creates the first Super Admin account and can add the first provider and API key. The console then has copy-paste setup instructions for Claude Code, Cursor, Continue, Cline, the OpenAI and Anthropic SDKs, and cURL.
+The setup wizard creates the first Super Admin account, sets the site name and issues a first API key; providers are added in the console afterwards. The console then has copy-paste setup instructions for Claude Code, Cursor, Continue, Cline, the OpenAI and Anthropic SDKs, and cURL.
 
 ## Deployment
 
@@ -75,7 +75,7 @@ The gateway (port `3000`) is the only part that clients need to reach. The conso
 
 **MCP identity**
 - A user may connect several accounts to one server (work and personal, for example) and pin each `tw-` key to one of them.
-- Adding a server takes its URL: the gateway discovers the OAuth endpoints and registers itself when the upstream supports dynamic client registration. The MCP Store ships 36 ready-made templates.
+- Adding a server takes its URL: the gateway discovers the OAuth endpoints and registers itself when the upstream supports dynamic client registration. The MCP Store ships 37 ready-made templates.
 - A user who has not yet connected an account still sees the tool list; calling a tool returns JSON-RPC error `-32050` with the authorization URL, which compliant MCP clients can show.
 - Responses from servers that use per-user credentials are cached per user and account, never shared.
 

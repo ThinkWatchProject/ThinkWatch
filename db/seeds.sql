@@ -22,22 +22,22 @@ INSERT INTO rbac_roles (name, description, is_system, policy_document) VALUES
 ('admin',
  'Administrative access. Manages providers, MCP servers, API keys, and users.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}'
 ),
 ('team_manager',
  'Team-level management. Manages members, API keys, and rate limits for the team it''s assigned to. Intended to be granted with scope_kind = team.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","team:read","team:write","analytics:read_team","audit_logs:read_team","logs:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","teams:read","analytics:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}'
 ),
 ('developer',
  'Standard developer. Uses the gateway, manages own API keys, sees own usage.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own"],"Resource":"*"}]}'
 ),
 ('viewer',
  'Read-only access. Can browse providers and analytics but not modify anything.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"ViewerAccess","Effect":"Allow","Action":["api_keys:read","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"ViewerAccess","Effect":"Allow","Action":["api_keys:read","providers:read","models:read","mcp_servers:read","analytics:read_own"],"Resource":"*"}]}'
 )
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO api_key_surface_kinds (name, display_name, description) VALUES
