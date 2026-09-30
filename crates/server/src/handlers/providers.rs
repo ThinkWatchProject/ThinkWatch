@@ -7,8 +7,10 @@ use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
 
 use crate::app::AppState;
+use crate::gateway_adapters::ProviderMaterials;
 use crate::middleware::auth_guard::AuthUser;
 use crate::services::provider_repository as repo;
+use think_watch_gateway::proxy::transport::Credential;
 
 // ---------------------------------------------------------------------------
 // At-rest encryption for provider secrets stored in `providers.config_json`.
@@ -203,6 +205,22 @@ fn encrypt_aws_secret_in_config(
     Ok(())
 }
 
+/// Check a provider's `base_url` before it is stored or called.
+///
+/// Bedrock keeps an AWS region there instead of a URL, and builds its
+/// host from it, so it gets a region check rather than the URL one.
+fn validate_base_url(
+    provider_type: &str,
+    base_url: &str,
+    validate_url: &think_watch_common::validation::UrlValidator,
+) -> Result<(), AppError> {
+    if provider_type == "bedrock" {
+        think_watch_common::validation::validate_aws_region(base_url)
+    } else {
+        validate_url(base_url)
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/admin/providers",
@@ -253,7 +271,7 @@ pub async fn create_provider(
     }
 
     // SSRF prevention: validate base_url
-    (state.url_validator)(&req.base_url)?;
+    validate_base_url(&req.provider_type, &req.base_url, &state.url_validator)?;
 
     // Store unified headers in config_json, encrypting every header
     // value at rest. AWS bedrock secrets (when nested in `config`) get
@@ -289,6 +307,7 @@ pub async fn create_provider(
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateProviderRequest {
     pub display_name: Option<String>,
+    /// The upstream's URL, or for Bedrock its AWS region (`us-east-1`).
     pub base_url: Option<String>,
     /// Unified request headers (auth + custom + identity templates).
     pub headers: Option<Vec<ProviderHeader>>,
@@ -330,7 +349,7 @@ pub async fn update_provider(
     let base_url = req.base_url.as_deref().unwrap_or(&existing.base_url);
 
     if req.base_url.is_some() {
-        (state.url_validator)(base_url)?;
+        validate_base_url(&existing.provider_type, base_url, &state.url_validator)?;
     }
 
     // Update headers in config_json if provided. Encrypt every header
@@ -467,17 +486,34 @@ pub async fn delete_provider(
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct TestProviderRequest {
     pub provider_type: String,
+    /// The upstream's URL, or for Bedrock its AWS region (`us-east-1`).
     pub base_url: String,
     /// Unified request headers (auth + custom).
     #[serde(default)]
     pub headers: Vec<ProviderHeader>,
+    /// Bedrock access keys, as the create request's `config` carries
+    /// them. Without them a Bedrock test is signed with the saved
+    /// provider's keys, or else the instance role's — unless a header
+    /// carries a Bedrock API key, which is then sent unsigned.
+    #[serde(default)]
+    pub config: Option<TestProviderConfig>,
     /// Existing provider the test is being run against, if any. Its
-    /// stored secrets fill in any header submitted with an empty value —
-    /// the edit dialog never receives the real values back (they're
-    /// redacted), so without this "Test connection" from that dialog
-    /// would always hit upstream unauthenticated.
+    /// stored secrets fill in whatever the request leaves out: any header
+    /// submitted with an empty value, and Bedrock access keys when
+    /// `config` has none. The edit dialog never receives the real values
+    /// back (they're redacted), so without this "Test connection" from
+    /// that dialog would always hit upstream unauthenticated.
     #[serde(default)]
     pub provider_id: Option<Uuid>,
+}
+
+/// The part of a provider's `config` a connection test reads.
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct TestProviderConfig {
+    #[serde(default)]
+    pub aws_access_key_id: String,
+    #[serde(default)]
+    pub aws_secret_access_key: String,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -515,33 +551,81 @@ pub async fn test_provider(
     State(state): State<AppState>,
     Json(req): Json<TestProviderRequest>,
 ) -> Result<Json<TestProviderResponse>, AppError> {
+    // A test with a saved provider's secrets sends them where the request
+    // says, as saving a new base URL for it would: it takes the permission
+    // to edit the provider. Values typed into the request are the create
+    // dialog's, and take the permission to create one.
+    let permission = if req.provider_id.is_some() {
+        "providers:update"
+    } else {
+        "providers:create"
+    };
     auth_user
-        .require_global_permission(&state.db, "providers:create")
+        .require_global_permission(&state.db, permission)
         .await?;
 
-    let mut req = req;
-    if let Some(provider_id) = req.provider_id {
-        let provider = repo::find_live(&state.db, provider_id)
-            .await?
-            .ok_or(AppError::NotFound("Provider not found".into()))?;
-        let stored = decrypt_headers_from_config(
-            &provider.config_json,
-            &state.config.encryption_key,
-            &provider.name,
-        );
-        for header in req.headers.iter_mut().filter(|h| h.value.is_empty()) {
-            if let Some(s) = stored.iter().find(|s| s.key == header.key) {
-                header.value.clone_from(&s.value);
-            }
+    let stored = match req.provider_id {
+        Some(provider_id) => {
+            let provider = repo::find_live(&state.db, provider_id)
+                .await?
+                .ok_or(AppError::NotFound("Provider not found".into()))?;
+            Some(ProviderMaterials::from_provider(
+                &provider,
+                &state.config.encryption_key,
+            ))
         }
-    }
+        None => None,
+    };
+    let materials = test_materials(req, stored.as_ref());
 
     let http_client = (**state.http_client.load()).clone();
-    run_provider_test(req, http_client, &state.url_validator).await
+    run_provider_test(&materials, http_client, &state.url_validator).await
 }
 
-pub(crate) async fn run_provider_test(
+/// What a connection test connects with: the request's own values, and
+/// the saved provider's secrets for whatever the request leaves out.
+fn test_materials(
     req: TestProviderRequest,
+    stored: Option<&ProviderMaterials>,
+) -> ProviderMaterials {
+    let saved_header = |key: &str| Some(stored?.headers.iter().find(|(k, _)| k == key)?.1.clone());
+    let headers = req
+        .headers
+        .into_iter()
+        .map(|h| {
+            let value = if h.value.is_empty() {
+                saved_header(&h.key).unwrap_or_default()
+            } else {
+                h.value
+            };
+            (h.key, value)
+        })
+        .collect();
+    // No access key id means no keys, as for a saved provider
+    let aws = req
+        .config
+        .filter(|c| !c.aws_access_key_id.is_empty())
+        .map(|c| Credential::from_keys(c.aws_access_key_id, c.aws_secret_access_key))
+        .or_else(|| stored.map(|s| s.aws.clone()))
+        .unwrap_or(Credential::InstanceRole);
+
+    ProviderMaterials {
+        name: stored.map_or_else(|| "connection test".to_string(), |s| s.name.clone()),
+        provider_type: req.provider_type,
+        base_url: req.base_url,
+        headers,
+        api_version: stored.and_then(|s| s.api_version.clone()),
+        aws,
+    }
+}
+
+/// Connect to a provider and list its models.
+///
+/// The connection test, and the model list the import dialog and the
+/// route editor offer. For Bedrock that list is its catalog: see
+/// [`crate::bedrock_catalog`].
+pub(crate) async fn run_provider_test(
+    m: &ProviderMaterials,
     client: reqwest::Client,
     // The pluggable SSRF guard from `AppState`, not the global
     // `validate_url`: this path fetches an admin-supplied URL exactly
@@ -550,101 +634,150 @@ pub(crate) async fn run_provider_test(
     // integration-tested against a loopback mock at all.
     validate: &think_watch_common::validation::UrlValidator,
 ) -> Result<Json<TestProviderResponse>, AppError> {
-    if req.base_url.is_empty() {
+    if m.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));
     }
-    validate(&req.base_url)?;
 
-    // Provider-specific probe URL. We always hit a cheap, read-only
-    // endpoint that requires auth so a wrong key is detected too.
-    let path = match req.provider_type.as_str() {
-        "google" => "/v1beta/models",
-        // anthropic / openai / azure / custom — all answer /v1/models
-        _ => "/v1/models",
-    };
-    let url = tw_dialect::url::upstream_url(&req.base_url, path, None);
-
-    // `client` is now passed in from `test_provider` — uses the
-    // shared http_client so this endpoint inherits the central
+    // `client` is the shared http_client: it carries the central
     // `redirect::Policy::none()` SSRF defense and the
-    // `perf.http_client_secs` timeout knob — building a fresh
-    // client here used to bypass both.
-
-    let mut builder = client.get(&url);
-    // Apply all headers directly — auth is now part of the unified headers list
-    for h in &req.headers {
-        builder = builder.header(&h.key, &h.value);
-    }
-
-    let started = std::time::Instant::now();
-    let result = builder.send().await;
+    // `perf.http_client_secs` timeout knob, which a fresh client built
+    // here would bypass.
+    let started;
+    let listing = if m.provider_type == "bedrock" {
+        // Bedrock is authenticated as the gateway authenticates it: an API
+        // key in the headers, or else SigV4 with the keys or the instance
+        // role. The catalog is built to match.
+        let endpoint = crate::bedrock_catalog::endpoint(&m.base_url)?;
+        let upstream = crate::gateway_adapters::build_upstream(m);
+        started = std::time::Instant::now();
+        match crate::bedrock_catalog::list_models(&client, &endpoint, &upstream).await {
+            Ok(models) => Listing::Listed {
+                status: 200,
+                models: Some(models),
+            },
+            Err(tw_bedrock::catalog::Failure::Status {
+                status, message, ..
+            }) => Listing::Refused { status, message },
+            Err(tw_bedrock::catalog::Failure::Request(e)) => Listing::Failed(e),
+        }
+    } else {
+        let url = probe_url(&m.provider_type, &m.base_url, validate)?;
+        started = std::time::Instant::now();
+        list_models(&client, &url, &m.headers).await
+    };
     let latency_ms = started.elapsed().as_millis() as u64;
 
-    match result {
-        Ok(resp) => {
-            let status = resp.status();
-            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-            if status.is_success() {
-                // Extract model list from standard shapes:
-                // OpenAI/Anthropic: { "data": [{ "id": "..." }, ...] }
-                // Google:           { "models": [{ "name": "models/..." }, ...] }
-                let models_array = body
-                    .get("data")
-                    .and_then(|v| v.as_array())
-                    .or_else(|| body.get("models").and_then(|v| v.as_array()));
+    Ok(Json(listing.into_response(latency_ms)))
+}
 
-                let (model_count, models) = if let Some(arr) = models_array {
-                    let ids: Vec<String> = arr
-                        .iter()
-                        .filter_map(|m| {
-                            m.get("id")
-                                .or_else(|| m.get("name"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .collect();
-                    (Some(ids.len()), Some(ids))
-                } else {
-                    (None, None)
-                };
+/// How a provider's model listing went.
+enum Listing {
+    /// The upstream answered, with its models if the answer named them.
+    Listed {
+        status: u16,
+        models: Option<Vec<String>>,
+    },
+    /// The upstream answered with an error.
+    Refused { status: u16, message: String },
+    /// No answer.
+    Failed(String),
+}
 
-                Ok(Json(TestProviderResponse {
-                    success: true,
-                    message: match model_count {
-                        Some(n) => format!("Connected successfully — {n} models available"),
-                        None => "Connected successfully".to_string(),
-                    },
-                    status_code: Some(status.as_u16()),
-                    latency_ms,
-                    model_count,
-                    models,
-                }))
-            } else {
-                let upstream_err = body
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string());
-                Ok(Json(TestProviderResponse {
-                    success: false,
-                    message: format!("HTTP {}: {upstream_err}", status.as_u16()),
-                    status_code: Some(status.as_u16()),
-                    latency_ms,
-                    model_count: None,
-                    models: None,
-                }))
-            }
+impl Listing {
+    fn into_response(self, latency_ms: u64) -> TestProviderResponse {
+        match self {
+            Listing::Listed { status, models } => TestProviderResponse {
+                success: true,
+                message: match &models {
+                    Some(ids) => format!("Connected successfully — {} models available", ids.len()),
+                    None => "Connected successfully".to_string(),
+                },
+                status_code: Some(status),
+                latency_ms,
+                model_count: models.as_ref().map(Vec::len),
+                models,
+            },
+            Listing::Refused { status, message } => TestProviderResponse {
+                success: false,
+                message: format!("HTTP {status}: {message}"),
+                status_code: Some(status),
+                latency_ms,
+                model_count: None,
+                models: None,
+            },
+            Listing::Failed(e) => TestProviderResponse {
+                success: false,
+                message: format!("Request failed: {e}"),
+                status_code: None,
+                latency_ms,
+                model_count: None,
+                models: None,
+            },
         }
-        Err(e) => Ok(Json(TestProviderResponse {
-            success: false,
-            message: format!("Request failed: {e}"),
-            status_code: None,
-            latency_ms,
-            model_count: None,
-            models: None,
-        })),
     }
+}
+
+/// GET a provider's model listing at `url`, and read the ids out of it.
+async fn list_models(client: &reqwest::Client, url: &str, headers: &[(String, String)]) -> Listing {
+    let mut builder = client.get(url);
+    // Apply all headers directly — auth is part of the unified headers list
+    for (k, v) in headers {
+        builder = builder.header(k, v);
+    }
+    let resp = match builder.send().await {
+        Ok(resp) => resp,
+        Err(e) => return Listing::Failed(e.to_string()),
+    };
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        let message = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            // Some upstreams put it at the top level
+            .or_else(|| body.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or_else(|| status.canonical_reason().unwrap_or("error"));
+        return Listing::Refused {
+            status: status.as_u16(),
+            message: message.to_string(),
+        };
+    }
+
+    // Extract model list from standard shapes:
+    // OpenAI/Anthropic: { "data": [{ "id": "..." }, ...] }
+    // Google:           { "models": [{ "name": "models/..." }, ...] }
+    let models = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.get("models").and_then(|v| v.as_array()))
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").or_else(|| m.get("name")))
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        });
+    Listing::Listed {
+        status: status.as_u16(),
+        models,
+    }
+}
+
+/// Where a provider other than Bedrock lists its models: a cheap,
+/// read-only endpoint that requires auth, so a wrong key is detected too.
+fn probe_url(
+    provider_type: &str,
+    base_url: &str,
+    validate: &think_watch_common::validation::UrlValidator,
+) -> Result<String, AppError> {
+    validate(base_url)?;
+    Ok(match provider_type {
+        "google" => tw_dialect::url::upstream_url(base_url, "/v1beta/models", None),
+        // anthropic / openai / azure / custom — all answer /v1/models
+        _ => tw_dialect::url::upstream_url(base_url, "/v1/models", None),
+    })
 }
 
 #[cfg(test)]
@@ -749,6 +882,115 @@ mod tests {
         let first = cfg["aws_secret_access_key"].clone();
         encrypt_aws_secret_in_config(&mut cfg, key).unwrap();
         assert_eq!(cfg["aws_secret_access_key"], first);
+    }
+
+    /// A URL check that fails if it is asked at all.
+    fn refuse_urls() -> think_watch_common::validation::UrlValidator {
+        std::sync::Arc::new(|url: &str| {
+            Err(AppError::BadRequest(format!("URL check asked about {url}")))
+        })
+    }
+
+    fn saved_bedrock() -> ProviderMaterials {
+        ProviderMaterials {
+            name: "saved".into(),
+            provider_type: "bedrock".into(),
+            base_url: "us-east-1".into(),
+            headers: vec![("Authorization".into(), "Bearer ABSK-saved".into())],
+            api_version: None,
+            aws: keys("AKIA-saved", "secret-saved"),
+        }
+    }
+
+    fn bedrock_test(headers: &[(&str, &str)], keys: Option<(&str, &str)>) -> TestProviderRequest {
+        TestProviderRequest {
+            provider_type: "bedrock".into(),
+            base_url: "eu-west-1".into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| ProviderHeader {
+                    key: k.to_string(),
+                    value: v.to_string(),
+                })
+                .collect(),
+            config: keys.map(|(ak, sk)| TestProviderConfig {
+                aws_access_key_id: ak.into(),
+                aws_secret_access_key: sk.into(),
+            }),
+            provider_id: None,
+        }
+    }
+
+    fn pair(a: &str, b: &str) -> (String, String) {
+        (a.to_string(), b.to_string())
+    }
+
+    fn keys(id: &str, secret: &str) -> Credential {
+        Credential::Keys {
+            access_key_id: id.into(),
+            secret_access_key: secret.into(),
+        }
+    }
+
+    #[test]
+    fn a_test_takes_what_it_leaves_out_from_the_saved_provider() {
+        // The edit dialog gets secrets back redacted and has no fields for
+        // access keys: a blank header and no keys mean "the saved ones"
+        let m = test_materials(
+            bedrock_test(&[("Authorization", "")], None),
+            Some(&saved_bedrock()),
+        );
+        assert_eq!(m.headers, [pair("Authorization", "Bearer ABSK-saved")]);
+        assert_eq!(m.aws, keys("AKIA-saved", "secret-saved"));
+        // The region under test is the one in the dialog
+        assert_eq!(m.base_url, "eu-west-1");
+    }
+
+    #[test]
+    fn a_tests_own_credentials_win_over_the_saved_ones() {
+        let m = test_materials(
+            bedrock_test(
+                &[("Authorization", "Bearer ABSK-new")],
+                Some(("AKIA-new", "secret-new")),
+            ),
+            Some(&saved_bedrock()),
+        );
+        assert_eq!(m.headers, [pair("Authorization", "Bearer ABSK-new")]);
+        assert_eq!(m.aws, keys("AKIA-new", "secret-new"));
+    }
+
+    #[test]
+    fn a_new_providers_test_has_only_its_own_credentials() {
+        let m = test_materials(bedrock_test(&[], Some(("AKIA-new", "secret-new"))), None);
+        assert_eq!(m.aws, keys("AKIA-new", "secret-new"));
+        // No access key id, no keys: the instance role signs
+        let m = test_materials(bedrock_test(&[("Authorization", "")], Some(("", ""))), None);
+        assert_eq!(m.aws, Credential::InstanceRole);
+        assert_eq!(m.headers, [pair("Authorization", "")]);
+        // An access key ID without its secret cannot sign: refused, not signed with nothing
+        let m = test_materials(bedrock_test(&[], Some(("AKIA-new", ""))), None);
+        assert!(matches!(m.aws, Credential::Unusable(_)), "{:?}", m.aws);
+    }
+
+    #[tokio::test]
+    async fn a_bedrock_test_refuses_anything_but_a_region() {
+        // The host is built from the region, so nothing is sent anywhere
+        let allow_urls: think_watch_common::validation::UrlValidator =
+            std::sync::Arc::new(|_: &str| Ok(()));
+        for bad in ["https://bedrock.us-east-1.amazonaws.com", "evil.example#"] {
+            let req = TestProviderRequest {
+                base_url: bad.into(),
+                ..bedrock_test(&[], Some(("AKIA-new", "secret-new")))
+            };
+            let m = test_materials(req, None);
+            let result = run_provider_test(&m, reqwest::Client::new(), &allow_urls).await;
+            assert!(result.is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn other_providers_still_go_through_the_url_check() {
+        assert!(probe_url("openai", "https://api.openai.com", &refuse_urls()).is_err());
     }
 
     #[test]

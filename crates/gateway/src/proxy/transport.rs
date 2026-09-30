@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crate::bedrock::sigv4::Signer;
+pub use crate::bedrock::sigv4::{Credential, Signer};
 use crate::call_ctx::CallCtx;
 use crate::error::GatewayError;
 
@@ -46,7 +46,8 @@ pub enum Shape {
     /// Azure addresses a model by deployment name in the URL; there is no
     /// model field it reads from the body.
     Azure { api_version: String },
-    /// `https://bedrock-runtime.{region}.amazonaws.com` + the path, signed.
+    /// `https://bedrock-runtime.{region}.amazonaws.com` + the path,
+    /// SigV4-signed unless the provider sends a Bedrock API key.
     ///
     /// The provider row keeps the region in `base_url`. The dialect
     /// already wrote `/model/{id}/converse[-stream]` into the path.
@@ -91,8 +92,6 @@ impl Upstream {
     }
 
     /// Send `body` to `path`, and turn a non-2xx answer into an error.
-    ///
-    /// Signing happens last, over the exact bytes being sent.
     pub async fn send(
         &self,
         body: Vec<u8>,
@@ -102,6 +101,27 @@ impl Upstream {
         extra: &[(String, String)],
         ctx: &CallCtx,
     ) -> Result<reqwest::Response, GatewayError> {
+        let resp = self
+            .request(body, path, query, dialect, extra, ctx)
+            .await?
+            .send()
+            .await
+            .map_err(transport_error)?;
+        check_status(resp, &self.label).await
+    }
+
+    /// The request [`send`](Self::send) sends, built but not sent.
+    ///
+    /// Signing happens last, over the exact bytes being sent.
+    async fn request(
+        &self,
+        body: Vec<u8>,
+        path: &str,
+        query: Option<&str>,
+        dialect: tw_dialect::ir::Dialect,
+        extra: &[(String, String)],
+        ctx: &CallCtx,
+    ) -> Result<reqwest::RequestBuilder, GatewayError> {
         let url = self.url(&body, path, query);
 
         let mut req = self
@@ -128,9 +148,9 @@ impl Upstream {
         if let Some(trace) = &ctx.trace_id {
             req = req.header("x-trace-id", trace.as_str());
         }
-        if let Shape::Bedrock { signer } = &self.shape {
+        if let Some(signer) = self.signer() {
             let signed = signer
-                .sign(&self.client, &url, &body)
+                .sign(&self.client, &reqwest::Method::POST, &url, Some(&body))
                 .await
                 .map_err(|e| GatewayError::ProviderError(e.to_string()))?;
             for (k, v) in signed {
@@ -138,8 +158,26 @@ impl Upstream {
             }
         }
 
-        let resp = req.body(body).send().await.map_err(transport_error)?;
-        check_status(resp, &self.label).await
+        Ok(req.body(body))
+    }
+
+    /// Who signs this upstream's requests, if anyone does.
+    ///
+    /// Bedrock takes two kinds of credential. A Bedrock API key is a
+    /// bearer token the provider row sends in its own `Authorization`
+    /// header: it is the whole credential, there is nothing to sign, and
+    /// signing anyway would add a second `authorization` header, which
+    /// AWS rejects. Without one, every request is SigV4-signed — those
+    /// to the region's control plane too, such as its model listings.
+    pub fn signer(&self) -> Option<&Signer> {
+        match &self.shape {
+            Shape::Bedrock { signer }
+                if !tw_bedrock::carries_api_key(self.headers.iter().map(|(k, _)| k.as_str())) =>
+            {
+                Some(signer)
+            }
+            _ => None,
+        }
     }
 
     fn url(&self, body: &[u8], path: &str, query: Option<&str>) -> String {
@@ -153,10 +191,11 @@ impl Upstream {
                     self.base_url
                 )
             }
-            Shape::Bedrock { signer } => format!(
-                "https://bedrock-runtime.{}.amazonaws.com/{}",
-                signer.region,
-                path.trim_start_matches('/')
+            // The model id goes into the path escaped: an ARN's `/` would
+            // otherwise add a path segment.
+            Shape::Bedrock { signer } => tw_bedrock::endpoint::runtime_url(
+                &tw_bedrock::endpoint::runtime_base(&signer.region),
+                path,
             ),
             _ => tw_dialect::url::upstream_url(&self.base_url, path, query),
         }
@@ -188,8 +227,9 @@ pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
 ///
 /// The upstream's body goes to the caller **truncated**: error bodies
 /// have carried stack traces, AWS account ids and full debug strings,
-/// and forwarding them verbatim turns the gateway into a leak. The full
-/// body goes to the log.
+/// and forwarding them verbatim turns the gateway into a leak. An auth
+/// error keeps its truncated body too, but not in the text the caller
+/// sees. The full body goes to the log.
 async fn check_status(
     resp: reqwest::Response,
     label: &str,
@@ -202,9 +242,6 @@ async fn check_status(
             .and_then(|v| v.to_str().ok())
             .and_then(crate::error::parse_retry_after_seconds);
         return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
-    }
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(GatewayError::UpstreamAuthError);
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -220,9 +257,11 @@ async fn check_status(
         } else {
             body
         };
-        return Err(GatewayError::ProviderHttpError {
-            status: status.as_u16(),
-            message: format!("{label}: {shown}"),
+        let (status, message) = (status.as_u16(), format!("{label}: {shown}"));
+        return Err(if status == 401 || status == 403 {
+            GatewayError::UpstreamAuthError { status, message }
+        } else {
+            GatewayError::ProviderHttpError { status, message }
         });
     }
     Ok(resp)
@@ -299,16 +338,136 @@ mod tests {
         let u = up(
             "us-east-1",
             Shape::Bedrock {
-                signer: Arc::new(Signer {
-                    region: "us-east-1".into(),
-                    access_key_id: None,
-                    secret_access_key: None,
-                }),
+                signer: Arc::new(Signer::new("us-east-1", Credential::InstanceRole)),
             },
         );
         assert_eq!(
             u.url(b"{}", "/model/anthropic.claude-v2/converse", None),
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2/converse"
         );
+    }
+
+    #[test]
+    fn a_bedrock_arn_keeps_its_slash_inside_the_model_segment() {
+        let u = up(
+            "us-east-2",
+            Shape::Bedrock {
+                signer: Arc::new(Signer::new("us-east-2", Credential::InstanceRole)),
+            },
+        );
+        assert_eq!(
+            u.url(
+                b"{}",
+                "/model/arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/a1b2/converse",
+                None
+            ),
+            "https://bedrock-runtime.us-east-2.amazonaws.com/model/\
+             arn:aws:bedrock:us-east-2:123456789012:application-inference-profile%2Fa1b2/converse"
+        );
+    }
+
+    fn answer(status: u16, body: &str) -> reqwest::Response {
+        http_1x::Response::builder()
+            .status(status)
+            .body(body.to_string())
+            .unwrap()
+            .into()
+    }
+
+    #[tokio::test]
+    async fn a_refused_credential_keeps_the_upstreams_reason_out_of_the_callers_sight() {
+        let body =
+            r#"{"message":"You don't have access to the model with the specified model ID."}"#;
+        let err = check_status(answer(403, body), "bedrock")
+            .await
+            .unwrap_err();
+
+        let GatewayError::UpstreamAuthError { status, message } = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(*status, 403);
+        assert!(
+            message.contains("You don't have access to the model"),
+            "{message}"
+        );
+        // The caller is told the gateway's own words: the reason names
+        // the AWS account
+        assert_eq!(err.to_string(), "Authentication failed with upstream");
+        assert_eq!(err.status_code(), 401);
+    }
+
+    const AK: &str = "AKIAIOSFODNN7EXAMPLE";
+    const SK: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+    fn bedrock(headers: &[(&str, &str)], keys: Option<(&str, &str)>) -> Upstream {
+        Upstream::new(
+            "us-east-1",
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            Shape::Bedrock {
+                signer: Arc::new(Signer::new(
+                    "us-east-1",
+                    keys.map_or(Credential::InstanceRole, |(ak, sk)| {
+                        Credential::from_keys(ak.into(), sk.into())
+                    }),
+                )),
+            },
+            "test",
+        )
+    }
+
+    /// The `authorization` headers the request goes out with, and
+    /// whether SigV4 touched it.
+    async fn auth_headers(u: &Upstream) -> (Vec<String>, bool) {
+        let req = u
+            .request(
+                b"{}".to_vec(),
+                "/model/m/converse",
+                None,
+                tw_dialect::ir::Dialect::Bedrock,
+                &[],
+                &CallCtx::default(),
+            )
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let auth = req
+            .headers()
+            .get_all("authorization")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        (auth, req.headers().contains_key("x-amz-date"))
+    }
+
+    #[tokio::test]
+    async fn a_bedrock_api_key_goes_out_as_it_is_and_nothing_is_signed() {
+        // No access keys: signing would have gone to IMDS for credentials
+        let u = bedrock(&[("Authorization", "Bearer ABSK-test")], None);
+        let (auth, signed) = auth_headers(&u).await;
+        assert_eq!(auth, ["Bearer ABSK-test"]);
+        assert!(!signed);
+    }
+
+    #[tokio::test]
+    async fn an_api_key_wins_over_access_keys() {
+        // Signing on top would add a second `authorization`, which AWS
+        // rejects. The header name matches in any case.
+        let u = bedrock(&[("authorization", "Bearer ABSK-test")], Some((AK, SK)));
+        let (auth, signed) = auth_headers(&u).await;
+        assert_eq!(auth, ["Bearer ABSK-test"]);
+        assert!(!signed);
+    }
+
+    #[tokio::test]
+    async fn bedrock_without_an_api_key_is_signed() {
+        let u = bedrock(&[("x-custom", "1")], Some((AK, SK)));
+        let (auth, signed) = auth_headers(&u).await;
+        assert_eq!(auth.len(), 1, "{auth:?}");
+        assert!(auth[0].starts_with("AWS4-HMAC-SHA256 "), "{auth:?}");
+        assert!(signed);
     }
 }

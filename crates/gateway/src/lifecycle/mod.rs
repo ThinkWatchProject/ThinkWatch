@@ -237,7 +237,7 @@ pub(crate) fn build_chat_pump(
         // the door, so the sniffer, the collector and the converter all
         // read the same SSE they read from every other upstream.
         let mut unframe = (wire.dialect == Dialect::Bedrock)
-            .then(crate::bedrock::eventstream::Transcoder::new);
+            .then(tw_bedrock::eventstream::Transcoder::new);
         let mut source = upstream.bytes_stream();
         while let Some(item) = source.next().await {
             let item = match item {

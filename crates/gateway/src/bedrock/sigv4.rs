@@ -1,18 +1,23 @@
-//! AWS SigV4 signing.
+//! AWS SigV4 signing for a Bedrock provider.
 //!
-//! Bedrock is the one upstream that does not take a bearer token: every
-//! request is signed over its method, URL, time and the hash of its body.
-//! So **signing has to happen after the body is final** — change one byte
-//! and the signature no longer matches.
+//! A Bedrock provider without an API key has no bearer token to send:
+//! every request is signed over its method, URL, time and the hash of its
+//! body. So **signing has to happen after the body is final** — change one
+//! byte and the signature no longer matches.
+//!
+//! The signing itself is `tw_bedrock::sign`, shared with the desktop
+//! gateway. What stays here is where the credentials come from: the keys
+//! on the provider row, or else the instance role through IMDSv2.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use aws_credential_types::Credentials;
+use tw_bedrock::Credentials;
 
 /// What went wrong while signing.
 #[derive(Debug)]
 pub enum SignError {
-    /// No credentials: none configured, and IMDSv2 did not answer
+    /// No usable credentials: the stored ones cannot be used, or IMDSv2
+    /// did not answer
     Credentials(String),
     /// Signing itself failed
     Signing(String),
@@ -29,127 +34,204 @@ impl std::fmt::Display for SignError {
 
 impl std::error::Error for SignError {}
 
+/// Where the signing credentials of one Bedrock upstream come from.
+#[derive(Clone, PartialEq)]
+pub enum Credential {
+    /// Access keys stored on the provider row
+    Keys {
+        access_key_id: String,
+        secret_access_key: String,
+    },
+    /// The EC2 instance role, through IMDSv2 — the way a deployment inside
+    /// AWS should work: the role hands the credentials out, they rotate on
+    /// their own, and they never sit in config.
+    InstanceRole,
+    /// Keys are stored but cannot be used, for the reason given. **Requests
+    /// are refused**: signing with an empty secret only earns a
+    /// `SignatureDoesNotMatch` from AWS, and falling back to the instance
+    /// role would send them under a different identity than the one the
+    /// provider was configured with.
+    Unusable(String),
+}
+
+impl Credential {
+    /// The credential a pair of stored keys stands for. No access key ID
+    /// means no keys: the instance role signs.
+    pub fn from_keys(access_key_id: String, secret_access_key: String) -> Self {
+        if access_key_id.is_empty() {
+            Credential::InstanceRole
+        } else if secret_access_key.is_empty() {
+            Credential::Unusable("the access key ID has no secret access key".into())
+        } else {
+            Credential::Keys {
+                access_key_id,
+                secret_access_key,
+            }
+        }
+    }
+}
+
+/// **Never prints the secret.** Providers and signers end up in logs.
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credential::Keys { access_key_id, .. } => f
+                .debug_struct("Keys")
+                .field("access_key_id", access_key_id)
+                .finish_non_exhaustive(),
+            Credential::InstanceRole => f.write_str("InstanceRole"),
+            Credential::Unusable(why) => f.debug_tuple("Unusable").field(why).finish(),
+        }
+    }
+}
+
 /// The signing identity of one Bedrock upstream.
-///
-/// Without keys the credentials come from EC2 instance metadata (IMDSv2) at
-/// call time — the way a deployment inside AWS should work: the instance role
-/// hands them out, they rotate on their own, and they never sit in config.
 pub struct Signer {
     pub region: String,
-    pub access_key_id: Option<String>,
-    pub secret_access_key: Option<String>,
+    pub credential: Credential,
+    /// The instance role's credentials, kept until shortly before they
+    /// expire. Behind an async lock so that a burst of requests at expiry
+    /// makes one trip to IMDS, not one each.
+    lease: tokio::sync::Mutex<Option<Lease>>,
+    /// Where IMDS answers. Only tests point it anywhere else
+    imds: String,
+}
+
+/// Instance-role credentials and when they stop working.
+struct Lease {
+    credentials: Credentials,
+    expires: SystemTime,
 }
 
 /// The IMDS address. **Link-local** — only answers from inside EC2.
 const IMDS: &str = "http://169.254.169.254";
 
+/// Fetch new instance-role credentials this long before the old ones
+/// expire. IMDS itself hands out new ones five minutes ahead.
+const RENEW_BEFORE: Duration = Duration::from_secs(300);
+
 impl Signer {
+    pub fn new(region: impl Into<String>, credential: Credential) -> Self {
+        Self {
+            region: region.into(),
+            credential,
+            lease: Default::default(),
+            imds: IMDS.to_string(),
+        }
+    }
+
     /// Sign a request and return the headers to add (`authorization` and
     /// `x-amz-*`).
     ///
-    /// `body` must be **exactly what will be sent**: the signature covers its hash.
+    /// `body` is the request's JSON body, which must be **exactly what will
+    /// be sent**: the signature covers its hash, and its `content-type`.
+    /// `None` is a request without one, such as a GET — then the signature
+    /// covers the hash of nothing, and there is no content type to sign.
+    /// The signature covers the method and the whole URL, query included.
     pub async fn sign(
         &self,
         client: &reqwest::Client,
+        method: &reqwest::Method,
         url: &str,
-        body: &[u8],
+        body: Option<&[u8]>,
     ) -> Result<Vec<(String, String)>, SignError> {
-        use aws_sigv4::http_request::{
-            PayloadChecksumKind, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
-            sign,
-        };
-        use aws_sigv4::sign::v4;
-
-        let credentials = match (&self.access_key_id, &self.secret_access_key) {
-            (Some(ak), Some(sk)) => Credentials::new(ak, sk, None, None, "think-watch"),
-            _ => self.imdsv2_credentials(client).await?,
-        };
-
-        let identity = credentials.into();
-        let mut settings = SigningSettings::default();
-        settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
-        settings.signature_location = SignatureLocation::Headers;
-
-        let params = v4::SigningParams::builder()
-            .identity(&identity)
-            .region(&self.region)
-            .name("bedrock")
-            .time(SystemTime::now())
-            .settings(settings)
-            .build()
-            .map_err(|e| SignError::Signing(e.to_string()))?;
-
-        let signable = SignableRequest::new(
-            "POST",
+        let credentials = self.credentials(client).await?;
+        tw_bedrock::sign::sign(
+            &credentials,
+            &self.region,
+            method.as_str(),
             url,
-            std::iter::once(("content-type", "application/json")),
-            SignableBody::Bytes(body),
+            body,
+            SystemTime::now(),
         )
-        .map_err(|e| SignError::Signing(e.to_string()))?;
-
-        let (instructions, _signature) = sign(signable, &params.into())
-            .map_err(|e| SignError::Signing(e.to_string()))?
-            .into_parts();
-
-        // The signing library only writes onto an http request, so build an empty one to catch it
-        let mut req = http_1x::Request::builder()
-            .method("POST")
-            .uri(url)
-            .header("content-type", "application/json")
-            .body(())
-            .map_err(|e| SignError::Signing(e.to_string()))?;
-        instructions.apply_to_request_http1x(&mut req);
-
-        // Only the signed ones. **The other headers belong to the caller** —
-        // returning all of them would overwrite what it set itself
-        Ok(req
-            .headers()
-            .iter()
-            .filter(|(n, _)| {
-                let n = n.as_str();
-                n == "authorization" || n.starts_with("x-amz-")
-            })
-            .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or_default().to_string()))
-            .collect())
+        .map_err(|e| SignError::Signing(e.0))
     }
 
-    /// Fetch temporary credentials from EC2 instance metadata.
+    /// The credentials this upstream signs with.
+    pub async fn credentials(&self, client: &reqwest::Client) -> Result<Credentials, SignError> {
+        match &self.credential {
+            Credential::Keys {
+                access_key_id,
+                secret_access_key,
+            } => Ok(Credentials {
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: None,
+            }),
+            Credential::Unusable(why) => Err(SignError::Credentials(why.clone())),
+            Credential::InstanceRole => {
+                let mut lease = self.lease.lock().await;
+                if let Some(l) = lease
+                    .as_ref()
+                    .filter(|l| SystemTime::now() + RENEW_BEFORE < l.expires)
+                {
+                    return Ok(l.credentials.clone());
+                }
+                let (credentials, expires) = self.imdsv2_credentials(client).await?;
+                // Without an expiry there is nothing to keep them by: ask again next time
+                *lease = expires.map(|expires| Lease {
+                    credentials: credentials.clone(),
+                    expires,
+                });
+                Ok(credentials)
+            }
+        }
+    }
+
+    /// Fetch temporary credentials from EC2 instance metadata, and when
+    /// they expire.
     ///
     /// IMDSv2 takes three steps: a short-lived token, then the role name, then
     /// the credentials for that role. v1 answers in one step, which is exactly
     /// why an app with an SSRF hole leaks them — the v2 token needs a PUT, and
     /// an SSRF usually only gets to send GETs.
-    async fn imdsv2_credentials(&self, client: &reqwest::Client) -> Result<Credentials, SignError> {
+    ///
+    /// **Every step checks its status.** An error page read as a token or a
+    /// role name turns into a confusing failure two steps later.
+    async fn imdsv2_credentials(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<(Credentials, Option<SystemTime>), SignError> {
         let fail = |what: &str, e: reqwest::Error| SignError::Credentials(format!("{what}: {e}"));
+        let imds = &self.imds;
 
         let token = client
-            .put(format!("{IMDS}/latest/api/token"))
+            .put(format!("{imds}/latest/api/token"))
             .header("X-aws-ec2-metadata-token-ttl-seconds", "300")
             .send()
             .await
+            .and_then(reqwest::Response::error_for_status)
             .map_err(|e| fail("IMDSv2 token request", e))?
             .text()
             .await
             .map_err(|e| fail("IMDSv2 token read", e))?;
 
         let role = client
-            .get(format!("{IMDS}/latest/meta-data/iam/security-credentials/"))
+            .get(format!("{imds}/latest/meta-data/iam/security-credentials/"))
             .header("X-aws-ec2-metadata-token", &token)
             .send()
             .await
+            .and_then(reqwest::Response::error_for_status)
             .map_err(|e| fail("IMDSv2 role lookup", e))?
             .text()
             .await
             .map_err(|e| fail("IMDSv2 role read", e))?;
-        let role = role.trim();
+        // One role per instance profile; the listing is one name per line
+        let role = role.lines().next().unwrap_or_default().trim();
+        if role.is_empty() {
+            return Err(SignError::Credentials(
+                "IMDSv2 names no role: the instance has no instance profile".into(),
+            ));
+        }
 
         let creds: serde_json::Value = client
             .get(format!(
-                "{IMDS}/latest/meta-data/iam/security-credentials/{role}"
+                "{imds}/latest/meta-data/iam/security-credentials/{role}"
             ))
             .header("X-aws-ec2-metadata-token", &token)
             .send()
             .await
+            .and_then(reqwest::Response::error_for_status)
             .map_err(|e| fail("IMDSv2 credentials fetch", e))?
             .json()
             .await
@@ -160,12 +242,17 @@ impl Signer {
                 .as_str()
                 .ok_or_else(|| SignError::Credentials(format!("IMDSv2 response has no {k}")))
         };
-        Ok(Credentials::new(
-            field("AccessKeyId")?,
-            field("SecretAccessKey")?,
-            creds["Token"].as_str().map(str::to_string),
-            None,
-            "imdsv2",
+        let expires = creds["Expiration"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(SystemTime::from);
+        Ok((
+            Credentials {
+                access_key_id: field("AccessKeyId")?.to_string(),
+                secret_access_key: field("SecretAccessKey")?.to_string(),
+                session_token: creds["Token"].as_str().map(str::to_string),
+            },
+            expires,
         ))
     }
 }
@@ -175,11 +262,32 @@ mod tests {
     use super::*;
 
     fn signer() -> Signer {
-        Signer {
-            region: "us-east-1".into(),
-            access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
-            secret_access_key: Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into()),
-        }
+        Signer::new(
+            "us-east-1",
+            Credential::Keys {
+                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+            },
+        )
+    }
+
+    const CONVERSE: &str = "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse";
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("no {name} in {headers:?}"))
+    }
+
+    /// The `SignedHeaders=` list of an `authorization` header.
+    fn signed_headers(headers: &[(String, String)]) -> &str {
+        let auth = header(headers, "authorization");
+        auth.split("SignedHeaders=")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .unwrap_or_else(|| panic!("no SignedHeaders in {auth}"))
     }
 
     #[tokio::test]
@@ -187,8 +295,9 @@ mod tests {
         let headers = signer()
             .sign(
                 &reqwest::Client::new(),
-                "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse",
-                b"{}",
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
             )
             .await
             .expect("the keys are configured, so IMDS must not be asked");
@@ -208,8 +317,9 @@ mod tests {
         let headers = signer()
             .sign(
                 &reqwest::Client::new(),
-                "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse",
-                b"{}",
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
             )
             .await
             .unwrap();
@@ -226,16 +336,200 @@ mod tests {
         // The signature covers the body — one changed byte must sign
         // differently, or a replayed request with an edited body would pass
         let c = reqwest::Client::new();
-        let url = "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse";
-        let a = signer().sign(&c, url, b"{}").await.unwrap();
-        let b = signer().sign(&c, url, b"{\"x\":1}").await.unwrap();
+        let post = reqwest::Method::POST;
+        let a = signer()
+            .sign(&c, &post, CONVERSE, Some(b"{}"))
+            .await
+            .unwrap();
+        let b = signer()
+            .sign(&c, &post, CONVERSE, Some(b"{\"x\":1}"))
+            .await
+            .unwrap();
 
-        let hash = |h: &[(String, String)]| {
-            h.iter()
-                .find(|(n, _)| n == "x-amz-content-sha256")
-                .map(|(_, v)| v.clone())
-                .unwrap()
+        assert_ne!(
+            header(&a, "x-amz-content-sha256"),
+            header(&b, "x-amz-content-sha256")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_json_body_signs_its_content_type() {
+        let headers = signer()
+            .sign(
+                &reqwest::Client::new(),
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            signed_headers(&headers),
+            "content-type;host;x-amz-content-sha256;x-amz-date"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_get_signs_an_empty_payload_and_no_content_type() {
+        // A GET sends neither a body nor a content type, so signing one
+        // would describe a request that is never sent
+        let headers = signer()
+            .sign(
+                &reqwest::Client::new(),
+                &reqwest::Method::GET,
+                "https://bedrock.us-east-1.amazonaws.com/inference-profiles?type=SYSTEM_DEFINED",
+                None,
+            )
+            .await
+            .expect("the keys are configured, so IMDS must not be asked");
+
+        assert_eq!(
+            header(&headers, "x-amz-content-sha256"),
+            // SHA-256 of zero bytes
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            signed_headers(&headers),
+            "host;x-amz-content-sha256;x-amz-date"
+        );
+    }
+
+    /// A fake IMDS: a role whose credentials expire `lasts` from now. Counts
+    /// the token requests, one per trip to IMDS.
+    async fn imds(token_status: u16, lasts: Duration) -> (String, Arc<AtomicUsize>) {
+        use axum::routing::{get, put};
+        let trips = Arc::new(AtomicUsize::new(0));
+        let counted = trips.clone();
+        let app = axum::Router::new()
+            .route(
+                "/latest/api/token",
+                put(move || {
+                    let counted = counted.clone();
+                    async move {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::from_u16(token_status).unwrap(),
+                            "tok",
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/latest/meta-data/iam/security-credentials/",
+                get(|| async { "dev-role\n" }),
+            )
+            .route(
+                "/latest/meta-data/iam/security-credentials/dev-role",
+                get(move || async move {
+                    let expires = chrono::Utc::now() + lasts;
+                    axum::Json(serde_json::json!({
+                        "AccessKeyId": "ASIAROLE",
+                        "SecretAccessKey": "role-secret",
+                        "Token": "role-token",
+                        "Expiration": expires.to_rfc3339(),
+                    }))
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (format!("http://{addr}"), trips)
+    }
+
+    fn role_signer(imds: String) -> Signer {
+        let mut s = Signer::new("us-east-1", Credential::InstanceRole);
+        s.imds = imds;
+        s
+    }
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn the_instance_roles_credentials_are_kept_until_shortly_before_they_expire() {
+        let (url, trips) = imds(200, Duration::from_secs(3600)).await;
+        let s = role_signer(url);
+        let c = reqwest::Client::new();
+        for _ in 0..3 {
+            let got = s.credentials(&c).await.unwrap();
+            assert_eq!(got.access_key_id, "ASIAROLE");
+            assert_eq!(got.session_token.as_deref(), Some("role-token"));
+        }
+        assert_eq!(
+            trips.load(Ordering::SeqCst),
+            1,
+            "one trip to IMDS, not one per request"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_about_to_expire_are_fetched_again() {
+        let (url, trips) = imds(200, Duration::from_secs(120)).await;
+        let s = role_signer(url);
+        let c = reqwest::Client::new();
+        s.credentials(&c).await.unwrap();
+        s.credentials(&c).await.unwrap();
+        assert_eq!(trips.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_imds_refusal_says_which_step_failed() {
+        let (url, _) = imds(401, Duration::from_secs(3600)).await;
+        let err = role_signer(url)
+            .credentials(&reqwest::Client::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("IMDSv2 token request"), "{err}");
+        assert!(err.contains("401"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unusable_keys_are_refused_without_asking_anyone() {
+        // IMDS points nowhere: asking it would fail differently
+        let s = Signer {
+            imds: "http://127.0.0.1:9".into(),
+            ..Signer::new(
+                "us-east-1",
+                Credential::Unusable("the stored secret access key could not be decrypted".into()),
+            )
         };
-        assert_ne!(hash(&a), hash(&b));
+        let err = s
+            .sign(
+                &reqwest::Client::new(),
+                &reqwest::Method::POST,
+                CONVERSE,
+                Some(b"{}"),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "AWS credentials are unavailable: the stored secret access key could not be decrypted"
+        );
+    }
+
+    #[test]
+    fn stored_keys_become_a_credential() {
+        assert_eq!(
+            Credential::from_keys(String::new(), "anything".into()),
+            Credential::InstanceRole
+        );
+        assert!(matches!(
+            Credential::from_keys("AKIA".into(), String::new()),
+            Credential::Unusable(_)
+        ));
+        assert!(matches!(
+            Credential::from_keys("AKIA".into(), "s".into()),
+            Credential::Keys { .. }
+        ));
+    }
+
+    #[test]
+    fn debug_output_leaves_the_secret_out() {
+        let shown = format!("{:?}", signer().credential);
+        assert!(shown.contains("AKIAIOSFODNN7EXAMPLE"), "{shown}");
+        assert!(!shown.contains("wJalr"), "{shown}");
     }
 }

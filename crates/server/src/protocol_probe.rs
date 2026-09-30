@@ -179,10 +179,11 @@ fn probe_request(
 ///
 /// Auth, rate-limit and transport failures say nothing — recording
 /// "unavailable" off the back of an expired key would blacklist an
-/// entire catalog for good, since verdicts don't expire.
+/// entire catalog for good, since verdicts don't expire. (A refused
+/// credential can still come to say something: see [`settle`].)
 fn is_inconclusive(err: &GatewayError) -> bool {
     match err {
-        GatewayError::UpstreamAuthError
+        GatewayError::UpstreamAuthError { .. }
         | GatewayError::UpstreamRateLimited { .. }
         | GatewayError::NetworkError(_)
         | GatewayError::ProviderTimeout(_) => true,
@@ -192,8 +193,18 @@ fn is_inconclusive(err: &GatewayError) -> bool {
     }
 }
 
+/// What probing one model found.
+#[derive(Debug, PartialEq)]
+enum Probe {
+    Verdict(Verdict),
+    /// The upstream refused the credential for this model (401/403): the
+    /// attempts' wording, the refusal last. On its own that says nothing
+    /// about the model — see [`settle`].
+    CredentialRefused(Vec<String>),
+}
+
 /// Probe one model across its candidate dialects, first answer wins.
-async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdict {
+async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Probe {
     let candidates = UpstreamProtocol::candidates_for(&materials.provider_type, upstream_model);
     // Every refusal, not just the last one. The verdict is "no dialect
     // works", and reporting a single attempt's wording invites the
@@ -227,7 +238,11 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
             Ok(Ok(resp)) => {
                 // Drain it so the connection goes back to the pool.
                 let _ = resp.bytes().await;
-                return Verdict::Ok(candidate);
+                return Probe::Verdict(Verdict::Ok(candidate));
+            }
+            Ok(Err(GatewayError::UpstreamAuthError { status, message })) => {
+                refusals.push(format!("{candidate}: HTTP {status}: {message}"));
+                return Probe::CredentialRefused(refusals);
             }
             Ok(Err(e)) if is_inconclusive(&e) => {
                 tracing::warn!(
@@ -235,7 +250,7 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
                     model = %upstream_model,
                     "Probe inconclusive — not recording a verdict: {e}"
                 );
-                return Verdict::Unknown;
+                return Probe::Verdict(Verdict::Unknown);
             }
             Ok(Err(e)) => refusals.push(format!("{candidate}: {e}")),
             Err(_elapsed) => {
@@ -245,7 +260,7 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
                     protocol = %candidate,
                     "Probe timed out"
                 );
-                return Verdict::Unknown;
+                return Probe::Verdict(Verdict::Unknown);
             }
         }
     }
@@ -253,9 +268,45 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
     if refusals.is_empty() {
         // No candidates at all shouldn't happen, but "we learned
         // nothing" is the honest reading if it does.
-        return Verdict::Unknown;
+        return Probe::Verdict(Verdict::Unknown);
     }
-    Verdict::Unavailable(unavailable_reason(&refusals))
+    Probe::Verdict(Verdict::Unavailable(unavailable_reason(&refusals)))
+}
+
+/// The verdict a probe comes to, once it is known whether the provider's
+/// credential is good at all.
+///
+/// A refused credential says nothing about a model while the credential
+/// might be what is wrong: an expired key refuses every model, and
+/// verdicts don't expire. Known to be good, it was refused for this
+/// model alone — access to it isn't granted, or a policy denies it — and
+/// that is as much a verdict as any other refusal.
+fn settle(probe: Probe, credential_good: bool) -> Verdict {
+    match probe {
+        Probe::Verdict(verdict) => verdict,
+        Probe::CredentialRefused(refusals) if credential_good => {
+            Verdict::Unavailable(unavailable_reason(&refusals))
+        }
+        Probe::CredentialRefused(_) => Verdict::Unknown,
+    }
+}
+
+/// Is the provider's credential good, whatever it was refused for?
+///
+/// Only Bedrock can say: its control plane answers to the same
+/// credential its models do, so a listing it serves proves the credential
+/// good. An OpenAI-style `/v1/models` proves nothing — some serve it to
+/// anyone. For any other provider a refusal stays inconclusive.
+async fn is_credential_good(materials: &ProviderMaterials) -> bool {
+    if materials.provider_type != "bedrock" {
+        return false;
+    }
+    let Ok(endpoint) = crate::bedrock_catalog::endpoint(&materials.base_url) else {
+        return false;
+    };
+    let upstream = build_upstream(materials);
+    let check = crate::bedrock_catalog::accepts_credential(&upstream.client, &endpoint, &upstream);
+    matches!(tokio::time::timeout(PROBE_TIMEOUT, check).await, Ok(true))
 }
 
 /// Compose the wording an operator reads when a model is refused.
@@ -309,16 +360,33 @@ pub(crate) async fn resolve(
 
     let materials = ProviderMaterials::from_provider(provider, encryption_key);
     let materials = &materials;
-    let probed: Vec<(String, Verdict)> = stream::iter(to_probe)
+    let probed: Vec<(String, Probe)> = stream::iter(to_probe)
         .map(move |model| async move {
-            let verdict = probe_one(materials, &model).await;
-            (model, verdict)
+            let probe = probe_one(materials, &model).await;
+            (model, probe)
         })
         .buffer_unordered(PROBE_CONCURRENCY)
         .collect()
         .await;
 
-    for (model, verdict) in probed {
+    // Asked once for the whole batch, and only when it matters
+    let credential_good = probed
+        .iter()
+        .any(|(_, probe)| matches!(probe, Probe::CredentialRefused(_)))
+        && is_credential_good(materials).await;
+
+    for (model, probe) in probed {
+        if let Probe::CredentialRefused(refusals) = &probe
+            && !credential_good
+        {
+            tracing::warn!(
+                provider = %provider.name,
+                model = %model,
+                "Probe inconclusive — the credential was refused: {}",
+                refusals.join(" | ")
+            );
+        }
+        let verdict = settle(probe, credential_good);
         record(db, provider.id, &model, &verdict).await;
         match &verdict {
             Verdict::Ok(p) => tracing::info!(
@@ -344,7 +412,10 @@ mod tests {
     fn transient_failures_never_become_a_permanent_verdict() {
         // Verdicts don't expire, so recording "unavailable" off an
         // expired key would blacklist a whole catalog for good.
-        assert!(is_inconclusive(&GatewayError::UpstreamAuthError));
+        assert!(is_inconclusive(&GatewayError::UpstreamAuthError {
+            status: 401,
+            message: "OpenAI: invalid key".into(),
+        }));
         assert!(is_inconclusive(&GatewayError::UpstreamRateLimited {
             retry_after_secs: None
         }));
@@ -355,6 +426,29 @@ mod tests {
             status: 503,
             message: "OpenAI: overloaded".into(),
         }));
+    }
+
+    #[test]
+    fn a_refused_credential_is_a_verdict_only_once_the_credential_is_known_good() {
+        let refused = || {
+            Probe::CredentialRefused(vec![
+                "bedrock_native: HTTP 403: Bedrock: {\"message\":\"You don't have access to \
+                 the model with the specified model ID.\"}"
+                    .into(),
+            ])
+        };
+        // An expired key refuses every model: nothing is learned about any
+        assert_eq!(settle(refused(), false), Verdict::Unknown);
+        // A good credential refused for this model: it is out of reach
+        let Verdict::Unavailable(reason) = settle(refused(), true) else {
+            panic!("a refusal of a good credential is a verdict");
+        };
+        assert!(reason.contains("You don't have access to"), "{reason}");
+        // Everything else is what the probe found
+        assert_eq!(
+            settle(Probe::Verdict(Verdict::Unknown), true),
+            Verdict::Unknown
+        );
     }
 
     #[test]

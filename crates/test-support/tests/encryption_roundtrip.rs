@@ -269,7 +269,7 @@ async fn provider_create_encrypts_aws_bedrock_secret() {
                 "name": "bedrock-encrypted-test",
                 "display_name": "AWS Bedrock (encryption test)",
                 "provider_type": "bedrock",
-                "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "base_url": "us-east-1",
                 "headers": [],
                 "config": {
                     "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",

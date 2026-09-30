@@ -656,6 +656,12 @@ pub struct CreateModelRouteRequest {
     /// Per-route TPM cap (must be > 0 if set).
     #[serde(default)]
     pub tpm_cap: Option<i32>,
+    /// Create the route even if the provider has refused the model.
+    /// Without it such a route is refused with `model_not_served`; the
+    /// admin may know better — the refusal can be stale, or be about
+    /// the probe's request rather than the model.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// POST /api/admin/models/{model_id}/routes
@@ -708,7 +714,8 @@ pub async fn create_model_route(
 
     // Same check the bulk import runs: don't create a route the
     // upstream has told us it won't serve. Refusing here beats creating
-    // it and letting the operator find out on their first call.
+    // it and letting the operator find out on their first call — unless
+    // they say to create it anyway.
     let verdict = crate::protocol_probe::resolve(
         &state.db,
         &provider,
@@ -719,11 +726,15 @@ pub async fn create_model_route(
     .await
     .remove(&upstream_model)
     .unwrap_or(crate::protocol_probe::Verdict::Unknown);
-    if let crate::protocol_probe::Verdict::Unavailable(reason) = &verdict {
-        return Err(AppError::BadRequest(format!(
-            "Provider does not serve '{upstream_model}': {reason}"
-        )));
-    }
+    let overridden = match &verdict {
+        crate::protocol_probe::Verdict::Unavailable(reason) if !req.force => {
+            return Err(AppError::ModelNotServed(format!(
+                "Provider does not serve '{upstream_model}': {reason}"
+            )));
+        }
+        crate::protocol_probe::Verdict::Unavailable(reason) => Some(reason.clone()),
+        _ => None,
+    };
     let upstream_protocol = verdict.protocol().map(|p| p.as_str().to_string());
 
     let row = repo::insert_route(
@@ -743,15 +754,21 @@ pub async fn create_model_route(
     )
     .await?;
 
+    let mut detail = serde_json::json!({
+        "model_id": &model_id,
+        "provider_id": req.provider_id,
+    });
+    // Creating a route the provider refused is a call an auditor may
+    // want to find, with the refusal it overrode.
+    if let Some(reason) = overridden {
+        detail["refusal_overridden"] = serde_json::Value::String(reason);
+    }
     state.audit.log(
         auth_user
             .audit("model_route.created")
             .resource("model_route")
             .resource_id(row.id.to_string())
-            .detail(serde_json::json!({
-                "model_id": &model_id,
-                "provider_id": req.provider_id,
-            })),
+            .detail(detail),
     );
 
     crate::app::rebuild_gateway_router(&state).await;
@@ -1378,25 +1395,15 @@ pub async fn list_remote_models(
         .await?
         .ok_or(AppError::NotFound("Provider not found".into()))?;
 
-    // Stored header values are `{"$enc": …}` envelopes, so they have to
-    // be decrypted here — deserializing them straight into
-    // `Vec<ProviderHeader>` fails and yields an empty list, which sent
-    // the model probe upstream with no API key at all.
-    let headers = super::providers::decrypt_headers_from_config(
-        &provider.config_json,
+    // Connect as the gateway does: decrypted headers, and for Bedrock the
+    // saved access keys.
+    let materials = crate::gateway_adapters::ProviderMaterials::from_provider(
+        &provider,
         &state.config.encryption_key,
-        &provider.name,
     );
-    let test_req = super::providers::TestProviderRequest {
-        provider_type: provider.provider_type.clone(),
-        base_url: provider.base_url.clone(),
-        headers,
-        provider_id: Some(provider.id),
-    };
-
     let http_client = (**state.http_client.load()).clone();
     let Json(resp) =
-        super::providers::run_provider_test(test_req, http_client, &state.url_validator).await?;
+        super::providers::run_provider_test(&materials, http_client, &state.url_validator).await?;
     if !resp.success {
         return Err(AppError::BadRequest(format!(
             "Provider unreachable: {}",
@@ -1449,23 +1456,13 @@ pub async fn recheck_provider_models(
         .await?
         .ok_or(AppError::NotFound("Provider not found".into()))?;
 
-    let headers = super::providers::decrypt_headers_from_config(
-        &provider.config_json,
+    let materials = crate::gateway_adapters::ProviderMaterials::from_provider(
+        &provider,
         &state.config.encryption_key,
-        &provider.name,
     );
     let http_client = (**state.http_client.load()).clone();
-    let Json(resp) = super::providers::run_provider_test(
-        super::providers::TestProviderRequest {
-            provider_type: provider.provider_type.clone(),
-            base_url: provider.base_url.clone(),
-            headers,
-            provider_id: Some(provider.id),
-        },
-        http_client,
-        &state.url_validator,
-    )
-    .await?;
+    let Json(resp) =
+        super::providers::run_provider_test(&materials, http_client, &state.url_validator).await?;
     if !resp.success {
         return Err(AppError::BadRequest(format!(
             "Provider unreachable: {}",

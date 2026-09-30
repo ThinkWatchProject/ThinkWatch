@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use think_watch_gateway::proxy::transport::{Shape, Signer, Upstream};
+use think_watch_gateway::proxy::transport::{Credential, Shape, Signer, Upstream};
 
 use think_watch_common::models::Provider;
 
@@ -19,19 +19,23 @@ pub(crate) struct ProviderMaterials {
     pub(crate) base_url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) api_version: Option<String>,
-    /// `"access_key:secret_key"`, or empty for IMDSv2 mode. Only read
-    /// by the Bedrock adapter.
-    pub(crate) bedrock_credentials: String,
+    /// What a Bedrock provider signs with: its access keys, the instance
+    /// role (IMDSv2), or keys that cannot be used. A provider with a
+    /// Bedrock API key (an `Authorization` header) has no keys and is
+    /// never signed. Only read by the Bedrock adapter.
+    pub(crate) aws: Credential,
 }
 
 impl ProviderMaterials {
     /// Decrypt a stored provider row into adapter inputs.
     ///
-    /// Failures degrade rather than abort: a header that won't decrypt
-    /// is dropped (logged by `decrypt_headers_from_config`) and an
-    /// undecryptable AWS secret falls back to IMDSv2 mode, matching the
-    /// router build's long-standing behaviour of keeping the gateway up
-    /// with a degraded provider instead of refusing to boot.
+    /// Failures degrade rather than abort, keeping the gateway up with a
+    /// degraded provider instead of refusing to boot: a header that won't
+    /// decrypt is dropped (logged by `decrypt_headers_from_config`), and a
+    /// Bedrock provider whose secret won't decrypt refuses its requests
+    /// until the keys are saved again. It does not fall back to the
+    /// instance role: that would sign with a different identity than the
+    /// one configured.
     pub(crate) fn from_provider(provider: &Provider, encryption_key: &str) -> Self {
         let headers = crate::handlers::providers::decrypt_headers_from_config(
             &provider.config_json,
@@ -53,21 +57,22 @@ impl ProviderMaterials {
         let secret_key = provider
             .config_json
             .get("aws_secret_access_key")
-            .map(|v| {
-                crate::handlers::providers::decrypt_secret_from_json(v, encryption_key)
-                    .unwrap_or_else(|e| {
-                        tracing::error!(
-                            provider = %provider.name,
-                            "Failed to decrypt aws_secret_access_key — treating as IMDSv2 mode: {e}"
-                        );
-                        String::new()
-                    })
-            })
-            .unwrap_or_default();
-        let bedrock_credentials = if access_key.is_empty() && secret_key.is_empty() {
-            String::new() // IMDSv2 mode
-        } else {
-            format!("{access_key}:{secret_key}")
+            .map(|v| crate::handlers::providers::decrypt_secret_from_json(v, encryption_key))
+            .transpose();
+        // No access key id: the instance role signs (IMDSv2)
+        let aws = match secret_key {
+            Ok(secret) => Credential::from_keys(access_key, secret.unwrap_or_default()),
+            Err(e) if !access_key.is_empty() => {
+                tracing::error!(
+                    provider = %provider.name,
+                    "Failed to decrypt aws_secret_access_key — requests are refused until the keys are saved again: {e}"
+                );
+                Credential::Unusable(
+                    "the stored secret access key could not be decrypted; save the provider's keys again"
+                        .into(),
+                )
+            }
+            Err(_) => Credential::InstanceRole,
         };
 
         Self {
@@ -80,7 +85,7 @@ impl ProviderMaterials {
                 .get("api_version")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            bedrock_credentials,
+            aws,
         }
     }
 }
@@ -101,19 +106,12 @@ pub(crate) fn build_upstream(m: &ProviderMaterials) -> Arc<Upstream> {
                 .unwrap_or_else(|| AZURE_DEFAULT_API_VERSION.to_string()),
         },
         "bedrock" => {
-            // `access_key:secret_key`, or empty for IMDSv2 — the instance
-            // role then supplies rotating credentials.
-            let (access_key_id, secret_access_key) = match m.bedrock_credentials.split_once(':') {
-                Some((a, s)) if !a.is_empty() => (Some(a.to_string()), Some(s.to_string())),
-                _ => (None, None),
-            };
+            // Without keys the instance role (IMDSv2) supplies rotating
+            // credentials. A provider with a Bedrock API key in its
+            // headers is never signed, whatever is set here.
             Shape::Bedrock {
-                signer: Arc::new(Signer {
-                    // The provider row keeps the region in `base_url`.
-                    region: m.base_url.clone(),
-                    access_key_id,
-                    secret_access_key,
-                }),
+                // The provider row keeps the region in `base_url`.
+                signer: Arc::new(Signer::new(m.base_url.clone(), m.aws.clone())),
             }
         }
         _ => Shape::Standard,
@@ -129,3 +127,54 @@ pub(crate) fn build_upstream(m: &ProviderMaterials) -> Arc<Upstream> {
 /// The API version an Azure deployment is addressed with when the
 /// provider row names none.
 const AZURE_DEFAULT_API_VERSION: &str = "2024-12-01-preview";
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use think_watch_common::json_secret::JsonSecret;
+
+    use super::*;
+
+    fn bedrock_row(config: serde_json::Value) -> Provider {
+        Provider {
+            id: uuid::Uuid::nil(),
+            name: "br".into(),
+            display_name: "br".into(),
+            provider_type: "bedrock".into(),
+            base_url: "us-east-1".into(),
+            is_active: true,
+            config_json: config,
+            created_at: chrono::Utc::now(),
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn a_secret_that_will_not_decrypt_refuses_instead_of_switching_identity() {
+        let key = hex::encode([0u8; 32]);
+        let row = |secret: serde_json::Value| {
+            bedrock_row(json!({"aws_access_key_id": "AKIA", "aws_secret_access_key": secret}))
+        };
+
+        // Encrypted under another key: the instance role must not stand in
+        let foreign = JsonSecret::encrypt("s3cret", &hex::encode([1u8; 32]))
+            .unwrap()
+            .to_json();
+        let m = ProviderMaterials::from_provider(&row(foreign), &key);
+        assert!(matches!(m.aws, Credential::Unusable(_)), "{:?}", m.aws);
+
+        let ours = JsonSecret::encrypt("s3cret", &key).unwrap().to_json();
+        let m = ProviderMaterials::from_provider(&row(ours), &key);
+        assert_eq!(
+            m.aws,
+            Credential::Keys {
+                access_key_id: "AKIA".into(),
+                secret_access_key: "s3cret".into(),
+            }
+        );
+
+        // No keys at all: the instance role, as before
+        let m = ProviderMaterials::from_provider(&bedrock_row(json!({})), &key);
+        assert_eq!(m.aws, Credential::InstanceRole);
+    }
+}
