@@ -1094,6 +1094,7 @@
     "scopeTeamPick": "Pick a team",
     "scopeTeamRequired": "Pick a team for the team scope.",
     "scopeNoTeams": "No teams to scope to.",
+    "scopeTeamNoGateway": "A role assigned at team scope grants administration of that team only. It does not grant access to models or MCP tools through the gateways.",
     "userId": "User ID",
     "effectivePermissions": "Effective permissions",
     "effectivePermissionsDesc": "Union of every selected role. This is what the user will be able to do once you save.",

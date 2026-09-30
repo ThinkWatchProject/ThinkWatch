@@ -9,7 +9,10 @@ use uuid::Uuid;
 // permissions, model/tool scopes, rate limits, and budgets.
 //
 // Permissions (Allow actions): UNION across roles — most permissive.
-// Model scope: UNION; if any role has Resource:"*" → unrestricted.
+// Model / MCP tool scope: UNION over the roles that grant
+// `ai_gateway:use` / `mcp_gateway:use`; a role that grants neither
+// contributes nothing, and only global and team-inherited roles count
+// (a role granted at team scope administers that team only).
 // Rate limits: per (metric, window) take MIN MaxCount — most restrictive.
 // Budgets: per Period take MIN MaxTokens — most restrictive.
 // Deny statements: win over Allow across all roles.
@@ -55,6 +58,36 @@ async fn load_user_policy_documents(
     let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
         "SELECT DISTINCT r.policy_document FROM ( \
            SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) roles \
+         JOIN rbac_roles r ON r.id = roles.role_id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(v,)| v).collect())
+}
+
+/// The policy documents that decide gateway access for `user_id`:
+/// roles assigned at global scope, plus roles attached to a team the
+/// user is a member of (a team's roles are its members' working roles).
+///
+/// Roles granted at `scope_kind = 'team'` are left out. Such a grant
+/// lets the holder administer that team from the console; gateway
+/// requests carry no team, so honouring it here would turn a team
+/// grant into platform-wide model and tool access.
+async fn load_gateway_policy_documents(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT DISTINCT r.policy_document FROM ( \
+           SELECT ra.role_id FROM rbac_role_assignments ra \
+            WHERE ra.user_id = $1 AND ra.scope_kind = 'global' \
            UNION \
            SELECT tra.role_id \
              FROM team_members tm \
@@ -157,63 +190,124 @@ pub async fn compute_user_role_assignments(
         .collect())
 }
 
-/// Effective resource constraints for a user, derived by union'ing
-/// every role's model and MCP tool scopes from their policy_documents.
+/// Effective gateway access for a user, derived from the roles that
+/// decide it (see [`load_gateway_policy_documents`]).
 ///
-///   - If ANY role has `Resource: "*"` on the relevant gateway
-///     statement, the field in the result is `None` (unrestricted).
-///   - Otherwise the result is the union of every role's scoped
-///     resources, deduplicated.
+///   - `ai_gateway` / `mcp_gateway` is true when some role grants
+///     `ai_gateway:use` / `mcp_gateway:use` and no role denies it.
+///   - Only roles that grant a surface contribute resources to it. If
+///     one of them has `Resource: "*"`, the list is `None`
+///     (unrestricted); otherwise it is the union of their scoped
+///     resources.
+///   - A surface that is not granted has an empty list (`Some([])`),
+///     never `None`, so a caller that forgets the flag still allows
+///     nothing.
 ///
 /// This is what the gateway middleware merges with the per-API-key
 /// allow-list (if any) before calling into the proxy.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserResourceLimits {
+    pub ai_gateway: bool,
     pub allowed_models: Option<Vec<String>>,
+    pub mcp_gateway: bool,
     /// MCP tool patterns: `None` = unrestricted, `["mysql__*"]` = server
     /// wildcard, `["mysql__query"]` = exact tool.
     pub allowed_mcp_tools: Option<Vec<String>>,
+}
+
+impl UserResourceLimits {
+    /// Neither gateway, nothing on either.
+    pub fn none() -> Self {
+        Self {
+            ai_gateway: false,
+            allowed_models: Some(Vec::new()),
+            mcp_gateway: false,
+            allowed_mcp_tools: Some(Vec::new()),
+        }
+    }
 }
 
 pub async fn compute_user_resource_limits(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<UserResourceLimits, sqlx::Error> {
-    let docs = load_user_policy_documents(pool, user_id).await?;
-    if docs.is_empty() {
-        return Ok(UserResourceLimits {
-            allowed_models: None,
-            allowed_mcp_tools: None,
-        });
-    }
+    let docs = load_gateway_policy_documents(pool, user_id).await?;
+    Ok(resource_limits_from_documents(&docs))
+}
 
-    let mut models_unrestricted = false;
-    let mut tools_unrestricted = false;
-    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+/// One gateway surface, folded across roles.
+struct SurfaceGrant {
+    granted: bool,
+    unrestricted: bool,
+    items: std::collections::BTreeSet<String>,
+}
 
-    for doc in &docs {
-        match think_watch_common::limits::extract_allowed_models(doc) {
-            None => models_unrestricted = true,
-            Some(list) => models.extend(list),
-        }
-        match think_watch_common::limits::extract_allowed_mcp_tools(doc) {
-            None => tools_unrestricted = true,
-            Some(list) => tools.extend(list),
+impl SurfaceGrant {
+    fn new() -> Self {
+        Self {
+            granted: false,
+            unrestricted: false,
+            items: std::collections::BTreeSet::new(),
         }
     }
 
-    Ok(UserResourceLimits {
-        allowed_models: if models_unrestricted {
-            None
+    fn add(&mut self, scope: think_watch_common::limits::ResourceScope) {
+        use think_watch_common::limits::ResourceScope;
+        match scope {
+            ResourceScope::NotGranted => {}
+            ResourceScope::All => {
+                self.granted = true;
+                self.unrestricted = true;
+            }
+            ResourceScope::Only(list) => {
+                self.granted = true;
+                self.items.extend(list);
+            }
+        }
+    }
+
+    fn finish(self, denied: bool) -> (bool, Option<Vec<String>>) {
+        if !self.granted || denied {
+            (false, Some(Vec::new()))
+        } else if self.unrestricted {
+            (true, None)
         } else {
-            Some(models.into_iter().collect())
-        },
-        allowed_mcp_tools: if tools_unrestricted {
-            None
-        } else {
-            Some(tools.into_iter().collect())
-        },
-    })
+            (true, Some(self.items.into_iter().collect()))
+        }
+    }
+}
+
+fn resource_limits_from_documents(docs: &[serde_json::Value]) -> UserResourceLimits {
+    use think_watch_common::limits::{extract_mcp_tool_scope, extract_model_scope};
+
+    let mut models = SurfaceGrant::new();
+    let mut tools = SurfaceGrant::new();
+    for doc in docs {
+        models.add(extract_model_scope(doc));
+        tools.add(extract_mcp_tool_scope(doc));
+    }
+
+    // An explicit Deny on the whole action, in any of these roles, closes
+    // the surface — the same rule `compute_denied_permissions` applies to
+    // console permissions.
+    let policies: Vec<PolicyDocument> = docs
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    let denied = |action: &str| {
+        policies
+            .iter()
+            .any(|doc| evaluate_policy(doc, action, "*") == PolicyResult::Deny)
+    };
+
+    let (ai_gateway, allowed_models) = models.finish(denied("ai_gateway:use"));
+    let (mcp_gateway, allowed_mcp_tools) = tools.finish(denied("mcp_gateway:use"));
+    UserResourceLimits {
+        ai_gateway,
+        allowed_models,
+        mcp_gateway,
+        allowed_mcp_tools,
+    }
 }
 
 /// Role-only merged surface constraints — the baseline before any
@@ -334,19 +428,6 @@ pub async fn compute_effective_surface_constraints(
     }
 
     Ok(apply_user_overrides(user_merged, key_overrides))
-}
-
-/// Check if a namespaced MCP tool name matches any of the allowed patterns.
-/// Patterns: `"*"` matches all, `"mysql__*"` matches prefix, exact otherwise.
-pub fn is_mcp_tool_allowed(patterns: Option<&[String]>, namespaced_name: &str) -> bool {
-    match patterns {
-        None => true, // NULL = unrestricted
-        Some(pats) => pats.iter().any(|p| {
-            p == "*"
-                || (p.ends_with("__*") && namespaced_name.starts_with(&p[..p.len() - 1]))
-                || p == namespaced_name
-        }),
-    }
 }
 
 /// Compute the set of permissions that are explicitly denied to `user_id`
@@ -847,5 +928,85 @@ mod tests {
             evaluate_policy(&doc, "system:settings", "*"),
             PolicyResult::Deny
         );
+    }
+
+    // --- Gateway resource limits ---
+
+    fn doc(statement: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"Version": "2024-01-01", "Statement": [statement]})
+    }
+
+    fn viewer() -> serde_json::Value {
+        doc(serde_json::json!({
+            "Effect": "Allow",
+            "Action": ["api_keys:read", "providers:read", "models:read", "mcp_servers:read", "analytics:read_own"],
+            "Resource": "*"
+        }))
+    }
+
+    fn developer() -> serde_json::Value {
+        doc(serde_json::json!({
+            "Effect": "Allow",
+            "Action": ["ai_gateway:use", "mcp_gateway:use", "api_keys:read"],
+            "Resource": "*"
+        }))
+    }
+
+    #[test]
+    fn no_roles_grant_nothing() {
+        assert_eq!(
+            resource_limits_from_documents(&[]),
+            UserResourceLimits::none()
+        );
+    }
+
+    #[test]
+    fn a_role_without_gateway_use_grants_nothing() {
+        assert_eq!(
+            resource_limits_from_documents(&[viewer()]),
+            UserResourceLimits::none()
+        );
+    }
+
+    #[test]
+    fn a_role_without_gateway_use_does_not_widen_another() {
+        let only_a = doc(serde_json::json!({
+            "Effect": "Allow",
+            "Action": ["ai_gateway:use"],
+            "Resource": ["model:model-a"]
+        }));
+        let limits = resource_limits_from_documents(&[only_a, viewer()]);
+        assert!(limits.ai_gateway);
+        assert_eq!(limits.allowed_models, Some(vec!["model-a".to_string()]));
+        assert!(!limits.mcp_gateway);
+        assert_eq!(limits.allowed_mcp_tools, Some(vec![]));
+    }
+
+    #[test]
+    fn a_gateway_role_with_resource_star_is_unrestricted() {
+        let limits = resource_limits_from_documents(&[developer(), viewer()]);
+        assert_eq!(
+            limits,
+            UserResourceLimits {
+                ai_gateway: true,
+                allowed_models: None,
+                mcp_gateway: true,
+                allowed_mcp_tools: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_deny_on_the_action_closes_the_surface() {
+        let deny = doc(serde_json::json!({
+            "Effect": "Deny",
+            "Action": "ai_gateway:use",
+            "Resource": "*"
+        }));
+        let limits = resource_limits_from_documents(&[developer(), deny]);
+        assert!(!limits.ai_gateway);
+        assert_eq!(limits.allowed_models, Some(vec![]));
+        assert!(limits.mcp_gateway);
+        assert_eq!(limits.allowed_mcp_tools, None);
     }
 }

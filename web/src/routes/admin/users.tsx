@@ -1302,6 +1302,9 @@ function RoleAssignmentEditor({
           )}
         </div>
       )}
+      {(pendingKind === 'team' || value.some((a) => parseScope(a.scope).kind === 'team')) && (
+        <p className="text-[11px] text-muted-foreground">{t('users.scopeTeamNoGateway')}</p>
+      )}
     </div>
   );
 }
@@ -1317,7 +1320,11 @@ function RoleAssignmentEditor({
 //
 // `null` allow_lists win — if any role grants unrestricted access,
 // the union is unrestricted, matching the backend rule that "least
-// privilege is expressed by NOT assigning the role".
+// privilege is expressed by NOT assigning the role". Models and tools
+// come only from roles that grant `ai_gateway:use` / `mcp_gateway:use`
+// and are assigned at global scope, as in rbac::compute_user_resource_limits:
+// a team-scoped assignment administers that team and grants no gateway
+// access.
 // ----------------------------------------------------------------------------
 
 function EffectivePermissionsPreview({
@@ -1348,10 +1355,15 @@ function EffectivePermissionsPreview({
     // an empty array made every preview report zero permissions.
     const parsed = policyToPerms(JSON.stringify(role.policy_document), availablePermissions);
     for (const p of parsed.perms) perms.add(p);
-    if (parsed.models === null) modelsUnrestricted = true;
-    else for (const m of parsed.models) models.add(m);
-    if (parsed.mcpTools === null) toolsUnrestricted = true;
-    else for (const t of parsed.mcpTools) tools.add(t);
+    if (parseScope(a.scope).kind !== 'global') continue;
+    if (parsed.perms.has('ai_gateway:use')) {
+      if (parsed.models === null) modelsUnrestricted = true;
+      else for (const m of parsed.models) models.add(m);
+    }
+    if (parsed.perms.has('mcp_gateway:use')) {
+      if (parsed.mcpTools === null) toolsUnrestricted = true;
+      else for (const t of parsed.mcpTools) tools.add(t);
+    }
   }
 
   // Group permissions by their resource prefix for a compact list.

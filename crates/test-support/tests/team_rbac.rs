@@ -8,8 +8,9 @@
 //!     but not for itself, not for anyone outside the team, and not by
 //!     pairing an in-scope subject with someone else's row id.
 //!
-//! The last test pins how gateway permissions from a team-scoped role
-//! behave today: scope is not consulted on the gateway path.
+//! A role granted at team scope administers that team and nothing more:
+//! it contributes no gateway (model or MCP tool) access. A role attached
+//! to the team itself is the members' working role and does count.
 
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
@@ -313,19 +314,14 @@ async fn limits_delete_is_bound_to_the_subject_in_the_path() {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway permissions from a team-scoped role (current behaviour)
+// Gateway access and team scope
 // ---------------------------------------------------------------------------
 
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn team_scoped_role_widens_gateway_model_access_platform_wide() {
-    // Pins today's behaviour: gateway requests carry no team, and the
-    // model allow-list is the union of every role the user holds,
-    // whatever its scope. A role granted at scope `team:<id>` therefore
-    // widens model access for every request the user makes — the user
-    // does not even have to be a member of that team.
-    let app = TestApp::spawn().await;
-    let upstream = MockProvider::openai_chat_ok("tm-model-a").await;
+const GW_MODEL_A: &str = "tm-model-a";
+const GW_MODEL_B: &str = "tm-model-b";
+
+async fn two_routed_models(app: &TestApp) -> MockProvider {
+    let upstream = MockProvider::openai_chat_ok(GW_MODEL_A).await;
     let provider = fixtures::create_provider(
         &app.db,
         &unique_name("tm-prov"),
@@ -335,13 +331,58 @@ async fn team_scoped_role_widens_gateway_model_access_platform_wide() {
     )
     .await
     .unwrap();
-    fixtures::create_model_and_route(&app.db, provider.id, "tm-model-a")
+    fixtures::create_model_and_route(&app.db, provider.id, GW_MODEL_A)
         .await
         .unwrap();
-    fixtures::create_model_and_route(&app.db, provider.id, "tm-model-b")
+    fixtures::create_model_and_route(&app.db, provider.id, GW_MODEL_B)
         .await
         .unwrap();
     app.rebuild_gateway_router().await;
+    upstream
+}
+
+async fn gateway_key(app: &TestApp, user_id: Uuid) -> TestClient {
+    let key = fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("tm-gw-key"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    gw
+}
+
+async fn grant_at_team_scope(db: &sqlx::PgPool, user_id: Uuid, role: &str, team: Uuid) {
+    sqlx::query(
+        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, scope_id, assigned_by)
+           SELECT $1, id, 'team', $2, $1 FROM rbac_roles WHERE name = $3"#,
+    )
+    .bind(user_id)
+    .bind(team)
+    .bind(role)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
+fn call(model: &str) -> Value {
+    json!({"model": model, "messages": [{"role": "user", "content": "hi"}]})
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn team_scoped_role_grants_no_gateway_model_access() {
+    // Gateway requests carry no team. A role granted at scope
+    // `team:<id>` is for administering that team, so it must not widen
+    // the models a user can call — neither for a member of the team nor
+    // for anyone else.
+    let app = TestApp::spawn().await;
+    let _upstream = two_routed_models(&app).await;
 
     let only_a: Uuid = sqlx::query_scalar(
         r#"INSERT INTO rbac_roles (name, is_system, policy_document)
@@ -365,49 +406,98 @@ async fn team_scoped_role_widens_gateway_model_access_platform_wide() {
     .execute(&app.db)
     .await
     .unwrap();
-    let key = fixtures::create_api_key(
-        &app.db,
-        user.user.id,
-        &unique_name("tm-gw-key"),
-        &["ai_gateway"],
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let gw = app.gateway_client();
-    gw.set_bearer(&key.plaintext);
-    let call = |model: &'static str| json!({"model": model, "messages": [{"role": "user", "content": "hi"}]});
+    let gw = gateway_key(&app, user.user.id).await;
 
-    gw.post("/v1/chat/completions", call("tm-model-a"))
+    gw.post("/v1/chat/completions", call(GW_MODEL_A))
         .await
         .unwrap()
         .assert_ok();
+
+    // `developer` (Resource "*") at the scope of a team the user is not
+    // a member of, then of one it is a member of.
+    let other_team = make_team(&app.db, "tm-gw-other").await;
+    grant_at_team_scope(&app.db, user.user.id, "developer", other_team).await;
+    let own_team = make_team(&app.db, "tm-gw-own").await;
+    add_to_team(&app.db, own_team, user.user.id).await;
+    grant_at_team_scope(&app.db, user.user.id, "developer", own_team).await;
+
     let denied = gw
-        .post("/v1/chat/completions", call("tm-model-b"))
+        .post("/v1/chat/completions", call(GW_MODEL_B))
         .await
         .unwrap();
     assert!(
         !denied.status.is_success(),
-        "model-b must be refused under the global model-a-only role: {}",
+        "model-b must stay refused: team-scoped grants carry no gateway access: {}",
         denied.text()
     );
+    gw.post("/v1/chat/completions", call(GW_MODEL_A))
+        .await
+        .unwrap()
+        .assert_ok();
+}
 
-    // Grant `developer` (Resource "*") scoped to a team the user is
-    // not a member of.
-    let team = make_team(&app.db, "tm-gw").await;
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn team_scoped_grant_alone_gives_no_gateway_access() {
+    // A team manager with no global role manages its team from the
+    // console, but the grant does not let it call models.
+    let app = TestApp::spawn().await;
+    let _upstream = two_routed_models(&app).await;
+    let team = make_team(&app.db, "tm-gw-only").await;
+    let manager = team_manager_of(&app, team).await;
+    add_to_team(&app.db, team, manager.user.id).await;
+    let gw = gateway_key(&app, manager.user.id).await;
+
+    let resp = gw
+        .post("/v1/chat/completions", call(GW_MODEL_A))
+        .await
+        .unwrap();
+    resp.assert_status(403);
+    assert!(resp.text().contains("ai_gateway:use"), "{}", resp.text());
+
+    // The console side of the grant is untouched.
+    let con = login(&app, &manager).await;
+    con.get(&format!("/api/admin/teams/{team}"))
+        .await
+        .unwrap()
+        .assert_ok();
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn role_attached_to_a_team_gives_its_members_gateway_access() {
+    // Roles attached to the team itself ("All members automatically
+    // inherit the team's roles and permissions") are how a team hands
+    // its members their working role. They keep counting.
+    let app = TestApp::spawn().await;
+    let _upstream = two_routed_models(&app).await;
+    let team = make_team(&app.db, "tm-gw-inherit").await;
     sqlx::query(
-        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, scope_id, assigned_by)
-           SELECT $1, id, 'team', $2, $1 FROM rbac_roles WHERE name = 'developer'"#,
+        "INSERT INTO team_role_assignments (team_id, role_id)
+         SELECT $1, id FROM rbac_roles WHERE name = 'developer'",
     )
-    .bind(user.user.id)
     .bind(team)
     .execute(&app.db)
     .await
     .unwrap();
+    let member = fixtures::create_user(&app.db, &unique_email(), "Member", "MemberPwd_12345!")
+        .await
+        .unwrap();
+    add_to_team(&app.db, team, member.user.id).await;
+    let outsider = fixtures::create_user(&app.db, &unique_email(), "Out", "OutPwd_12345!")
+        .await
+        .unwrap();
 
-    gw.post("/v1/chat/completions", call("tm-model-b"))
+    gateway_key(&app, member.user.id)
+        .await
+        .post("/v1/chat/completions", call(GW_MODEL_B))
         .await
         .unwrap()
         .assert_ok();
+    gateway_key(&app, outsider.user.id)
+        .await
+        .post("/v1/chat/completions", call(GW_MODEL_B))
+        .await
+        .unwrap()
+        .assert_status(403);
 }
