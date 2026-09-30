@@ -11,6 +11,59 @@ target.
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **The gateways now require `ai_gateway:use` / `mcp_gateway:use`.** A
+  request to the AI gateway is refused with `403` unless a role held by
+  the key's owner grants `ai_gateway:use`, and a request to the MCP
+  gateway unless one grants `mcp_gateway:use`. The body names the
+  missing permission. Users with no role at all, and users whose only
+  roles are `viewer` or custom roles without these actions, used to
+  reach every model and tool and are now refused. The built-in
+  `developer`, `admin`, `super_admin` and `team_manager` roles grant
+  both, so users holding one of them at global scope, or through a role
+  attached to one of their teams, keep working. Before upgrading, list
+  gateway users without such a role and give them `developer` (or a
+  custom role with the actions). If SSO users are meant to use the
+  gateway on first sign-in, set *Default Role for New Users*
+  (`auth.default_role`) in Settings to `developer`; it is empty by
+  default.
+- **A role that does not grant gateway use no longer widens model or
+  tool access.** Model and MCP tool scopes are now the union over the
+  roles that grant `ai_gateway:use` / `mcp_gateway:use` only. A role
+  without those actions (such as `viewer`) used to count as
+  "unrestricted", so adding it to a user limited to some models opened
+  every model to them. Users relying on that lose the extra models.
+- **A role granted at team scope no longer grants gateway access.** An
+  assignment with scope `team:<id>` administers that team from the
+  console (team roster, team limits); it no longer contributes models,
+  MCP tools or gateway use, which it used to do for every request the
+  user made, member of the team or not. Roles attached to a team itself
+  (Teams → Roles), which every member inherits, still count. A user
+  whose only gateway role was a team-scoped `developer` or
+  `team_manager` needs that role at global scope, or attached to their
+  team.
+- **An empty model allow-list allows nothing.** A key whose
+  `allowed_models` is `[]`, or whose list shares no model with what its
+  owner's roles grant, used to call any model; it now calls none, as
+  `allowed_mcp_tools: []` already did on the MCP gateway. The console
+  never saves `[]` (clearing the picker sends `null`), so only keys
+  written through the API are affected. Model entries still match by
+  prefix, and a key narrowed to `gpt-4o-mini` under a role granting
+  `gpt-4o` keeps `gpt-4o-mini`.
+
+### Security
+
+- **Gateway use is checked, and a missing grant means no access.** See
+  the first three items above: a user with no role, or only roles
+  without gateway use, could call every model and MCP tool; a
+  `viewer`-style role widened a restricted user to every model; a role
+  granted at the scope of any team, even one the user was not a member
+  of, widened model and tool access platform-wide. An explicit `Deny`
+  on `ai_gateway:use` or `mcp_gateway:use` now closes that gateway.
+  Action wildcards (`ai_gateway:*`, `*`) grant it, as they already did
+  for console permissions.
+
 ## [2.1.0] — 2026-09-30
 
 Amazon Bedrock becomes a provider you can run from the console. It

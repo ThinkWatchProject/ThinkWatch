@@ -18,7 +18,14 @@ use crate::app::AppState;
 ///   - key=None, role=None    → None (unrestricted)
 ///   - key=Some, role=None    → key (role doesn't tighten)
 ///   - key=None, role=Some    → role (key doesn't tighten)
-///   - key=Some, role=Some    → set intersection
+///   - key=Some, role=Some    → the entries of either list that the
+///     other list covers
+///
+/// Entries are patterns, not literals (a model entry is a prefix, an MCP
+/// entry may be `<server>__*`), so the intersection keeps an entry of
+/// one side when some entry of the other side covers it: a key narrowed
+/// to `gpt-4o-mini` under a role granting `gpt-4o` keeps `gpt-4o-mini`.
+/// An empty result allows nothing.
 ///
 /// Intersection (not union) is the right merge here because the
 /// per-key list is a tightening of what the user as a whole can do
@@ -27,16 +34,84 @@ use crate::app::AppState;
 fn intersect_allowlists(
     key_list: Option<Vec<String>>,
     role_list: Option<Vec<String>>,
+    covers: fn(&str, &str) -> bool,
 ) -> Option<Vec<String>> {
     match (key_list, role_list) {
         (None, None) => None,
         (Some(k), None) => Some(k),
         (None, Some(r)) => Some(r),
         (Some(k), Some(r)) => {
-            let role_set: std::collections::HashSet<&String> = r.iter().collect();
-            Some(k.into_iter().filter(|m| role_set.contains(m)).collect())
+            let mut out = std::collections::BTreeSet::new();
+            for (side, other) in [(&k, &r), (&r, &k)] {
+                for entry in side {
+                    if other.iter().any(|g| covers(g, entry)) {
+                        out.insert(entry.clone());
+                    }
+                }
+            }
+            Some(out.into_iter().collect())
         }
     }
+}
+
+/// Model entries match by prefix (`is_access_allowed` in the gateway
+/// lifecycle): `general` covers every model that `specific` covers.
+fn model_entry_covers(general: &str, specific: &str) -> bool {
+    specific.starts_with(general)
+}
+
+/// MCP tool patterns (`*`, `<server>__*`, `<server>__<tool>`):
+/// `general` covers every tool that `specific` matches.
+fn mcp_entry_covers(general: &str, specific: &str) -> bool {
+    use think_watch_mcp_gateway::access_control::is_tool_allowed;
+    if general == "*" || general == specific {
+        return true;
+    }
+    if specific == "*" || specific.ends_with("__*") {
+        return false;
+    }
+    is_tool_allowed(Some(&[general.to_string()]), specific)
+}
+
+/// 403 for a key whose owner holds no role granting `surface`'s
+/// `*_gateway:use`. The body is in the shape the caller's SDK reads:
+/// the protocol's error object on the AI gateway (every one of them
+/// carries `error.message`), a JSON-RPC error on the MCP gateway.
+fn gateway_use_refused(surface: &str, path: &str) -> Response {
+    use axum::response::IntoResponse;
+    use tw_dialect::ir::Dialect;
+
+    let permission = format!("{surface}:use");
+    let message =
+        format!("Access denied: no role held by the owner of this API key grants {permission}.");
+    let (content_type, body) = if surface == "mcp_gateway" {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32001, "message": message},
+        });
+        ("application/json", body.to_string().into_bytes())
+    } else {
+        let client = if path == "/v1/messages" {
+            Dialect::Anthropic
+        } else if path.starts_with("/v1beta/") || path.starts_with("/v1/models/") {
+            Dialect::Gemini
+        } else if path == "/v1/responses" {
+            Dialect::Responses
+        } else {
+            Dialect::Chat
+        };
+        (
+            "application/json",
+            tw_dialect::convert::error_body(client, StatusCode::FORBIDDEN.as_u16(), &message),
+        )
+    };
+    (
+        StatusCode::FORBIDDEN,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        body,
+    )
+        .into_response()
 }
 
 /// The key a client presented, wherever its SDK puts it.
@@ -236,25 +311,46 @@ pub fn require_api_key(
                             .unwrap_or_default();
                     (limits, names, constraints)
                 } else {
-                    // Service-account API keys (no user_id) inherit only
-                    // the per-key constraints, since there's no user to
-                    // resolve roles against. They get an empty role list,
-                    // which means the MCP access controller will deny
-                    // anything that requires a role match, and an empty
-                    // constraint set so no role-inline limits fire.
+                    // A key without an owner (its user row was removed
+                    // and `user_id` set NULL) has no roles to grant
+                    // gateway use. The users JOIN above already rejects
+                    // such keys; refuse here as well rather than treat
+                    // "no roles" as "no restrictions".
                     (
-                        rbac::UserResourceLimits {
-                            allowed_models: None,
-                            allowed_mcp_tools: None,
-                        },
+                        rbac::UserResourceLimits::none(),
                         Vec::new(),
                         think_watch_common::limits::SurfaceConstraints::default(),
                     )
                 };
-                let merged_models =
-                    intersect_allowlists(row.allowed_models.clone(), role_limits.allowed_models);
-                let merged_mcp_tools =
-                    intersect_allowlists(row.allowed_mcp_tools.clone(), role_limits.allowed_mcp_tools);
+
+                // Gateway use itself. A key is only as good as its owner's
+                // roles: without one that grants this surface's
+                // `*_gateway:use`, nothing behind the gateway is reachable.
+                let surface_granted = match surface {
+                    "ai_gateway" => role_limits.ai_gateway,
+                    "mcp_gateway" => role_limits.mcp_gateway,
+                    _ => false,
+                };
+                if !surface_granted {
+                    tracing::warn!(
+                        api_key_id = %row.id,
+                        user_id = ?row.user_id,
+                        surface,
+                        "API key owner holds no role granting gateway use"
+                    );
+                    return Ok(gateway_use_refused(surface, request.uri().path()));
+                }
+
+                let merged_models = intersect_allowlists(
+                    row.allowed_models.clone(),
+                    role_limits.allowed_models,
+                    model_entry_covers,
+                );
+                let merged_mcp_tools = intersect_allowlists(
+                    row.allowed_mcp_tools.clone(),
+                    role_limits.allowed_mcp_tools,
+                    mcp_entry_covers,
+                );
 
                 // Load email for template header resolution ({{user_email}})
                 let user_email: Option<String> = if let Some(uid) = row.user_id {
@@ -352,6 +448,44 @@ mod tests {
             m.insert(*k, HeaderValue::from_str(v).unwrap());
         }
         m
+    }
+
+    fn v(items: &[&str]) -> Option<Vec<String>> {
+        Some(items.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn allowlist_intersection_is_pattern_aware() {
+        let m = model_entry_covers;
+        assert_eq!(intersect_allowlists(None, None, m), None);
+        assert_eq!(intersect_allowlists(v(&["a"]), None, m), v(&["a"]));
+        assert_eq!(intersect_allowlists(None, v(&["a"]), m), v(&["a"]));
+        // A narrower key entry under a prefix grant is kept, and so is a
+        // narrower role entry under a broader key entry.
+        assert_eq!(
+            intersect_allowlists(v(&["gpt-4o-mini"]), v(&["gpt-4o"]), m),
+            v(&["gpt-4o-mini"])
+        );
+        assert_eq!(
+            intersect_allowlists(v(&["gpt-"]), v(&["gpt-4o", "claude"]), m),
+            v(&["gpt-4o"])
+        );
+        // Disjoint lists allow nothing.
+        assert_eq!(intersect_allowlists(v(&["b"]), v(&["a"]), m), v(&[]));
+
+        let t = mcp_entry_covers;
+        assert_eq!(
+            intersect_allowlists(v(&["github__list"]), v(&["github__*"]), t),
+            v(&["github__list"])
+        );
+        assert_eq!(
+            intersect_allowlists(v(&["*"]), v(&["github__*", "slack__send"]), t),
+            v(&["github__*", "slack__send"])
+        );
+        assert_eq!(
+            intersect_allowlists(v(&["github__*"]), v(&["slack__*"]), t),
+            v(&[])
+        );
     }
 
     #[test]

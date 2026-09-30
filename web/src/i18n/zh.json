@@ -1094,6 +1094,7 @@
     "scopeTeamPick": "选择团队",
     "scopeTeamRequired": "团队范围必须选择一个团队。",
     "scopeNoTeams": "没有可选的团队。",
+    "scopeTeamNoGateway": "团队范围的角色只授予该团队的管理权限，不授予通过网关使用模型或 MCP 工具的权限。",
     "userId": "用户 ID",
     "effectivePermissions": "有效权限",
     "effectivePermissionsDesc": "所有所选角色的并集。这就是保存后用户能够执行的全部操作。",

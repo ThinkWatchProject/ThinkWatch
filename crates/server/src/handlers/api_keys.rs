@@ -1057,10 +1057,11 @@ pub struct PolicyScopeResponse {
     /// `None` means unrestricted at the role layer — the API-key picker
     /// can offer every model in the catalog. `Some(list)` is a
     /// patterns/exact-id allow-list that narrows the picker to those
-    /// entries.
+    /// entries; it is empty when no role of the caller grants
+    /// `ai_gateway:use`.
     pub allowed_models: Option<Vec<String>>,
-    /// Same semantics as `allowed_models`. Patterns may include
-    /// `<server>__*` wildcards.
+    /// Same semantics as `allowed_models` (empty without
+    /// `mcp_gateway:use`). Patterns may include `<server>__*` wildcards.
     pub allowed_mcp_tools: Option<Vec<String>>,
 }
 
