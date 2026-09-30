@@ -11,6 +11,63 @@ target.
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-09-30
+
+Amazon Bedrock becomes a provider you can run from the console. It
+authenticates with a Bedrock API key as well as access keys or the
+instance role, lists its models for import and for the route editor,
+and has a working Test Connection. Requests converted for Bedrock now
+keep their prompt-cache breakpoints and Claude's thinking settings. The
+route editor takes any upstream model name, and a route the provider
+refused can be created anyway. ThinkWatch-Core moves to v0.55.0, whose
+Bedrock layer this edition now shares with the desktop gateway. No
+database, setting, environment variable or Helm value changes.
+
+### Read before upgrading
+
+- **Test Connection with a saved provider's secrets needs
+  `providers:update`.** A test that names a saved provider
+  (`provider_id`, which is what the Edit dialog sends) used to take only
+  `providers:create`. A custom role that has `providers:create` without
+  `providers:update` can no longer test existing providers; the built-in
+  admin role has both. A test with values typed into the request still
+  takes `providers:create`. See *Security* below.
+- **Refusing a route the provider does not serve answers
+  `model_not_served`.** `POST /api/admin/models/{model_id}/routes` still
+  answers `400` when the import probe found no API the provider serves
+  the model on, but `error.type` is now `model_not_served`, where it was
+  `bad_request`. Scripts that matched on `bad_request` for this case need
+  the new value. The request takes a new optional `"force": true` to
+  create the route anyway.
+- **`error_type` in `gateway_logs` for failed requests is always the
+  error's tag.** An upstream HTTP error used to log its debug text, such
+  as `ProviderHttpError { status: 502, message: "…" }`, and an upstream
+  rate limit a cut-off `UpstreamRateLimited { retry_after_secs: Some`.
+  They now log `ProviderHttpError` and `UpstreamRateLimited`, as the
+  metric labels and streamed requests already did. Dashboards or log
+  forwarder queries that grouped by those strings see them merge into
+  one value each.
+- **The server log now carries the upstream's reply to a 401 or 403**,
+  as it already did for other upstream errors. For Bedrock that reply
+  names the AWS account and the IAM principal. Callers still see only
+  "Authentication failed with upstream", and failover, breakers and
+  `gateway_logs` treat these errors as before.
+- **Prompt caching now works on Bedrock routes, and is billed at cache
+  prices.** Requests converted for Bedrock used to lose their
+  `cache_control` breakpoints, so Claude on Bedrock re-read the whole
+  prompt at full price every turn. Breakpoints now go out as Converse
+  `cachePoint` blocks, to Claude and Nova models only (others reject
+  them), and the cache reads and writes Bedrock reports come back into
+  usage, one-hour writes included. Traffic with repeated prompts, such as
+  Claude Code, costs much less on Bedrock routes than it did; writes cost
+  a little more, at `cache_write_weight` / `cache_write_1h_weight`.
+- **Claude's thinking reaches Bedrock.** A request converted for Claude
+  on Bedrock now carries its thinking and effort settings, in the form
+  Anthropic's API uses, along with the sampling limits thinking imposes
+  (`temperature` 1, no `top_k`, `top_p` at least 0.95). Thinking used to
+  be dropped on the way to Bedrock. Other Bedrock models still get no
+  thinking.
+
 ### Added
 
 - **Bedrock providers can authenticate with a Bedrock API key.** Pick
@@ -42,10 +99,7 @@ target.
   model, the error now offers *Create anyway*: the refusal can be
   stale, or be about the probe's request rather than the model. The
   route is created, and its `model_route.created` audit row records the
-  refusal it overrode in `refusal_overridden`. On the API, the refusal
-  answers `400` with `error.type` `model_not_served` (it was
-  `bad_request`), and `POST /api/admin/models/{model_id}/routes` takes
-  `"force": true` to create the route anyway.
+  refusal it overrode in a new `refusal_overridden` key.
 
 ### Changed
 
@@ -54,34 +108,54 @@ target.
   to pick from, so a model the listing leaves out could not be routed to
   from the console. It now suggests the provider's models as you type,
   and takes whatever is typed.
+- **Bedrock instance-role credentials are cached.** They took three
+  IMDSv2 round trips per request; they are now kept until five minutes
+  before they expire, and a burst of requests at expiry makes one trip.
+- **Chat Completions requests can switch reasoning with `thinking`.**
+  When a request is converted for another format, `thinking.type`
+  (`enabled` / `disabled`, as DeepSeek, GLM and Kimi write it) now turns
+  reasoning on or off; `disabled` wins over `reasoning_effort`.
+- **Core crates at ThinkWatch-Core v0.55.0.** `tw-dialect`, `tw-guard`
+  and `tw-breaker` move from v0.43.0, and `tw-bedrock` joins them:
+  SigV4 signing, eventstream unframing, Bedrock's addresses, region
+  checks and model catalog now come from core. Where credentials come
+  from (provider keys, the instance role) stays in this repository.
+  `tw-breaker` is unchanged.
 
 ### Fixed
 
-- **`error_type` in a failed request's gateway log could be the error's
-  debug text** rather than its tag: for an upstream HTTP error it was
-  `ProviderHttpError { status: …, message: "…" }`, with the upstream's
-  reply inside, and for an upstream rate limit a cut-off
-  `UpstreamRateLimited { retry_after_secs: Some`. Both now log their
-  tag, `ProviderHttpError` and `UpstreamRateLimited`, as the metric
-  labels and streamed requests always did.
 - **Bedrock providers could not be created or edited in the console.**
   The region was checked as a URL, so saving failed with
   `400 Invalid URL`. A Bedrock provider's `base_url` is now checked as an
   AWS region such as `us-east-1`, and anything else is refused, since the
   host is built from it. A provider saved with a URL there never reached
   Bedrock; set its region in the Edit dialog.
+- **Bedrock models the account may not call were imported anyway.**
+  Bedrock refuses such a model (model access not granted, or an IAM or
+  organization policy that denies it) with a 403, and the import probe
+  read every 403 as a credential problem that says nothing about the
+  model. The route was created and failed on first use. Now, when the
+  region's control plane accepts the same credential, the refusal is
+  recorded as the model's, with AWS's reason, and the model is skipped
+  on import like any other refused one. Once access is granted,
+  re-check the provider's models.
+- **A Bedrock provider whose stored secret key would not decrypt signed
+  with an empty secret**, and every request failed with AWS's
+  `SignatureDoesNotMatch`. It now refuses its requests with the reason
+  until the keys are saved again, rather than falling back to the
+  instance role, which would call AWS as a different identity. An
+  access key ID saved without a secret is refused the same way.
+- **A Bedrock model id that is an ARN could not be routed.** Its `/`
+  went into the request path unescaped, adding a path segment AWS could
+  not route. It is now escaped.
+- **A base URL ending in its version segment doubled it.** A provider
+  written as `https://api.openai.com/v1` sent requests, and the model
+  listing, to `/v1/v1/…` and got 404s. A trailing version segment
+  (`v1`, `v1beta`, …) that the request path starts with is now written
+  once. Base URLs without one are unchanged.
 - **Typing into a provider's API key field and clearing it again wiped
   the saved key on save.** The field sent `Bearer ` with nothing after
   it. A cleared field now keeps the saved key, as a blank one always did.
-- **Bedrock models the account may not call were imported anyway.**
-  Bedrock refuses such a model — model access not granted, or an IAM
-  or organization policy that denies it — with a 403, and the import
-  probe read every 403 as a credential problem that says nothing about
-  the model. The route was created and failed on first use. Now, when
-  the region's control plane accepts the same credential, the refusal
-  is recorded as the model's, with AWS's reason, and the model is
-  skipped on import like any other refused one. Once access is granted,
-  re-check the provider's models.
 
 ### Security
 
@@ -642,7 +716,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.1.0
 [2.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.0.0
 [1.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.1.0
 [1.0.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.2
