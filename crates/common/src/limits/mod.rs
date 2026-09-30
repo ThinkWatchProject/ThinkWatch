@@ -870,12 +870,24 @@ pub async fn upsert_rule(pool: &PgPool, req: UpsertRule) -> Result<RateLimitRule
     row_to_rule(row).ok_or_else(|| sqlx::Error::Protocol("rule row decode failed".into()))
 }
 
-pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
-    let n = sqlx::query("DELETE FROM rate_limit_rules WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
+/// Delete one rule, but only if it belongs to the given subject. The
+/// caller has authorized the subject, not the row id, so a row id
+/// that belongs to someone else must not match.
+pub async fn delete_rule(
+    pool: &PgPool,
+    id: Uuid,
+    subject_kind: RateLimitSubject,
+    subject_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let n = sqlx::query(
+        "DELETE FROM rate_limit_rules WHERE id = $1 AND subject_kind = $2 AND subject_id = $3",
+    )
+    .bind(id)
+    .bind(subject_kind.as_str())
+    .bind(subject_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(n > 0)
 }
 
@@ -970,12 +982,23 @@ pub async fn upsert_cap(pool: &PgPool, req: UpsertCap) -> Result<BudgetCap, sqlx
     row_to_cap(row).ok_or_else(|| sqlx::Error::Protocol("cap row decode failed".into()))
 }
 
-pub async fn delete_cap(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
-    let n = sqlx::query("DELETE FROM budget_caps WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
+/// Delete one cap, but only if it belongs to the given subject — see
+/// [`delete_rule`].
+pub async fn delete_cap(
+    pool: &PgPool,
+    id: Uuid,
+    subject_kind: BudgetSubject,
+    subject_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let n = sqlx::query(
+        "DELETE FROM budget_caps WHERE id = $1 AND subject_kind = $2 AND subject_id = $3",
+    )
+    .bind(id)
+    .bind(subject_kind.as_str())
+    .bind(subject_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(n > 0)
 }
 

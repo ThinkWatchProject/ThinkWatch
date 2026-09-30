@@ -23,10 +23,11 @@
 //     containing the target subject) that covers `(kind, id)` from
 //     the URL path. So a team_manager scoped to team:engineering
 //     can edit limits on api_keys belonging to engineering members
-//     but gets 403 trying to touch marketing's keys.
-//   - Provider / mcp_server subjects always require global scope
-//     because they're platform-wide resources — see
-//     `AuthUser::assert_scope_for_subject`'s polymorphic dispatch.
+//     but gets 403 trying to touch marketing's keys. A team-scoped
+//     grant never covers the caller's own user or keys — see
+//     `AuthUser::assert_scope_for_subject`.
+//   - Deletes by row id are bound to the subject in the path, so an
+//     authorized subject can't be paired with someone else's row id.
 // ============================================================================
 
 use axum::Json;
@@ -439,11 +440,12 @@ pub async fn delete_rule(
     auth_user
         .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
         .await?;
-    // Validate the kind even though we don't actually need it for
-    // the delete — keeps the URL shape consistent with the rest of
-    // the surface.
-    parse_rate_subject(&kind)?;
-    let removed = limits::delete_rule(&state.db, rule_id).await?;
+    // The scope check above authorized the subject in the URL, so the
+    // delete is bound to that subject: a rule id that belongs to
+    // someone else is "not found" rather than deleted.
+    let subject_kind = parse_rate_subject(&kind)?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
+    let removed = limits::delete_rule(&state.db, rule_id, subject_kind, storage_id).await?;
     if !removed {
         return Err(AppError::NotFound("Rate limit rule not found".into()));
     }
@@ -593,8 +595,10 @@ pub async fn delete_cap(
     auth_user
         .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
         .await?;
-    parse_budget_subject(&kind)?;
-    let removed = limits::delete_cap(&state.db, cap_id).await?;
+    // Bound to the authorized subject — see `delete_rule`.
+    let subject_kind = parse_budget_subject(&kind)?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
+    let removed = limits::delete_cap(&state.db, cap_id, subject_kind, storage_id).await?;
     if !removed {
         return Err(AppError::NotFound("Budget cap not found".into()));
     }

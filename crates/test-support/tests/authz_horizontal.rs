@@ -359,9 +359,10 @@ async fn team_manager_a_can_add_member_to_own_team() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn team_manager_a_cannot_write_limits_for_team_b_user() {
-    // Single-row limits writes go through `assert_scope_for_subject`
-    // which (for "user" subjects) requires global scope. A
-    // team-scoped manager should never reach the SQL path.
+    // Single-row limits writes go through `assert_scope_for_subject`,
+    // which for "user" subjects needs global scope or a team scope
+    // containing the user. A user outside manager A's team must never
+    // reach the SQL path.
     let app = TestApp::spawn().await;
     let team_a = make_team(&app.db, "team-a").await;
     let manager_a = fixtures::create_user_with_role(&app.db, "team_manager", "team", Some(team_a))

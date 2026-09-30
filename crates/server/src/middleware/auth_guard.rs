@@ -371,25 +371,56 @@ impl AuthUser {
     }
 
     /// Polymorphic scope check for the limits engine. The limits
-    /// CRUD endpoints are keyed on `(subject_kind, subject_id)`
-    /// where `subject_kind ∈ {user, api_key, role}`. All three are
-    /// admin-level writes and, for now, require the perm at global
-    /// scope — team-scoped grants are not enough to mutate another
-    /// team's user or key. A future revision could relax `user` /
-    /// `api_key` to allow team_manager-style scoping by looking up
-    /// the subject's team membership, but that's not needed today.
+    /// endpoints are keyed on `(subject_kind, subject_id)`:
+    ///
+    ///   - `user` — global scope, or `perm` scoped to a team the user
+    ///     belongs to.
+    ///   - `api_key` (an `api_keys.id`) / `api_key_lineage` (a
+    ///     `lineage_id`, as stored on override rows) — same rule,
+    ///     applied to the key's owner. A service-account key (no
+    ///     owner) or an id that doesn't resolve needs global scope.
+    ///   - `role` — global scope only; roles are platform-wide.
+    ///
+    /// A team-scoped grant never covers the caller's own user or own
+    /// keys: otherwise a team manager, who is usually a member of the
+    /// team they manage, could lift their own rate limits and budget
+    /// caps. Only a global grant reaches the caller's own subject.
     pub async fn assert_scope_for_subject(
         &self,
         pool: &sqlx::PgPool,
         perm: &str,
         subject_kind: &str,
-        _subject_id: uuid::Uuid,
+        subject_id: uuid::Uuid,
     ) -> Result<(), AppError> {
-        match subject_kind {
-            "role" | "user" | "api_key" => self.assert_scope_global(pool, perm).await,
-            other => Err(AppError::BadRequest(format!(
-                "unknown subject_kind '{other}' (expected: user, api_key, role)"
-            ))),
+        let owner: Option<uuid::Uuid> = match subject_kind {
+            "role" => return self.assert_scope_global(pool, perm).await,
+            "user" => Some(subject_id),
+            "api_key" | "api_key_lineage" => {
+                let column = if subject_kind == "api_key" {
+                    "id"
+                } else {
+                    "lineage_id"
+                };
+                let owner: Option<Option<uuid::Uuid>> = sqlx::query_scalar(&format!(
+                    "SELECT user_id FROM api_keys WHERE {column} = $1 LIMIT 1"
+                ))
+                .bind(subject_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("scope check failed: {e}")))?;
+                owner.flatten()
+            }
+            other => {
+                return Err(AppError::BadRequest(format!(
+                    "unknown subject_kind '{other}' (expected: user, api_key, role)"
+                )));
+            }
+        };
+        match owner {
+            Some(user_id) if user_id != self.claims.sub => {
+                self.assert_scope_for_user(pool, perm, user_id).await
+            }
+            _ => self.assert_scope_global(pool, perm).await,
         }
     }
 

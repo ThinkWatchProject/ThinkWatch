@@ -42,8 +42,8 @@ const DYNAMIC_ENUMS = {
   // through to the raw key (shown uppercased) in the permission tree.
   'permissions.resource.${_}': [
     'ai_gateway', 'mcp_gateway', 'api_keys', 'providers', 'mcp_servers',
-    'models', 'users', 'team', 'teams', 'team_members', 'sessions',
-    'roles', 'analytics', 'audit_logs', 'logs', 'log_forwarders',
+    'models', 'users', 'teams', 'team_members', 'sessions',
+    'roles', 'analytics', 'logs', 'log_forwarders',
     'webhooks', 'content_filter', 'pii_redactor', 'rate_limits',
     'settings', 'system',
   ],
