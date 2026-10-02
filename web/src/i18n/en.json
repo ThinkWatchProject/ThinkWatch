@@ -118,7 +118,298 @@
     "unknown": "Status unknown"
   },
   "contentSecurity": {
-    "subtitle": "Content filter rules, PII redaction patterns and tool-call inspection applied to AI gateway traffic"
+    "subtitle": "Outbound redaction, tool-call inspection and the content filter, applied to every request through the AI gateway.",
+    "loadFailed": "The security settings could not be loaded",
+    "summary": {
+      "enforce": "{{count}} enforcing",
+      "observe": "{{count}} observing",
+      "off": "{{count}} off"
+    },
+    "modeOff": "Off",
+    "modeObserve": "Observe",
+    "modeFor": "{{guard}} mode",
+    "nowOff": "Currently: nothing is checked or recorded.",
+    "ifEnforced": "After switching to {{mode}}: {{effect}} {{risk}}",
+    "guard": {
+      "redact": {
+        "name": "Outbound redaction",
+        "enforce": "Replace",
+        "lead": "Before a request is sent, it is searched for credentials and personal information using the rules below.",
+        "nowObserve": "Currently: what is found is recorded in the audit log, and the request is sent unchanged.",
+        "nowEnforce": "Currently: what is found is replaced with placeholders before the request is sent, and the placeholders in the response are restored to the original values.",
+        "effect": "what is found is replaced with placeholders before the request is sent, and the placeholders in the response are restored to the original values.",
+        "risk": "Once the request content changes, the upstream cache may no longer be hit.",
+        "testTitle": "Test outbound redaction",
+        "createTitle": "New redaction rule",
+        "editTitle": "Edit redaction rule",
+        "nameHint": "Shown in the audit log.",
+        "namePlaceholder": "Internal project number",
+        "samplePlaceholder": "Paste some text, such as environment variables that contain a key"
+      },
+      "inspect_tools": {
+        "name": "Tool-call inspection",
+        "enforce": "Cut off",
+        "lead": "Tool-call arguments returned by the upstream are checked.",
+        "nowObserve": "Currently: matching calls are recorded in the audit log and returned as usual.",
+        "nowEnforce": "Currently: calls that match a \"Cut off\" rule never fully reach the client, so they cannot run; calls that match a \"Record only\" rule are returned as usual. Both are recorded in the audit log.",
+        "effect": "calls that match a \"Cut off\" rule never fully reach the client, so they cannot run.",
+        "risk": "On a false match, the answer stops at that call.",
+        "testTitle": "Test tool-call inspection",
+        "createTitle": "New inspection rule",
+        "editTitle": "Edit inspection rule",
+        "nameHint": "Shown in the audit log.",
+        "namePlaceholder": "Delete cluster resources",
+        "samplePlaceholder": "Paste the arguments of a tool call, such as a command to run"
+      },
+      "content": {
+        "name": "Content filter",
+        "enforce": "Enforce",
+        "lead": "User messages and tool results in each request are checked against the rules below.",
+        "nowObserve": "Currently: matches are recorded in the audit log, and the request is sent unchanged.",
+        "nowEnforce": "Currently: a request that matches a \"Refuse\" rule is not sent, and the client is told why; text that matches a \"Delete\" rule is deleted before the request is sent; a request that matches a \"Record only\" rule is sent as usual. All three are recorded in the audit log.",
+        "effect": "a request that matches a \"Refuse\" rule is not sent, and the client is told why; text that matches a \"Delete\" rule is deleted before the request is sent; a request that matches a \"Record only\" rule is sent as usual. All three are recorded in the audit log.",
+        "risk": "On a false match, an ordinary request is refused, or ordinary text is deleted.",
+        "testTitle": "Test the content filter",
+        "createTitle": "New content rule",
+        "editTitle": "Edit content rule",
+        "nameHint": "Shown in the audit log and in the reason given for a refusal.",
+        "namePlaceholder": "Project codename",
+        "samplePlaceholder": "Paste a user message or a tool result"
+      }
+    },
+    "rules": "Rules",
+    "ruleCount": "{{on}} of {{total}} on",
+    "test": "Test…",
+    "newRule": "New rule",
+    "builtinGroup": "Built-in",
+    "col": {
+      "rule": "Rule",
+      "match": "Match",
+      "regex": "Match (regular expression)",
+      "action": "Action",
+      "replaceWith": "Replaced with",
+      "enabled": "On"
+    },
+    "kind": {
+      "api-keys": "API keys",
+      "private-keys": "Private keys",
+      "jwt": "JWTs",
+      "conn-strings": "Connection strings",
+      "personal": "Personal information",
+      "internal": "Internal addresses",
+      "command": "Built-in",
+      "injection": "Instruction override",
+      "persona": "Identity and prompts",
+      "chinese": "Chinese phrasing",
+      "invisible": "Hidden characters",
+      "custom": "Custom"
+    },
+    "ruleAction": {
+      "cut": "Cut off",
+      "block": "Refuse",
+      "strip": "Delete",
+      "record": "Record only"
+    },
+    "menu": {
+      "view": "View rule",
+      "turnOn": "Turn on",
+      "turnOff": "Turn off",
+      "copyAsCustom": "Copy as a custom rule"
+    },
+    "actionsFor": "Actions for {{name}}",
+    "toggleFor": "Turn on \"{{name}}\"",
+    "toast": {
+      "modeSet": "{{guard}} set to {{mode}}",
+      "ruleOn": "\"{{name}}\" turned on",
+      "ruleOff": "\"{{name}}\" turned off",
+      "ruleCreated": "Rule \"{{name}}\" created",
+      "ruleSaved": "Rule \"{{name}}\" saved",
+      "ruleDeleted": "Rule \"{{name}}\" deleted",
+      "undo": "Undo",
+      "saveFailed": "Not saved: {{message}}"
+    },
+    "dialog": {
+      "name": "Name",
+      "matchKind": "Match by",
+      "match": {
+        "contains": "Contains",
+        "regex": "Regex",
+        "codepoints": "Code points"
+      },
+      "patternContains": "Text to find",
+      "patternRegex": "Regular expression",
+      "patternCodepoints": "Code points",
+      "containsHint": "Searched for in user messages and tool results, ignoring case. Leading and trailing spaces count.",
+      "codepointsHint": "A code point or a range of them; separate several with commas, as in U+200B, U+E0000–U+E007F",
+      "regexHint": {
+        "redact": "Everything the pattern matches is replaced with a placeholder.",
+        "inspect_tools": "Matched against the arguments of each tool call.",
+        "content": "Matched against user messages and tool results, ignoring case."
+      },
+      "label": "Placeholder name",
+      "labelHint": "Replaced with <<TW_NAME_n>>. Only capital letters, digits and underscores.",
+      "becomes": "Becomes",
+      "action": "Action",
+      "actionWhat": {
+        "cut": "In {{mode}} mode, a matching call never fully reaches the client, so it cannot run.",
+        "block": "In {{mode}} mode, a matching request is not sent, and the client is told why.",
+        "strip": "In {{mode}} mode, the matching text is deleted from user messages and tool results, and the request is sent."
+      },
+      "recordWhat": {
+        "inspect_tools": "A matching call is returned as usual and recorded in the audit log.",
+        "content": "A matching request is sent as usual and recorded in the audit log."
+      },
+      "withFactory": "{{what}} The factory setting is \"{{action}}\".",
+      "state": "State",
+      "on": "On",
+      "off": "Off",
+      "category": "Category: {{kind}}",
+      "sample": "Test text",
+      "hits": "Matches: {{count}}",
+      "noHit": "No match",
+      "sent": "Sent in {{mode}} mode",
+      "refused": "In {{mode}} mode, this request would not be sent.",
+      "testDesc": "Checks a piece of text against the rules that are on. No request is sent.",
+      "content": "Content",
+      "nameRequired": "Enter a name",
+      "nameTaken": "A rule with this name already exists",
+      "patternRequired": "Enter what to match",
+      "badCodepoint": "Not a code point or a range: {{item}}",
+      "tooManyCodepoints": "At most {{max}} items",
+      "badLabel": "Start with a capital letter and use only capital letters, digits and underscores, up to 24 characters.",
+      "saveFailed": "Not saved",
+      "deleteTitle": "Delete the rule \"{{name}}\"",
+      "deleteDesc": "The rule is no longer checked. Entries already in the audit log are kept."
+    },
+    "matcher": {
+      "prefix": "Starts with {{prefix}}, followed by at least {{n}} characters",
+      "openaiLegacy": "Starts with {{prefix}}, at least {{n}} characters long, with both letters and digits",
+      "pem": "From {{begin}} to its END, as a whole",
+      "jwt": "Three base64url parts; the first decodes to text containing {{alg}}",
+      "connString": "Only the password in {{uri}}",
+      "connStringShape": "scheme://user:password@host",
+      "privateIp": "Addresses starting with {{ranges}}; not {{loopback}}",
+      "domainSuffix": "Domains ending in {{suffixes}}",
+      "cnResidentId": "An 18-character resident ID number whose region code, birth date since {{year}} and check character all check out",
+      "bankCard": "A {{networks}} card number whose prefix and length match and that passes the Luhn check; public test card numbers excepted",
+      "email": "Email addresses, such as {{example}}",
+      "cnMobilePhone": "11-digit mobile numbers starting with 13–19, not run together with other digits",
+      "regex": "Regex {{pattern}}",
+      "contains": "Contains {{text}}, ignoring case",
+      "codepoints": "Code points {{ranges}}",
+      "other": "Built-in check"
+    },
+    "cardNetwork": {
+      "UnionPay": "UnionPay"
+    },
+    "redactRule": {
+      "anthropic-api-key": "Anthropic API key",
+      "openai-project-key": "OpenAI project key",
+      "openai-api-key": "OpenAI API key",
+      "github-personal-token": "GitHub personal access token",
+      "github-oauth-token": "GitHub OAuth token",
+      "github-server-token": "GitHub server token",
+      "github-user-token": "GitHub user token",
+      "github-fine-grained-token": "GitHub fine-grained token",
+      "slack-bot-token": "Slack bot token",
+      "slack-user-token": "Slack user token",
+      "slack-app-token": "Slack app token",
+      "aws-access-key-id": "AWS access key ID",
+      "aws-temporary-key-id": "AWS temporary access key ID",
+      "google-api-key": "Google API key",
+      "google-oauth-token": "Google OAuth token",
+      "gitlab-token": "GitLab token",
+      "stripe-live-key": "Stripe live key",
+      "stripe-restricted-key": "Stripe restricted key",
+      "npm-token": "npm token",
+      "digitalocean-token": "DigitalOcean token",
+      "sendgrid-key": "SendGrid key",
+      "private-key": "Private key",
+      "jwt": "JWT",
+      "conn-string-password": "Connection string password",
+      "cn-resident-id": "Chinese resident ID number",
+      "bank-card": "Bank card number",
+      "email": "Email address",
+      "cn-mobile-phone": "Chinese mainland mobile number",
+      "internal-ip": "Internal IP address",
+      "internal-domain": "Internal domain"
+    },
+    "contentRule": {
+      "unicode-tags": "Unicode tag characters",
+      "bidi-controls": "Bidirectional controls",
+      "zero-width": "Zero-width characters",
+      "private-use": "Private-use characters",
+      "ignore-previous-instructions": "Ignore previous instructions",
+      "ignore-all-previous": "Ignore all previous",
+      "disregard-your-instructions": "Disregard your instructions",
+      "jailbreak": "Jailbreak",
+      "dan": "DAN",
+      "developer-mode": "Developer mode",
+      "you-are-now": "Persona manipulation",
+      "new-persona": "New persona",
+      "act-as": "Act as",
+      "pretend-to-be": "Pretend to be",
+      "system-prompt": "System prompt extraction",
+      "reveal-your-instructions": "Reveal instructions",
+      "what-are-your-rules": "What are your rules",
+      "base64-wall": "Base64 smuggling",
+      "zh-ignore-previous": "Ignore previous instructions (Chinese)",
+      "zh-forget-your": "Forget your instructions (Chinese)",
+      "zh-do-not-follow": "Do not follow (Chinese)",
+      "zh-you-are-now": "You are now (Chinese)",
+      "zh-role-play": "Role-play (Chinese)",
+      "zh-reveal-your": "Reveal your instructions (Chinese)",
+      "zh-system-prompt": "System prompt (Chinese)",
+      "zh-jailbreak": "Jailbreak (Chinese)"
+    },
+    "contentWhy": {
+      "unicode-tags": "Entirely invisible in an editor, yet carried into the model's context as they are, so a whole instruction can hide in them.",
+      "bidi-controls": "They make what is on screen read in a different order than the characters actually are.",
+      "zero-width": "Invisible in an editor, yet read by the model. Ordinary text such as emoji and Persian uses them too.",
+      "private-use": "They have no standard meaning. Some icon fonts use them."
+    },
+    "toolRule": {
+      "curl-pipe-sh": {
+        "name": "Download and run",
+        "why": "Downloads and runs it straight away; what runs is decided remotely and cannot be read first"
+      },
+      "base64-decode-exec": {
+        "name": "Decode and run",
+        "why": "Hides what will run inside base64"
+      },
+      "exfil-env": {
+        "name": "Send out environment variables",
+        "why": "Sends the environment, which usually holds keys, somewhere else"
+      },
+      "exfil-credentials": {
+        "name": "Send out a credential file",
+        "why": "Asks the model to send the contents of a credential file somewhere"
+      },
+      "exfil-credentials-reversed": {
+        "name": "Send out a credential file (verb first)",
+        "why": "Asks the model to send the contents of a credential file somewhere"
+      },
+      "ssh-key-read": {
+        "name": "Read a private key or cloud credential",
+        "why": "Reads a private key or a cloud credential"
+      },
+      "write-startup-item": {
+        "name": "Write a startup item",
+        "why": "Writes somewhere that runs at login or whenever a terminal opens"
+      },
+      "crontab-install": {
+        "name": "Install a scheduled job",
+        "why": "Installs a scheduled job, or deletes every existing one"
+      },
+      "rm-rf-root": {
+        "name": "Delete home or root",
+        "why": "Deletes the whole home directory or the root"
+      },
+      "chmod-777": {
+        "name": "World-writable permissions",
+        "why": "Makes a file writable by everyone"
+      }
+    }
   },
   "mcpStore": {
     "title": "MCP Store",
@@ -482,21 +773,14 @@
       "tpmCap": "TPM cap",
       "cacheReadWeight": "Cache read weight",
       "cacheWriteWeight": "Cache write weight",
-      "cacheWrite1hWeight": "1-hour cache write weight"
+      "cacheWrite1hWeight": "1-hour cache write weight",
+      "maxOutputTokens": "Max output tokens"
     },
     "useGlobalDefault": "Use global default",
     "unlimited": "Unlimited",
     "routingOverrideTitle": "Routing overrides",
     "routingOverrideHint": "Override the gateway-wide defaults for this model. Leave blank to inherit from Settings → Gateway.",
-    "outputGuardrails": {
-      "title": "Output guardrails",
-      "description": "Reject upstream responses that violate per-model checks before they reach the caller. Today only a maximum-length rule is wired, and it applies to non-streaming responses only — streaming completions bypass these checks.",
-      "addMaxLength": "Add max-length guardrail",
-      "noRules": "No guardrails configured.",
-      "maxLengthLabel": "Max length: {{count}} chars",
-      "maxLengthLabelShort": "Max characters",
-      "maxLengthRange": "Max length must be between 1 and {{max}}"
-    },
+    "maxOutputTokensHint": "The most output tokens a request to this model can ask for: a larger max_tokens is lowered to it, and a request without one gets it. Leave blank for no limit.",
     "strategy": {
       "weighted": "Weighted random",
       "latency": "Latency-first",
@@ -535,7 +819,8 @@
       "weightMustBePositive": "Weights must be positive numbers.",
       "affinityTtlRange": "Affinity TTL must be between 0 and 86400 seconds.",
       "capMustBePositive": "RPM/TPM caps must be positive integers (or empty for unlimited).",
-      "cacheWeightNotNegative": "Cache weights must not be negative."
+      "cacheWeightNotNegative": "Cache weights must not be negative.",
+      "maxOutputTokensRange": "Max output tokens must be a whole number from 1 to {{max}} (leave blank for no limit)."
     },
     "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
     "batchImportWarning": "Imported routes go live in /v1/models right away. Tick only the models you actually want exposed.",
@@ -1378,142 +1663,8 @@
     "apiKeysConfig": "API Key Policies",
     "auditConfig": "Audit",
     "perf": "Performance",
-    "saved": "Settings saved successfully",
-    "saveError": "Failed to save settings",
     "autosaveHint": "Changes save automatically",
     "requiresRestart": "Requires restart to take effect",
-    "addRule": "Add Rule",
-    "sandbox": {
-      "title": "Test Sandbox",
-      "desc": "Paste a sample user message to test both content filter rules and PII redaction at once. Results use your current (unsaved) rules.",
-      "placeholder": "Type or paste sample text here…",
-      "runAll": "Run test"
-    },
-    "contentFilter": {
-      "title": "Content Filter Rules",
-      "intro": "Each AI request is checked against these rules. When the user message matches a rule, the gateway runs the rule's action: Block rejects the request, Warn allows it but logs an alert, Log silently records the hit. Changes apply immediately, no restart needed.",
-      "loadPresets": "Presets",
-      "empty": "No rules yet. Add rules manually or load a preset to get started.",
-      "ruleName": "Rule name",
-      "namePlaceholder": "e.g. Jailbreak",
-      "matchType": "Match type",
-      "contains": "Contains",
-      "regex": "Regex",
-      "pattern": "Pattern",
-      "action": "Action",
-      "actionBlock": "Block",
-      "actionWarn": "Warn",
-      "actionLog": "Log",
-      "actionBlockHint": "Reject the request with an error.",
-      "actionWarnHint": "Allow the request, raise a warning in audit logs.",
-      "actionLogHint": "Allow the request silently, only record in logs.",
-      "sandboxNoMatches": "No rules matched.",
-      "sandboxMatchCount": "{{count}} rule(s) matched",
-      "presetsTitle": "Built-in Rule Presets",
-      "presetsDesc": "Click a preset to append its rules to your current list. Existing rules are kept. You can edit each rule afterward.",
-      "preset": {
-        "injection": {
-          "name": "Instruction override",
-          "description": "Blocks the most common jailbreak and instruction-override phrases. Recommended starting point."
-        },
-        "persona": {
-          "name": "Persona and prompt extraction",
-          "description": "Persona manipulation, system-prompt extraction and Base64 smuggling. Most rules warn rather than block."
-        },
-        "chinese": {
-          "name": "Chinese language",
-          "description": "Common Chinese-language prompt injection patterns: 越狱, 忽略指令, 扮演 …"
-        }
-      }
-    },
-    "pii": {
-      "title": "PII Redactor",
-      "intro": "These regex patterns are matched against user messages before they are forwarded to the AI provider. Each match is replaced with a placeholder; the AI's response is then post-processed to restore the original values, so the upstream model never sees the raw PII.",
-      "addPattern": "Add Pattern",
-      "loadPresets": "Presets",
-      "presetHint": "Click to add a preset pattern",
-      "empty": "No PII patterns configured. Add a pattern to start redacting.",
-      "name": "Name",
-      "namePlaceholder": "e.g. email",
-      "regex": "Regex pattern",
-      "placeholderLabel": "Placeholder prefix",
-      "behavior": "Each pattern: 1) finds matches in user input, 2) replaces them with {{PREFIX_xxxx_n}} placeholders before sending upstream, 3) restores original values in the response. Changes apply immediately, no restart needed.",
-      "sandboxNoMatches": "(no PII detected — text unchanged)",
-      "sandboxMatchCount": "{{count}} item(s) redacted",
-      "redactedOutput": "Redacted output (what the AI receives)"
-    },
-    "hiddenText": {
-      "title": "Hidden characters",
-      "intro": "Unicode tag characters render as nothing and still reach the model, so a whole instruction can ride along invisibly; bidirectional overrides make text read on screen in a different order than it really is. Neither has a use in a prompt, and both turn up where the caller did not write them — in a page or file a tool fetched. The caller's messages and the tool results inside them are checked; emoji, Persian and Russian text are not flagged.",
-      "action": "When found",
-      "off": "Off",
-      "behavior": "Warn lets the request through and writes gateway.hidden_text_flagged to the audit log; Block refuses it with 403 and writes gateway.hidden_text_blocked; Log only records it in the application log."
-    },
-    "toolInspection": {
-      "title": "Tool-call inspection",
-      "intro": "The upstream writes the response, so it can hand back a tool call the model never made, such as a command that downloads and runs a script. Every tool call in a response is checked against these rules. Observe records each hit in the audit log and changes nothing; Enforce also cuts the response when a rule set to Cut matches, so the client never receives a complete call. Changes apply immediately, no restart needed.",
-      "mode": "Mode",
-      "modeOff": "Off",
-      "modeObserve": "Observe",
-      "modeEnforce": "Enforce",
-      "builtin": "Built-in rules",
-      "custom": "Custom rules",
-      "rule": "Rule",
-      "enabled": "Enabled",
-      "inEnforce": "In Enforce mode",
-      "actionCut": "Cut",
-      "actionRecord": "Record only",
-      "addRule": "Add rule",
-      "customEmpty": "No custom rules.",
-      "name": "Name",
-      "namePlaceholder": "e.g. Delete cluster resources",
-      "pattern": "Pattern (regex, matched against the call's arguments)",
-      "behavior": "A streamed response is cut at the frame that would complete the matching call: what the model said before it still arrives, and an incomplete call cannot be run. A non-streamed response is refused with 403. Every hit is written to the audit log as gateway.tool_call_flagged or gateway.tool_call_blocked.",
-      "sandboxNoMatches": "No rules matched.",
-      "sandboxMatchCount": "{{count}} rule(s) matched",
-      "rules": {
-        "curl-pipe-sh": {
-          "name": "Download and run",
-          "why": "Downloads and runs it straight away; what runs is decided remotely and cannot be read first"
-        },
-        "base64-decode-exec": {
-          "name": "Decode and run",
-          "why": "Hides what will run inside base64"
-        },
-        "exfil-env": {
-          "name": "Send out environment variables",
-          "why": "Sends the environment, which usually holds keys, somewhere else"
-        },
-        "exfil-credentials": {
-          "name": "Send out a credential file",
-          "why": "Asks the model to send the contents of a credential file somewhere"
-        },
-        "exfil-credentials-reversed": {
-          "name": "Send out a credential file (verb first)",
-          "why": "Asks the model to send the contents of a credential file somewhere"
-        },
-        "ssh-key-read": {
-          "name": "Read a private key or cloud credential",
-          "why": "Reads a private key or a cloud credential"
-        },
-        "write-startup-item": {
-          "name": "Write a startup item",
-          "why": "Writes somewhere that runs at login or whenever a terminal opens"
-        },
-        "crontab-install": {
-          "name": "Install a scheduled job",
-          "why": "Installs a scheduled job, or deletes every existing one"
-        },
-        "rm-rf-root": {
-          "name": "Delete home or root",
-          "why": "Deletes the whole home directory or the root"
-        },
-        "chmod-777": {
-          "name": "World-writable permissions",
-          "why": "Makes a file writable by everyone"
-        }
-      }
-    },
     "defaultExpiry": "Default Expiry (days)",
     "inactivityTimeout": "Inactivity Timeout (days)",
     "rotationPeriod": "Rotation Period (days)",
