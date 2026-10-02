@@ -217,9 +217,7 @@ function RuleTable({
       <TableHeader>
         <TableRow>
           <TableHead>{t('contentSecurity.col.rule')}</TableHead>
-          <TableHead>
-            {guard === 'inspect_tools' ? t('contentSecurity.col.regex') : t('contentSecurity.col.match')}
-          </TableHead>
+          <TableHead>{t('contentSecurity.col.match')}</TableHead>
           <TableHead>
             {guard === 'redact' ? t('contentSecurity.col.replaceWith') : t('contentSecurity.col.action')}
           </TableHead>
@@ -257,8 +255,9 @@ function RuleTable({
 function MatchCell({ guard, r }: { guard: Guard; r: SecurityRuleView }) {
   const m = r.matcher;
   if (guard === 'redact') return <MatcherText m={m} />;
-  // Tool and content rules show the pattern itself; that it ignores case
-  // holds for every rule and is said in the rule's dialog.
+  // Tool and content rules show the pattern itself (that it ignores case
+  // holds for every rule and is said in the rule's dialog); a check
+  // implemented in code says what it looks for.
   switch (m.kind) {
     case 'regex':
       return <Code>{m.pattern}</Code>;

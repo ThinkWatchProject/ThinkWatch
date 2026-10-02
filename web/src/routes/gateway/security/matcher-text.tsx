@@ -117,6 +117,9 @@ export function MatcherText({ m }: { m: Matcher }) {
       return fill(t('contentSecurity.matcher.codepoints', RAW), {
         ranges: <Codepoints ranges={m.ranges} />,
       });
+    case 'builtin':
+      // A check implemented in code: say what it looks for, not how.
+      return t(`contentSecurity.check.${m.check}`, { defaultValue: t('contentSecurity.matcher.other') });
     default:
       // A kind this console does not know yet.
       return t('contentSecurity.matcher.other');

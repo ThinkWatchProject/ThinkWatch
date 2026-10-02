@@ -150,20 +150,17 @@ function toneOf(action: RuleAction | null | undefined): Mark['tone'] {
  * What the server found: how many, marked in the sample; for redaction and
  * deletion, the text as the third mode would send it; for the content
  * filter, whether that mode would refuse the request.
+ *
+ * Every hit carries the action it takes there. A single rule is tried with
+ * the action chosen in its dialog, so the colours, the text sent and the
+ * refusal all follow that choice.
  */
 function TrialBox({
   guard,
   trial,
-  action,
-  showOutput,
-  showRefused,
 }: {
   guard: Guard;
   trial: Trial;
-  /** Colour every hit as this action; left out, each hit's own. */
-  action?: RuleAction | null;
-  showOutput: boolean;
-  showRefused: boolean;
 }) {
   const { t } = useTranslation();
   if (trial.state === 'idle') return null;
@@ -172,9 +169,11 @@ function TrialBox({
   }
   const result = trial.state === 'done' ? trial.result : trial.last;
   const hits = result?.hits ?? [];
-  const tone = (h: SecurityTestHit) => toneOf(action === undefined ? h.action : action);
+  const tone = (h: SecurityTestHit) => toneOf(h.action);
   const bad = hits.some((h) => tone(h) === 'bad');
-  const refused = showRefused && result?.refused === true;
+  // Tool-call inspection sends nothing and refuses nothing; the server
+  // answers null and false there.
+  const refused = result?.refused === true;
   return (
     <div className="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
       <p
@@ -204,7 +203,7 @@ function TrialBox({
           {t('contentSecurity.dialog.refused', { mode: modeName(t, guard, 'enforce') })}
         </p>
       )}
-      {showOutput && !refused && result && result.output !== null && (
+      {!refused && result && result.output !== null && (
         <div className="space-y-1 border-t pt-2">
           <p className="text-xs text-muted-foreground">
             {t('contentSecurity.dialog.sent', { mode: modeName(t, guard, 'enforce') })}
@@ -290,6 +289,8 @@ export function CustomRuleDialog({
           pattern,
           match: content ? match : undefined,
           label: redact ? label : undefined,
+          // Redaction rules have no action; the server refuses one there.
+          action: acts ? action : undefined,
         }
       : null;
   const trial = useTrial(guard, request);
@@ -441,13 +442,7 @@ export function CustomRuleDialog({
               placeholder={t(`contentSecurity.guard.${guard}.samplePlaceholder`)}
               onChange={(e) => setSample(e.target.value)}
             />
-            <TrialBox
-              guard={guard}
-              trial={trial}
-              action={acts ? action : null}
-              showOutput={redact || action === 'strip'}
-              showRefused={false}
-            />
+            <TrialBox guard={guard} trial={trial} />
           </Field>
         </div>
 
@@ -496,7 +491,7 @@ export function BuiltinRuleDialog({
   rule: SecurityRuleView;
   canWrite: boolean;
   onClose: () => void;
-  /** Absent where no equivalent custom rule can be written (redaction). */
+  /** Absent where no equivalent custom rule can be written: redaction, and checks implemented in code. */
   onCopy?: () => void;
   onSaveAction: (action: RuleAction) => Promise<void>;
 }) {
@@ -506,7 +501,7 @@ export function BuiltinRuleDialog({
   const [sample, setSample] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const trial = useTrial(guard, { sample, rule: rule.id });
+  const trial = useTrial(guard, { sample, rule: rule.id, action: acts ? action : undefined });
   const why = ruleWhy(t, guard, rule);
   const changed = acts !== null && action !== (rule.action ?? 'record');
 
@@ -573,13 +568,7 @@ export function BuiltinRuleDialog({
               placeholder={t(`contentSecurity.guard.${guard}.samplePlaceholder`)}
               onChange={(e) => setSample(e.target.value)}
             />
-            <TrialBox
-              guard={guard}
-              trial={trial}
-              action={acts ? action : null}
-              showOutput={guard === 'redact' || action === 'strip'}
-              showRefused={false}
-            />
+            <TrialBox guard={guard} trial={trial} />
           </Field>
         </div>
 
@@ -655,12 +644,7 @@ export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => vo
 
           {trial.state !== 'idle' && (
             <div className="space-y-2">
-              <TrialBox
-                guard={guard}
-                trial={trial}
-                showOutput={guard !== 'inspect_tools'}
-                showRefused={guard === 'content'}
-              />
+              <TrialBox guard={guard} trial={trial} />
               {hits.length > 0 && (
                 <Table className="table-fixed">
                   <colgroup>

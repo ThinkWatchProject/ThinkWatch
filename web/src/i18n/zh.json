@@ -185,7 +185,6 @@
     "col": {
       "rule": "规则",
       "match": "匹配",
-      "regex": "匹配（正则表达式）",
       "action": "处置",
       "replaceWith": "替换为",
       "enabled": "启用"
@@ -299,6 +298,10 @@
       "codepoints": "码位 {{ranges}}",
       "other": "内置判据"
     },
+    "check": {
+      "credential-to-network": "凭据发往本机和其服务商以外的主机",
+      "file-to-network": "本地文件上传到外部主机"
+    },
     "cardNetwork": {
       "UnionPay": "银联"
     },
@@ -393,6 +396,10 @@
         "name": "读取私钥或云凭据",
         "why": "读取私钥或云服务凭据"
       },
+      "secret-to-unknown-host": {
+        "name": "发送凭据到陌生主机",
+        "why": "将凭据发送到本机和该凭据所属服务商以外的主机"
+      },
       "write-startup-item": {
         "name": "写入启动项",
         "why": "写入开机或打开终端时自动执行的位置"
@@ -408,6 +415,10 @@
       "chmod-777": {
         "name": "开放全部写权限",
         "why": "将文件权限设为所有人可写"
+      },
+      "upload-file-to-host": {
+        "name": "上传本地文件到外部主机",
+        "why": "将本地文件的内容上传到外部主机"
       }
     }
   },

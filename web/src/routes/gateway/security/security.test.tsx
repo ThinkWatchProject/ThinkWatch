@@ -39,7 +39,35 @@ const detail = (): SecurityDetail => ({
       },
     ],
   },
-  inspect_tools: { mode: 'observe', rules: [] },
+  inspect_tools: {
+    mode: 'enforce',
+    rules: [
+      {
+        id: 'curl-pipe-sh',
+        custom: false,
+        name: 'Download and run',
+        why: 'Downloads and runs it straight away',
+        kind: 'command',
+        matcher: { kind: 'regex', pattern: '(curl|wget)[^\\n|]*\\|\\s*sh' },
+        enabled: true,
+        on_by_default: true,
+        action: 'cut',
+        default_action: 'cut',
+      },
+      {
+        id: 'secret-to-unknown-host',
+        custom: false,
+        name: 'Send a credential to an unknown host',
+        why: "Sends a credential to a host that is neither local nor the credential's own provider",
+        kind: 'command',
+        matcher: { kind: 'builtin', check: 'credential-to-network' },
+        enabled: true,
+        on_by_default: true,
+        action: 'cut',
+        default_action: 'cut',
+      },
+    ],
+  },
   content: {
     mode: 'observe',
     rules: [
@@ -128,6 +156,17 @@ describe('GatewaySecurityPage', () => {
 
     await user.clear(field)
     await user.type(field, 'U+200B-U+200D')
+    // The pattern is tried with the action chosen for it.
+    await user.type(within(dialog).getByLabelText('Test text'), 'a b')
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith(
+        '/api/admin/security/content/test',
+        expect.objectContaining({
+          method: 'POST',
+          body: { sample: 'a b', pattern: 'U+200B-U+200D', match: 'codepoints', action: 'strip' },
+        }),
+      ),
+    )
     await user.click(within(dialog).getByRole('button', { name: 'Create' }))
 
     await waitFor(() =>
@@ -139,6 +178,47 @@ describe('GatewaySecurityPage', () => {
           },
         },
       }),
+    )
+  })
+
+  it('describes a tool-call check implemented in code and offers no copy of it', async () => {
+    const user = userEvent.setup()
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    await user.click(await screen.findByRole('tab', { name: /Tool-call inspection/ }))
+    const check = "A credential sent to a host other than this machine and the credential's own provider"
+    expect(await screen.findByText(check)).toBeInTheDocument()
+
+    await user.click(screen.getByText('Send a credential to an unknown host'))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(check)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: 'Copy as a custom rule' })).not.toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await user.click(screen.getByText('Download and run'))
+    expect(
+      await within(await screen.findByRole('dialog')).findByRole('button', { name: 'Copy as a custom rule' }),
+    ).toBeInTheDocument()
+  })
+
+  it('tries a redaction pattern under its placeholder name, without an action', async () => {
+    const user = userEvent.setup()
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'New rule' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Regular expression'), 'PRJ-\\d+')
+    await user.clear(within(dialog).getByLabelText('Placeholder name'))
+    await user.type(within(dialog).getByLabelText('Placeholder name'), 'PROJECT')
+    await user.type(within(dialog).getByLabelText('Test text'), 'see PRJ-12')
+
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith(
+        '/api/admin/security/redact/test',
+        expect.objectContaining({
+          body: { sample: 'see PRJ-12', pattern: 'PRJ-\\d+', label: 'PROJECT' },
+        }),
+      ),
     )
   })
 

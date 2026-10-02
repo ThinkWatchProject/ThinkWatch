@@ -185,7 +185,6 @@
     "col": {
       "rule": "Rule",
       "match": "Match",
-      "regex": "Match (regular expression)",
       "action": "Action",
       "replaceWith": "Replaced with",
       "enabled": "On"
@@ -299,6 +298,10 @@
       "codepoints": "Code points {{ranges}}",
       "other": "Built-in check"
     },
+    "check": {
+      "credential-to-network": "A credential sent to a host other than this machine and the credential's own provider",
+      "file-to-network": "A local file uploaded to an external host"
+    },
     "cardNetwork": {
       "UnionPay": "UnionPay"
     },
@@ -393,6 +396,10 @@
         "name": "Read a private key or cloud credential",
         "why": "Reads a private key or a cloud credential"
       },
+      "secret-to-unknown-host": {
+        "name": "Send a credential to an unknown host",
+        "why": "Sends a credential to a host that is neither local nor the credential's own provider"
+      },
       "write-startup-item": {
         "name": "Write a startup item",
         "why": "Writes somewhere that runs at login or whenever a terminal opens"
@@ -408,6 +415,10 @@
       "chmod-777": {
         "name": "World-writable permissions",
         "why": "Makes a file writable by everyone"
+      },
+      "upload-file-to-host": {
+        "name": "Upload a local file to an external host",
+        "why": "Uploads the contents of a local file to an external host"
       }
     }
   },

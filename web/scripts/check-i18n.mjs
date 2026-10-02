@@ -54,8 +54,9 @@ const REDACT_RULE_IDS = [
 ];
 const TOOL_RULE_IDS = [
   'curl-pipe-sh', 'base64-decode-exec', 'exfil-env', 'exfil-credentials',
-  'exfil-credentials-reversed', 'ssh-key-read', 'write-startup-item',
-  'crontab-install', 'rm-rf-root', 'chmod-777',
+  'exfil-credentials-reversed', 'ssh-key-read', 'secret-to-unknown-host',
+  'write-startup-item', 'crontab-install', 'rm-rf-root', 'chmod-777',
+  'upload-file-to-host',
 ];
 const INVISIBLE_RULE_IDS = ['unicode-tags', 'bidi-controls', 'zero-width', 'private-use'];
 const CONTENT_RULE_IDS = [
@@ -85,6 +86,8 @@ const DYNAMIC_ENUMS = {
   'contentSecurity.contentRule.${_}': CONTENT_RULE_IDS,
   'contentSecurity.contentWhy.${_}': INVISIBLE_RULE_IDS,
   'contentSecurity.cardNetwork.${_}': ['UnionPay'],
+  // Tool-call checks implemented in code (`{ kind: 'builtin', check }`).
+  'contentSecurity.check.${_}': ['credential-to-network', 'file-to-network'],
   'contentSecurity.dialog.match.${_}': ['contains', 'regex', 'codepoints'],
   'contentSecurity.dialog.regexHint.${_}': GUARD_IDS,
   'contentSecurity.dialog.actionWhat.${_}': ['cut', 'block', 'strip'],
