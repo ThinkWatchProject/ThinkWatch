@@ -723,26 +723,6 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             }
         }
 
-        // PII patterns: basic validation (regex compilation checked at gateway layer)
-        "gateway.pii_patterns" => {
-            if let Some(arr) = value.as_array() {
-                for item in arr {
-                    if item.get("regex").and_then(|v| v.as_str()).is_none() {
-                        anyhow::bail!("{key}: each pattern must have a 'regex' string field");
-                    }
-                    if item
-                        .get("placeholder_prefix")
-                        .and_then(|v| v.as_str())
-                        .is_none()
-                    {
-                        anyhow::bail!(
-                            "{key}: each pattern must have a 'placeholder_prefix' string field"
-                        );
-                    }
-                }
-            }
-        }
-
         // OIDC settings
         "oidc.enabled" => {
             value

@@ -11,6 +11,138 @@ target.
 
 ## [Unreleased]
 
+The request guards — outbound redaction, tool-call inspection and the
+content filter — now share their rule model with the desktop gateway:
+the same policy shape, built-in rule catalog, validation, rule view and
+sample trial, from thinkwatch-core. Each guard has three modes (off,
+observe, and one named for what it does: replace, cut off, enforce), and
+the content filter can delete what a rule matches as well as refuse or
+record it, and match by code point. Hidden characters become content
+filter rules, and the per-model output length guardrail becomes a cap on
+the output tokens a request may ask for. Settings saved by an earlier
+version are converted at the first start: read the first section before
+deploying.
+
+### Read before upgrading
+
+- **The old guard settings are converted at the first start, and
+  behave as before.** `security.content_filter_patterns`,
+  `security.hidden_text`, `security.pii_redactor_patterns` and
+  `security.tool_inspection` become `security.content`,
+  `security.redact` and `security.inspect_tools`, and are deleted, in
+  one transaction during the boot migration; a second start finds
+  nothing to convert. A content rule identical to a built-in rule
+  becomes that rule, switched on, any other a custom rule; a list with
+  rules in it runs in enforce mode with every built-in rule it did not
+  name switched off. The four seeded PII patterns become the built-in
+  rules for the same data (`cn-resident-id`, `bank-card`, `email`,
+  `cn-mobile-phone`), any other pattern a custom rule whose label is
+  its old placeholder prefix. A model's `output_guardrails` length cap
+  becomes `max_output_tokens` (below), and the column is dropped. **Stop
+  every replica of the previous version before the first new one
+  starts**: a replica still running 2.2 finds its settings gone (it
+  then filters and redacts nothing) and can no longer rebuild its
+  router once the column is dropped. To see what was converted, read
+  the three keys from Settings or `system_settings` afterwards; the
+  start-up log lists them too.
+- **Placeholders are written `<<TW_EMAIL_1>>`, not `{{EMAIL_1}}`.** The
+  label of a custom rule is upper case letters, digits and
+  underscores (an old prefix is converted: `REDACTED-SSN` →
+  `REDACTED_SSN`); the built-in identity number and bank card rules
+  use `ID_NUMBER` and `CARD_NUMBER`. Anything that looked for the old
+  form in answers or logs needs the new one.
+- **Redaction searches the whole request**, not only the user's
+  messages: the system prompt, earlier answers and tool-call arguments
+  are redacted too. Base64 payloads (images, files, signatures) are
+  still left alone. Rules run on the request as it is sent, as JSON,
+  where a custom pattern's match ends at a quote or a backslash: a
+  pattern written to match across a `"` in the decoded text needs
+  rewriting.
+- **Built-in credential rules start replacing on deployments that were
+  redacting.** API keys and tokens with a known prefix, private keys,
+  JWTs and connection-string passwords are built-in rules that ship
+  switched on. A deployment whose PII list had patterns in it runs
+  redaction in enforce mode after the upgrade, so these values are now
+  replaced as well. Switch the ones you do not want off on the
+  console's security page. With an empty PII list, redaction
+  converts to observe mode: it records what it finds and changes
+  nothing.
+- **Tool calls are judged as the client receives them, and two built-in
+  rules are new.** Inspection now reads a tool call converted to the
+  caller's format and with redacted values restored — what the client
+  would run — where it used to read the placeholders. The new
+  `secret-to-unknown-host` rule cuts (in enforce mode) a call that sends
+  a recognised API key or private key to a host that is neither local
+  nor the key's own provider; `upload-file-to-host` records a call that
+  uploads a local file to an outside host. A deployment running
+  tool-call inspection in enforce mode starts cutting the first; add it
+  to `disable` if that is not wanted.
+- **"Warn" and "log" are one action now, "record only"**, and hidden
+  characters are content filter rules: `unicode-tags` and
+  `bidi-controls`, plus `zero-width` and `private-use`, which ship off.
+  `security.hidden_text: block` converts to those two rules refusing,
+  `warn` and `log` to recording, `off` to switching them off.
+- **The output length guardrail is replaced by a model's maximum output
+  tokens.** A cap of N bytes on the answer converts to `ceil(N / 4)`
+  output tokens. The answer is no longer measured or cut: a request
+  asking for more tokens than the cap is lowered to it, and one asking
+  for none gets it, in whichever field its API uses; the upstream stops
+  there. The model API's `output_guardrails` field is gone;
+  `max_output_tokens` (1 to 2147483647, `null` for no limit) replaces
+  it.
+- **A new installation observes by default.** Every guard starts in
+  observe mode, with only the built-in rules that rarely misfire
+  switched on (personal data such as e-mail addresses and phone
+  numbers ships off). Nothing is refused, replaced or deleted until a
+  guard is switched to its third mode.
+- **A content filter refusal is `403`**, with the error type of the
+  caller's API (`permission_error` for OpenAI-style APIs). Keyword and
+  regex rules used to refuse with `400`.
+- **Guard policies are changed with their own permissions.** Writing
+  `security.redact` through `PATCH /api/admin/settings` takes
+  `pii_redactor:write`, `security.content` and `security.inspect_tools`
+  take `content_filter:write`; `settings:write` no longer covers them.
+  The seeded `admin` and `super_admin` roles hold both.
+- **Console API changes.** `GET /api/admin/security` lists each guard's
+  mode and every rule, and `POST /api/admin/security/{guard}/test` tries
+  a sample; they replace `/api/admin/settings/content-filter/test`,
+  `/content-filter/presets`, `/pii-redactor/test`,
+  `/tool-inspection/rules` and `/tool-inspection/test`, which are gone.
+- **Audit events.** Every guard hit writes one event:
+  `gateway.content_flagged`, `gateway.content_stripped` and
+  `gateway.content_blocked`; `gateway.redaction_flagged` and
+  `gateway.redaction_replaced`; `gateway.tool_call_flagged` and
+  `gateway.tool_call_blocked` as before. `gateway.hidden_text_flagged`
+  and `gateway.hidden_text_blocked` are gone; hidden characters are
+  content events. With `audit.body_redact_pii` on, captured bodies are
+  redacted with the outbound redaction rules, built-in ones included,
+  whatever the redaction mode.
+
+### Added
+
+- **Deleting what a content rule matches.** A content rule can refuse
+  the request, delete the matched text from the caller's messages and
+  tool results and send the rest, or only record. Text deleted joins
+  back what it separated, so the request is checked again afterwards.
+- **Code point rules.** A content rule can match characters by code
+  point (`U+200B`, `U+E0000–U+E007F`), for invisible characters a
+  keyword cannot be written for.
+- **Every rule visible and switchable**, built-in and custom, in each
+  guard, with what it does in the third mode and what it did out of the
+  box; a sample can be tried against one rule, an unsaved one, or all
+  of them.
+
+### Fixed
+
+- **A credential in a matched tool call no longer reaches the audit
+  log.** The excerpt of a tool call that inspection cut or recorded —
+  and of a content filter hit — is masked with the redaction rules
+  before it is written; a key the model echoed, or one restored from a
+  placeholder, used to be stored as it was.
+- **A request's audit events and its log row carry the same id** when
+  the caller sends no `x-trace-id`. The log row of a request that went
+  through used to carry a second, unrelated id.
+
 ## [2.2.0] — 2026-10-01
 
 This release fixes authorization. The gateways never checked

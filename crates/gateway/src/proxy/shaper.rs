@@ -1,5 +1,5 @@
 //! The last step before bytes reach the client: put the caller's model
-//! name back and paint their PII back in.
+//! name back and paint their redacted values back in.
 //!
 //! Both run on **client-format bytes**, after any dialect conversion, so
 //! a passthrough response and a converted one go through the same code.
@@ -11,12 +11,12 @@
 //! (Responses), `modelVersion` (Gemini) — so rewriting those covers all
 //! of them without asking which format this is.
 //!
-//! **PII.** A whole response has its placeholders intact and is restored
-//! in one pass (`pii_redactor::restore_body`). A stream does not: `{{EMA`
-//! can end one frame and `IL_1}}` start the next, with frame structure in
-//! between. Restoration happens per frame, on the text and the tool
-//! arguments of whichever format this is, with one lane per content block
-//! or tool call — thinkwatch-core's `FrameRestorer`, the same one the
+//! **Redacted values.** A whole response has its placeholders intact and
+//! is restored in one pass (`redaction::restore_body`). A stream does not:
+//! `<<TW_EM` can end one frame and `AIL_1>>` start the next, with frame
+//! structure in between. Restoration happens per frame, on the text and the
+//! tool arguments of whichever format this is, with one lane per content
+//! block or tool call — thinkwatch-core's `FrameRestorer`, the same one the
 //! desktop gateway uses.
 //!
 //! **Usage.** A Chat stream is always sent upstream asking for its usage
@@ -67,19 +67,30 @@ fn set_model(v: &mut Value, model: &str) -> bool {
 pub struct StreamShaper {
     decoder: Decoder,
     model: String,
+    client: Dialect,
     restorer: Option<FrameRestorer>,
     hide_usage: bool,
 }
 
 impl StreamShaper {
     pub fn new(model: String, redaction: &Ledger, client: Dialect) -> Self {
-        let restorer = FrameRestorer::new(redaction, client);
-        Self {
+        let mut shaper = Self {
             decoder: Decoder::default(),
             model,
-            restorer: (!restorer.is_noop()).then_some(restorer),
+            client,
+            restorer: None,
             hide_usage: false,
-        }
+        };
+        shaper.restore_with(redaction);
+        shaper
+    }
+
+    /// Restore with `ledger` from here on. Called once the upstream has
+    /// answered, before any of its bytes: the hop that went out can have
+    /// numbered a value the request's own ledger does not hold.
+    pub fn restore_with(&mut self, ledger: &Ledger) {
+        let restorer = FrameRestorer::new(ledger, self.client);
+        self.restorer = (!restorer.is_noop()).then_some(restorer);
     }
 
     /// Take the usage the caller did not ask for out of a Chat stream.
@@ -91,6 +102,30 @@ impl StreamShaper {
     pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
         let frames = self.decoder.feed(chunk);
         self.write(frames).into_bytes()
+    }
+
+    /// Frames the gateway writes itself (a refusal that ends the stream),
+    /// with the caller's model name put in. Read on their own, apart from
+    /// the stream's frames — the stream may be stopped mid-frame — and
+    /// with nothing to restore.
+    pub fn rename(&self, sse: &[u8]) -> Vec<u8> {
+        let mut decoder = Decoder::default();
+        let mut frames = decoder.feed(sse);
+        frames.extend(decoder.flush());
+        let mut out = String::new();
+        for f in frames {
+            match serde_json::from_str::<Value>(&f.data) {
+                Ok(mut v) => {
+                    set_model(&mut v, &self.model);
+                    out.push_str(&match &f.event {
+                        Some(e) => frame::named(e, &v),
+                        None => frame::data(&v),
+                    });
+                }
+                Err(_) => out.push_str(&raw(&f)),
+            }
+        }
+        out.into_bytes()
     }
 
     /// The stream ended. Emits whatever the decoder was still holding, then
@@ -218,16 +253,17 @@ fn raw(f: &Frame) -> String {
 mod tests {
     use super::*;
 
-    /// A ledger that issued `{{EMAIL_1}}` for `a@x.com`, or nothing.
+    /// A ledger that issued `<<TW_EMAIL_1>>` for `a@x.com`, or nothing.
     fn ctx(email: Option<&str>) -> Ledger {
-        let r = crate::pii_redactor::PiiRedactor::from_config(&[
-            think_watch_common::pii::PiiPatternConfig {
-                name: "email".into(),
-                regex: r"[a-z]+@x\.com".into(),
-                placeholder_prefix: "EMAIL".into(),
-            },
-        ]);
-        r.redact_str(email.unwrap_or("")).1
+        let r = crate::redaction::Redaction::new(&tw_guard::policy::RedactPolicy {
+            mode: tw_guard::policy::Mode::Enforce,
+            enable: vec!["email".into()],
+            ..Default::default()
+        });
+        let body = serde_json::json!({"text": email.unwrap_or("")}).to_string();
+        let ledger = r.look(body.as_bytes()).1;
+        assert_eq!(ledger.len(), usize::from(email.is_some()));
+        ledger
     }
 
     fn frames(bytes: &[u8]) -> Vec<Value> {
@@ -331,8 +367,8 @@ mod tests {
         // Exactly why this cannot be done on bytes: frame structure sits
         // between the two halves.
         let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Chat);
-        let mut out = s.process(chat_chunk("mail {{EMA").as_bytes());
-        out.extend(s.process(chat_chunk("IL_1}} now").as_bytes()));
+        let mut out = s.process(chat_chunk("mail <<TW_EM").as_bytes());
+        out.extend(s.process(chat_chunk("AIL_1>> now").as_bytes()));
         out.extend(s.finish());
         let text: String = frames(&out)
             .iter()
@@ -350,10 +386,10 @@ mod tests {
         let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Anthropic);
         let ev = |d: Value| format!("event: content_block_delta\ndata: {d}\n\n");
         let mut out = s.process(
-            ev(serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"to {{EMAIL_"}})).as_bytes(),
+            ev(serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"to <<TW_EMAIL_"}})).as_bytes(),
         );
         out.extend(s.process(
-            ev(serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"1}}"}})).as_bytes(),
+            ev(serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"1>>"}})).as_bytes(),
         ));
         out.extend(s.finish());
         let text: String = frames(&out)
@@ -365,12 +401,12 @@ mod tests {
 
     #[test]
     fn a_held_back_tail_is_released_before_the_block_closes() {
-        // Text ending in an unclosed `{{` is not a placeholder: it goes out
+        // Text ending in an unclosed `<<` is not a placeholder: it goes out
         // verbatim, inside the block it belongs to, not after the block ends.
         let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Anthropic);
         let ev = |name: &str, d: Value| format!("event: {name}\ndata: {d}\n\n");
         let mut out = s.process(
-            ev("content_block_delta", serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"literal {{"}})).as_bytes(),
+            ev("content_block_delta", serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"literal <<"}})).as_bytes(),
         );
         out.extend(
             s.process(
@@ -387,7 +423,7 @@ mod tests {
             .iter()
             .filter_map(|f| f["delta"]["text"].as_str().map(str::to_string))
             .collect();
-        assert_eq!(text, "literal {{");
+        assert_eq!(text, "literal <<");
         assert_eq!(fs.last().unwrap()["type"], "content_block_stop", "{fs:?}");
     }
 
@@ -399,7 +435,7 @@ mod tests {
         let out = s.process(
             format!(
                 "event: response.output_text.done\ndata: {}\n\n",
-                serde_json::json!({"type":"response.output_text.done","text":"mail {{EMAIL_1}}"})
+                serde_json::json!({"type":"response.output_text.done","text":"mail <<TW_EMAIL_1>>"})
             )
             .as_bytes(),
         );
@@ -407,9 +443,9 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_calls_arguments_get_the_callers_pii_back() {
+    fn a_tool_calls_arguments_get_the_callers_values_back() {
         // The old shaper restored text only: a model asked to "email
-        // a@x.com" called the tool with `{{EMAIL_1}}` as the address.
+        // a@x.com" called the tool with the placeholder as the address.
         let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Chat);
         let call = |args: &str| {
             format!(
@@ -419,8 +455,8 @@ mod tests {
                 ]},"finish_reason":null}]})
             )
         };
-        let mut out = s.process(call(r#"{"to":"{{EMA"#).as_bytes());
-        out.extend(s.process(call(r#"IL_1}}"}"#).as_bytes()));
+        let mut out = s.process(call(r#"{"to":"<<TW_EM"#).as_bytes());
+        out.extend(s.process(call(r#"AIL_1>>"}"#).as_bytes()));
         out.extend(s.finish());
         let args: String = frames(&out)
             .iter()

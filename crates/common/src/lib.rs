@@ -28,6 +28,7 @@
 pub mod config;
 pub mod db;
 pub mod dynamic_config;
+pub mod guard_policy; // the request guards' policies as system settings, and the one-time conversion of the old ones
 
 // --- Shared types & errors ---
 pub mod dto;

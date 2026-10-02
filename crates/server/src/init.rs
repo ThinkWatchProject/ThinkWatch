@@ -88,14 +88,12 @@ pub async fn init_state(
         think_watch_auth::jwt::JwtManager::leeway_from_env(),
     ));
 
-    let initial_content_filter = app::load_content_filter(&dynamic_config).await;
-    let initial_pii_redactor = app::load_pii_redactor(&dynamic_config).await;
-    let initial_tool_inspection = app::load_tool_inspection(&dynamic_config).await;
-    let initial_blob_redactor = app::load_blob_redactor(&dynamic_config).await;
-    let content_filter = Arc::new(arc_swap::ArcSwap::from_pointee(initial_content_filter));
-    let pii_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_pii_redactor));
-    let tool_inspection = Arc::new(arc_swap::ArcSwap::from_pointee(initial_tool_inspection));
-    let blob_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_blob_redactor));
+    let guards = Arc::new(arc_swap::ArcSwap::from_pointee(
+        app::load_guards(&dynamic_config).await,
+    ));
+    let blob_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(
+        app::load_blob_redactor(&dynamic_config).await,
+    ));
 
     let init_http_secs = dynamic_config.perf_http_client_secs().await as u64;
     let init_mcp_pool_secs = dynamic_config.perf_mcp_pool_secs().await as u64;
@@ -157,9 +155,7 @@ pub async fn init_state(
         oidc: Arc::new(tokio::sync::RwLock::new(oidc_manager)),
         started_at: chrono::Utc::now(),
         clickhouse: ch_client,
-        content_filter,
-        pii_redactor,
-        tool_inspection,
+        guards,
         mcp_registry: think_watch_mcp_gateway::registry::Registry::new(),
         mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers::new(),
         mcp_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -221,7 +217,7 @@ pub fn install_cb_listener(state: &AppState) {
 }
 
 /// Subscribe to Redis `config:changed` and hot-reload the in-memory
-/// dynamic config / content filter / PII redactor / HTTP client / MCP
+/// dynamic config / request guards / HTTP client / MCP
 /// pool whenever any instance flips a setting.
 pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     // Multi-instance config sync (`system_settings.value` updates → Pub/Sub).
@@ -237,14 +233,12 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
         Builder::from_config(sub_filters_cfg).build_subscriber_client()?;
     sub_filters.init().await?;
     let dc_clone = state.dynamic_config.clone();
-    let cf_clone = state.content_filter.clone();
-    let pii_clone = state.pii_redactor.clone();
-    let tools_clone = state.tool_inspection.clone();
+    let guards_clone = state.guards.clone();
     let blob_clone = state.blob_redactor.clone();
     let http_clone = state.http_client.clone();
     let pool_clone = state.mcp_pool.clone();
     // Wrap in `supervise()` so a panic inside the reload (e.g.
-    // load_content_filter blowing up on a malformed
+    // load_guards blowing up on a malformed
     // system_settings.value blob) emits a metric +
     // `supervised_task_panics_total{task=…}` instead of silently
     // killing multi-instance config sync until the pod restarts.
@@ -265,15 +259,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
         // restart. Loop forever, treat Lagged as "reload now to catch
         // up", exit cleanly only on a final Closed.
         let do_reload = async |dc: &Arc<DynamicConfig>,
-                               cf: &arc_swap::ArcSwap<
-            think_watch_gateway::content_filter::ContentFilter,
-        >,
-                               pii: &arc_swap::ArcSwap<
-            think_watch_gateway::pii_redactor::PiiRedactor,
-        >,
-                               tools: &arc_swap::ArcSwap<
-            think_watch_gateway::tool_inspection::ToolInspection,
-        >,
+                               guards: &arc_swap::ArcSwap<think_watch_gateway::guards::Guards>,
                                blob: &arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>,
                                http: &arc_swap::ArcSwap<reqwest::Client>,
                                pool: &arc_swap::ArcSwap<
@@ -283,19 +269,12 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                 tracing::warn!("Failed to reload dynamic config: {e}");
                 return;
             }
-            let new_filter = app::load_content_filter(dc).await;
-            cf.store(Arc::new(new_filter));
-            let new_pii = app::load_pii_redactor(dc).await;
-            pii.store(Arc::new(new_pii));
-            tools.store(Arc::new(app::load_tool_inspection(dc).await));
-            // Same pattern set, parallel hot-swap — the at-rest
-            // BlobRedactor used by both gateway and mcp-gateway
-            // audit pipelines must stay in lockstep with the
-            // in-flight PiiRedactor or operators get the surprise
-            // "I added a pattern via the admin UI and one of two
-            // redaction surfaces still leaks PII".
-            let new_blob = app::load_blob_redactor(dc).await;
-            blob.store(Arc::new(new_blob));
+            guards.store(Arc::new(app::load_guards(dc).await));
+            // Same policy, swapped alongside — the MCP gateway's at-rest
+            // redactor must stay in lockstep with the AI gateway's, or
+            // operators get the surprise "I added a rule in the console
+            // and one of two redaction surfaces still leaks it".
+            blob.store(Arc::new(app::load_blob_redactor(dc).await));
             let http_secs = dc.perf_http_client_secs().await as u64;
             match reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(http_secs))
@@ -331,9 +310,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                     if msg.channel == "config:changed" {
                         do_reload(
                             &dc_clone,
-                            &cf_clone,
-                            &pii_clone,
-                            &tools_clone,
+                            &guards_clone,
                             &blob_clone,
                             &http_clone,
                             &pool_clone,
@@ -345,9 +322,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                     tracing::warn!("filter reload subscriber lagged by {n} messages; reloading");
                     do_reload(
                         &dc_clone,
-                        &cf_clone,
-                        &pii_clone,
-                        &tools_clone,
+                        &guards_clone,
                         &blob_clone,
                         &http_clone,
                         &pool_clone,

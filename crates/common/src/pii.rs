@@ -1,68 +1,38 @@
-//! PII patterns, and the at-rest redactor.
+//! At-rest redaction of captured bodies.
 //!
-//! The patterns live in `security.pii_redactor_patterns`. Two surfaces use
-//! them, and both must see the same set — a pattern added in the admin UI
-//! that one surface skips is a leak nobody notices:
+//! With body capture on, request and response bodies, tool arguments and
+//! tool results are written to the audit log. With `audit.body_redact_pii`
+//! on as well, what the outbound redaction rules find in them is masked
+//! before they are stored: a match becomes `{{REDACTED_<rule>}}` and
+//! nothing is kept to restore it — the row is write-only. Both gateways
+//! capture bodies, so both use [`BlobRedactor`].
 //!
-//! * **In flight** (gateway only): PII in the caller's request is swapped
-//!   for placeholders (`{{EMAIL_1}}`) before it goes upstream, and put back
-//!   in the response for this caller. `gateway::pii_redactor` owns that.
-//! * **At rest** (both gateways): request and response bodies, tool
-//!   arguments and tool results are written to the audit log. The row is
-//!   write-only, so matches become `{{REDACTED_<name>}}` and nothing is
-//!   kept to restore them. That is [`BlobRedactor`].
-//!
-//! Matching is thinkwatch-core's (`tw-guard`), the same engine the desktop
-//! gateway redacts with; the patterns are ours.
+//! The rules are the outbound redaction policy's (`security.redact`, see
+//! [`crate::guard_policy`]): the built-in rules it has on and its custom
+//! rules, **whatever its mode** — the mode decides what happens to a
+//! request on the wire, the capture setting what is kept. Matching is
+//! thinkwatch-core's (`tw_guard::redact`), the engine the desktop gateway
+//! redacts with.
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use tw_guard::policy::RedactPolicy;
 use tw_guard::redact::rules::RuleSet;
 
-/// A pattern as persisted in `system_settings`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PiiPatternConfig {
-    pub name: String,
-    pub regex: String,
-    /// The label in the placeholder: `EMAIL` in `{{EMAIL_1}}`.
-    pub placeholder_prefix: String,
-}
-
-/// The rule set for these patterns: one rule per pattern, labelled with
-/// its prefix.
+/// Replace every match in `input` with `{{REDACTED_<rule>}}` — the
+/// built-in rule's id or the custom rule's name. Nothing is kept to restore
+/// them: the result is write-only audit data.
 ///
-/// A pattern that does not compile is skipped, loudly — the save-time
-/// validator should have refused it, and one bad row should not take all
-/// redaction offline.
-pub fn rules(configs: &[PiiPatternConfig]) -> RuleSet {
-    configs.iter().fold(RuleSet::none(), |set, c| {
-        match set
-            .clone()
-            .with_labeled(&c.name, &c.regex, Some(&c.placeholder_prefix))
-        {
-            Ok(next) => next,
-            Err(e) => {
-                tracing::error!(
-                    pattern = %c.name,
-                    error = %e,
-                    "Invalid PII regex — pattern is DISABLED for redaction"
-                );
-                metrics::counter!("pii_pattern_invalid_total", "pattern" => c.name.clone())
-                    .increment(1);
-                set
-            }
-        }
-    })
-}
-
-/// Replace every match in `input` with `{{REDACTED_<pattern name>}}`.
-/// Nothing is kept to restore them: the result is write-only audit data.
+/// Found the way a request body is searched (`tw_guard::redact::flow::hits`):
+/// JSON escapes are read, a custom rule's match stays inside one JSON
+/// string so the result is still JSON, base64 payloads are left alone,
+/// and so are the gateway's own placeholders (a captured answer still
+/// carries them).
 pub fn redact_blob(rules: &RuleSet, input: &str) -> String {
     if rules.is_empty() {
         return input.to_string();
     }
-    let hits = tw_guard::redact::rules::scan_text(input, rules);
+    let hits = tw_guard::redact::flow::hits(input, rules);
     let mut out = input.to_string();
     for h in hits.iter().rev() {
         out.replace_range(
@@ -73,18 +43,16 @@ pub fn redact_blob(rules: &RuleSet, input: &str) -> String {
     out
 }
 
-/// The at-rest redactor, for a caller that holds no in-flight redactor
-/// (the MCP gateway). Hot-swapped with the patterns.
+/// The at-rest redactor, hot-swapped with the outbound redaction policy.
 #[derive(Clone)]
 pub struct BlobRedactor {
     rules: Arc<RuleSet>,
 }
 
 impl Default for BlobRedactor {
+    /// The factory policy's rules.
     fn default() -> Self {
-        Self {
-            rules: Arc::new(RuleSet::none()),
-        }
+        Self::from_policy(&RedactPolicy::default())
     }
 }
 
@@ -95,13 +63,13 @@ impl std::fmt::Debug for BlobRedactor {
 }
 
 impl BlobRedactor {
-    pub fn from_configs(configs: &[PiiPatternConfig]) -> Self {
+    pub fn from_policy(policy: &RedactPolicy) -> Self {
         Self {
-            rules: Arc::new(rules(configs)),
+            rules: Arc::new(crate::guard_policy::redact_rules(policy)),
         }
     }
 
-    /// No patterns: callers can skip the pass (and its copy) entirely.
+    /// No rule on: callers can skip the pass (and its copy) entirely.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
@@ -114,60 +82,83 @@ impl BlobRedactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tw_guard::policy::CustomRedactRule;
 
-    fn p(name: &str, regex: &str) -> PiiPatternConfig {
-        PiiPatternConfig {
-            name: name.to_string(),
-            regex: regex.to_string(),
-            placeholder_prefix: name.to_string(),
-        }
+    fn only(rules: &[(&str, &str)]) -> RuleSet {
+        rules.iter().fold(RuleSet::none(), |set, (name, pattern)| {
+            set.with_custom(name, pattern).unwrap()
+        })
     }
 
     #[test]
-    fn empty_redactor_is_no_op() {
+    fn no_rules_is_a_no_op() {
+        let rules = RuleSet::none();
+        assert_eq!(redact_blob(&rules, "hello world"), "hello world");
+    }
+
+    #[test]
+    fn a_match_becomes_the_rule_it_matched() {
+        let rules = only(&[("EMAIL", r"[\w.]+@[\w.]+")]);
+        assert_eq!(
+            redact_blob(&rules, "contact: alice@example.com"),
+            "contact: {{REDACTED_EMAIL}}"
+        );
+    }
+
+    #[test]
+    fn redacting_twice_changes_nothing_more() {
+        let rules = only(&[("EMAIL", r"[\w.]+@[\w.]+")]);
+        let once = redact_blob(&rules, "a@b.com and c@d.com");
+        assert_eq!(redact_blob(&rules, &once), once);
+    }
+
+    #[test]
+    fn of_two_overlapping_matches_the_longer_wins() {
+        let rules = only(&[("SHORT", "foo"), ("LONG", "foobar1")]);
+        assert_eq!(
+            redact_blob(&rules, "foobar1 trail"),
+            "{{REDACTED_LONG}} trail"
+        );
+    }
+
+    #[test]
+    fn a_captured_json_body_stays_json() {
+        // Read as plain text, `secret.*` would run on past the closing
+        // quote and take the rest of the body with it.
+        let rules = only(&[("TAIL", "secret.*")]);
+        let body = r#"{"a":"my secret value","b":"keep"}"#;
+        let out = redact_blob(&rules, body);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("still JSON");
+        assert_eq!(v["a"], "my {{REDACTED_TAIL}}", "{out}");
+        assert_eq!(v["b"], "keep", "{out}");
+    }
+
+    #[test]
+    fn the_policys_rules_are_the_ones_used_built_in_and_custom() {
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let r = BlobRedactor::default();
-        assert!(r.is_empty());
-        assert_eq!(r.redact_blob("hello world"), "hello world");
-    }
+        assert!(!r.is_empty(), "the credential rules ship on");
+        assert_eq!(
+            r.redact_blob(&format!("key {key}")),
+            "key {{REDACTED_anthropic-api-key}}"
+        );
 
-    #[test]
-    fn single_pattern_replaces_match() {
-        let r = BlobRedactor::from_configs(&[p("EMAIL", r"[\w.]+@[\w.]+")]);
-        let out = r.redact_blob("contact: alice@example.com");
-        assert_eq!(out, "contact: {{REDACTED_EMAIL}}");
-    }
-
-    #[test]
-    fn idempotent_on_already_redacted_text() {
-        let r = BlobRedactor::from_configs(&[p("EMAIL", r"[\w.]+@[\w.]+")]);
-        let once = r.redact_blob("a@b.com and c@d.com");
-        let twice = r.redact_blob(&once);
-        assert_eq!(once, twice);
-    }
-
-    #[test]
-    fn overlapping_patterns_resolve_longest_wins() {
-        // Two patterns matching overlapping spans — `LONG` covers
-        // chars 0..7, `SHORT` covers chars 0..3. Longest should win.
-        let r = BlobRedactor::from_configs(&[p("SHORT", r"foo"), p("LONG", r"foobar1")]);
-        let out = r.redact_blob("foobar1 trail");
-        assert_eq!(out, "{{REDACTED_LONG}} trail");
-    }
-
-    #[test]
-    fn invalid_pattern_is_skipped_not_panicking() {
-        let r = BlobRedactor::from_configs(&[
-            p("OK", r"\d+"),
-            p("BAD", r"["), // unclosed character class
-        ]);
-        // Only the valid pattern compiled — body should still get
-        // redacted on numbers.
-        assert_eq!(r.redact_blob("count=42"), "count={{REDACTED_OK}}");
-    }
-
-    #[test]
-    fn no_matches_returns_input_unchanged() {
-        let r = BlobRedactor::from_configs(&[p("EMAIL", r"[\w.]+@[\w.]+")]);
-        assert_eq!(r.redact_blob("no email here"), "no email here");
+        let r = BlobRedactor::from_policy(&RedactPolicy {
+            disable: tw_guard::redact::rules::BUILTINS
+                .iter()
+                .map(|b| b.id.to_string())
+                .collect(),
+            custom: vec![CustomRedactRule {
+                name: "project".into(),
+                pattern: r"PRJ-\d{6}".into(),
+                label: None,
+                disabled: false,
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            r.redact_blob(&format!("{key} PRJ-123456")),
+            format!("{key} {{{{REDACTED_project}}}}")
+        );
     }
 }

@@ -14,7 +14,7 @@
 //!
 //! A WebSocket proxied as a pipe — frames copied between the client and an
 //! upstream socket — skips everything the HTTP path does to a request:
-//! limits and budgets, model access, content filter, PII redaction, tool-call
+//! limits and budgets, model access, content filter, outbound redaction, tool-call
 //! inspection, billing, the audit row. Here each `response.create` is handed
 //! to the same `generate` an HTTP `POST /v1/responses` with `stream: true`
 //! goes through, and its SSE is unwrapped into frames. So a turn is limited,

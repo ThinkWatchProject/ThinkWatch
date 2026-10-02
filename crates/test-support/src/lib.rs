@@ -311,7 +311,8 @@ impl TestApp {
     }
 
     /// Write a system setting and reload the in-memory config, the way
-    /// the admin API does. `fixtures::set_setting` alone only writes the
+    /// the admin API does — the request guards included, when it is one
+    /// of their policies. `fixtures::set_setting` alone only writes the
     /// row: the running server keeps reading the old value.
     pub async fn set_setting(&self, key: &str, value: serde_json::Value) {
         fixtures::set_setting(&self.db, key, value)
@@ -322,6 +323,9 @@ impl TestApp {
             .reload()
             .await
             .expect("reload dynamic config");
+        if think_watch_common::guard_policy::guard_of(key).is_some() {
+            think_watch_server::app::reload_guards(&self.state).await;
+        }
     }
 
     /// Make every outbox row of `forwarder_id` due, run one drain pass,

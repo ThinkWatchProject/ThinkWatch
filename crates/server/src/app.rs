@@ -20,9 +20,7 @@ use think_watch_common::audit::AuditLogger;
 use think_watch_common::config::AppConfig;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_gateway::cache::ResponseCache;
-use think_watch_gateway::content_filter::ContentFilter;
 use think_watch_gateway::model_mapping::ModelMapper;
-use think_watch_gateway::pii_redactor::PiiRedactor;
 use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
 use think_watch_gateway::quota::QuotaManager;
 use think_watch_gateway::router::{ModelRouter, RouteEntry};
@@ -48,14 +46,11 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// ClickHouse client for log queries. `None` if ClickHouse is not configured.
     pub clickhouse: Option<clickhouse::Client>,
-    /// Hot-swappable content filter — admin updates trigger a reload via
-    /// `reload_content_filter()` without restarting the server.
-    pub content_filter: Arc<arc_swap::ArcSwap<ContentFilter>>,
-    /// Hot-swappable PII redactor.
-    pub pii_redactor: Arc<arc_swap::ArcSwap<PiiRedactor>>,
-    /// Hot-swappable tool-call inspection.
-    pub tool_inspection:
-        Arc<arc_swap::ArcSwap<think_watch_gateway::tool_inspection::ToolInspection>>,
+    /// The request guards (outbound redaction, the content filter,
+    /// tool-call inspection), compiled from their policies. Swapped whole
+    /// by [`reload_guards`] when a policy changes, on this instance and,
+    /// through `config:changed`, on every other.
+    pub guards: Arc<arc_swap::ArcSwap<think_watch_gateway::guards::Guards>>,
     /// In-memory registry of upstream MCP servers. Shared between the MCP
     /// gateway runtime and the console CRUD handlers so that adding/removing
     /// a server in the admin UI is reflected immediately, without restart.
@@ -104,62 +99,40 @@ pub struct AppState {
     /// completions land in object storage instead of bloating CH.
     pub blob_store: Arc<dyn think_watch_common::blob_store::BlobStore>,
 
-    /// Hot-swappable at-rest PII redactor, shared by the gateway
-    /// AND mcp-gateway audit pipelines. Constructed from the same
-    /// `security.pii_redactor_patterns` config the in-flight gateway
-    /// `PiiRedactor` reads, so a rule added via the admin UI takes
-    /// effect on BOTH redaction surfaces at once. Separate handle
-    /// (not derived from `pii_redactor`) because mcp-gateway can't
-    /// depend on the gateway crate without inverting the dep graph.
+    /// Hot-swappable at-rest redactor for the MCP gateway's captured
+    /// bodies (`audit.body_redact_pii`). Built from the same outbound
+    /// redaction policy (`security.redact`) the AI gateway's guards are,
+    /// and swapped with them, so a rule added in the console reaches both
+    /// at once. A handle of its own because mcp-gateway cannot depend on
+    /// the gateway crate without inverting the dep graph.
     pub blob_redactor: Arc<arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>>,
 }
 
-/// Build a `ContentFilter` from the current `system_settings` value.
-pub async fn load_content_filter(dc: &DynamicConfig) -> ContentFilter {
-    let configs: Vec<think_watch_gateway::content_filter::DenyRuleConfig> = dc
-        .get("security.content_filter_patterns")
-        .await
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    ContentFilter::from_config(&configs)
+/// The request guards, compiled from the policies in `system_settings`
+/// (`security.redact`, `security.inspect_tools`, `security.content`). A
+/// policy that is missing or unreadable runs as the factory one, loudly.
+pub async fn load_guards(dc: &DynamicConfig) -> think_watch_gateway::guards::Guards {
+    let policy = think_watch_common::guard_policy::read(dc).await;
+    think_watch_gateway::guards::Guards::new(&policy)
 }
 
-/// Build a `PiiRedactor` from the current `system_settings` value.
-pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
-    let configs: Vec<think_watch_common::pii::PiiPatternConfig> = dc
-        .get("security.pii_redactor_patterns")
-        .await
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    PiiRedactor::from_config(&configs)
-}
-
-/// Build the tool-call inspection from `security.tool_inspection`. A
-/// missing or unreadable value means the default: observe, every built-in
-/// rule on.
-pub async fn load_tool_inspection(
-    dc: &DynamicConfig,
-) -> think_watch_gateway::tool_inspection::ToolInspection {
-    let cfg: think_watch_gateway::tool_inspection::ToolInspectionConfig = dc
-        .get("security.tool_inspection")
-        .await
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    think_watch_gateway::tool_inspection::ToolInspection::from_config(&cfg)
-}
-
-/// Build the cross-crate at-rest `BlobRedactor` from the SAME
-/// pattern set the in-flight `PiiRedactor` consumes — single
-/// source of truth in `system_settings.security.pii_redactor_patterns`.
-/// Constructed in parallel with `load_pii_redactor` so an operator
-/// edit hot-swaps both surfaces atomically.
+/// The MCP gateway's at-rest redactor, from the same outbound redaction
+/// policy the guards are compiled from.
 pub async fn load_blob_redactor(dc: &DynamicConfig) -> think_watch_common::pii::BlobRedactor {
-    let configs: Vec<think_watch_common::pii::PiiPatternConfig> = dc
-        .get("security.pii_redactor_patterns")
-        .await
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    think_watch_common::pii::BlobRedactor::from_configs(&configs)
+    let policy = think_watch_common::guard_policy::read(dc).await;
+    think_watch_common::pii::BlobRedactor::from_policy(&policy.redact)
+}
+
+/// Recompile the guards and the at-rest redactor from the dynamic config
+/// as it now stands, and swap them in together. Call after the config was
+/// reloaded.
+pub async fn reload_guards(state: &AppState) {
+    state
+        .guards
+        .store(Arc::new(load_guards(&state.dynamic_config).await));
+    state
+        .blob_redactor
+        .store(Arc::new(load_blob_redactor(&state.dynamic_config).await));
 }
 
 /// Redis pub/sub channel that sibling replicas subscribe to so a
@@ -259,15 +232,13 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     let gateway_state = GatewayState {
         router: state.gateway_router.clone(),
         model_mapper: Arc::new(ModelMapper::new()),
-        // Share the hot-swappable filter handles with the gateway state.
-        content_filter: state.content_filter.clone(),
+        // Share the hot-swappable guards with the gateway state.
+        guards: state.guards.clone(),
         quota: Arc::new(QuotaManager::new(state.redis.clone())),
         cache: Arc::new(ResponseCache::new(
             state.redis.clone(),
             state.dynamic_config.clone(),
         )),
-        pii_redactor: state.pii_redactor.clone(),
-        tool_inspection: state.tool_inspection.clone(),
         // Share AppState's cost tracker so the platform-pricing PATCH
         // handler's `invalidate_baseline()` call is observed by THIS
         // process's hot path (gateway request handling) — without the
@@ -984,28 +955,12 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/settings/category/{category}",
             get(handlers::admin::get_settings_by_category),
         )
-        // Content filter sandbox & presets
+        // Request guards: every rule of each, and a sample tried against
+        // them. Policies are written through `PATCH /api/admin/settings`.
+        .route("/api/admin/security", get(handlers::admin::get_security))
         .route(
-            "/api/admin/settings/content-filter/test",
-            post(handlers::admin::test_content_filter),
-        )
-        .route(
-            "/api/admin/settings/content-filter/presets",
-            get(handlers::admin::list_content_filter_presets),
-        )
-        // PII redactor sandbox
-        .route(
-            "/api/admin/settings/pii-redactor/test",
-            post(handlers::admin::test_pii_redactor),
-        )
-        // Tool-call inspection
-        .route(
-            "/api/admin/settings/tool-inspection/rules",
-            get(handlers::admin::list_tool_rules),
-        )
-        .route(
-            "/api/admin/settings/tool-inspection/test",
-            post(handlers::admin::test_tool_inspection),
+            "/api/admin/security/{guard}/test",
+            post(handlers::admin::test_security),
         )
         // Log forwarders CRUD
         .route(
@@ -1282,35 +1237,20 @@ pub(crate) async fn load_providers_into_router(
         routing_strategy: Option<String>,
         affinity_mode: Option<String>,
         affinity_ttl_secs: Option<i32>,
-        output_guardrails: serde_json::Value,
+        max_output_tokens: Option<i32>,
     }
     let model_rows = sqlx::query_as::<_, ModelRow>(
         r#"SELECT model_id, routing_strategy, affinity_mode, affinity_ttl_secs,
-                  output_guardrails
+                  max_output_tokens
              FROM models"#,
     )
     .fetch_all(&state.db)
     .await?;
 
     use std::str::FromStr;
-    use think_watch_gateway::output_guardrails::OutputGuardrail;
     use think_watch_gateway::router::{AffinityMode, ModelRoutingConfig};
     use think_watch_gateway::strategy::RoutingStrategy;
     for m in &model_rows {
-        // Tolerate junk rows: if the JSON doesn't deserialise into
-        // `Vec<OutputGuardrail>` (rule schema drift, partial migrate)
-        // log it and fall back to "no guardrails" rather than fail
-        // the whole router rebuild. The model still serves traffic;
-        // the admin gets a chance to fix the row.
-        let guardrails: Vec<OutputGuardrail> = serde_json::from_value(m.output_guardrails.clone())
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    model_id = %m.model_id,
-                    error = %e,
-                    "Failed to decode output_guardrails — running model without guardrails"
-                );
-                Vec::new()
-            });
         let cfg = ModelRoutingConfig {
             strategy: m
                 .routing_strategy
@@ -1323,14 +1263,17 @@ pub(crate) async fn load_providers_into_router(
             affinity_ttl_secs: m
                 .affinity_ttl_secs
                 .and_then(|v| if v >= 0 { Some(v as u32) } else { None }),
-            output_guardrails: guardrails,
+            max_output_tokens: m
+                .max_output_tokens
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| *v > 0),
         };
         // Skip storing the all-default config (saves a HashMap entry
         // per model that's just inheriting global defaults).
         if cfg.strategy.is_some()
             || cfg.affinity_mode.is_some()
             || cfg.affinity_ttl_secs.is_some()
-            || !cfg.output_guardrails.is_empty()
+            || cfg.max_output_tokens.is_some()
         {
             router.set_model_config(&m.model_id, cfg);
         }

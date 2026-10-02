@@ -52,10 +52,11 @@ pub enum GatewayError {
     /// "monthly budget"). Maps to 429 in `IntoResponse`.
     #[error("Rate limited: {0}")]
     LocalRateLimited(String),
-    /// Refused by the gateway's own policy — a tool call the upstream
-    /// returned matched a rule set to cut it. Neither the caller's fault
-    /// (not 400) nor the upstream failing (not 502): the answer exists
-    /// and the gateway will not hand it over. Maps to 403.
+    /// Refused by the gateway's own policy — a content filter rule set to
+    /// refuse matched what the caller sent, or a tool call the upstream
+    /// returned matched a rule set to cut it. Not a malformed request (not
+    /// 400) and not the upstream failing (not 502): the gateway will not
+    /// pass it on. Maps to 403.
     #[error("Blocked by policy: {0}")]
     PolicyBlocked(String),
 }
