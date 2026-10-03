@@ -11,6 +11,8 @@ target.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-10-03
+
 The request guards — outbound redaction, tool-call inspection and the
 content filter — now share their rule model with the desktop gateway:
 the same policy shape, built-in rule catalog, validation, rule view and
@@ -21,7 +23,9 @@ record it, and match by code point. Hidden characters become content
 filter rules, and the per-model output length guardrail becomes a cap on
 the output tokens a request may ask for. Settings saved by an earlier
 version are converted at the first start: read the first section before
-deploying.
+deploying. It is a major release because setting keys, console API
+routes and the `models` table change; the conversion keeps each
+deployment's behaviour.
 
 ### Read before upgrading
 
@@ -1138,7 +1142,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.0.0
 [2.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.2.0
 [2.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.1.0
 [2.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.0.0
