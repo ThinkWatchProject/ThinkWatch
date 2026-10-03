@@ -1,17 +1,17 @@
-//! Streaming PII restoration end-to-end.
+//! Streaming restoration of redacted values, end to end.
 //!
-//! Unit tests in `pii_redactor.rs` cover `PiiStreamRestorer`'s
-//! chunk-boundary buffering exhaustively (single-byte chunks,
-//! trailing lone `{`, unknown placeholder pass-through, mid-
-//! placeholder upstream truncation). What they don't cover:
-//! whether the production proxy actually wires the restorer in
-//! correctly when the upstream's SSE chunks split a placeholder
-//! across event boundaries.
+//! The restorer's chunk-boundary buffering is thinkwatch-core's and
+//! tested there exhaustively (single-byte chunks, a trailing lone `<`,
+//! unknown placeholders passing through, an upstream cut mid-placeholder).
+//! What it can't cover: whether the production proxy actually wires the
+//! restorer in when the upstream's SSE chunks split a placeholder across
+//! event boundaries.
 //!
 //! Recipe:
-//!   - Configure a PII pattern that matches `alice@example.com`.
+//!   - Switch outbound redaction to enforce with the built-in e-mail rule
+//!     on, so `alice@example.com` goes upstream as `<<TW_EMAIL_1>>`.
 //!   - Custom wiremock responder reads the gateway's outbound
-//!     request, finds the `{{EMAIL_…}}` placeholder the redactor
+//!     request, finds the `<<TW_EMAIL_…>>` placeholder the redactor
 //!     planted, and streams back SSE chunks with that exact
 //!     placeholder split *inside* a `delta.content` field — one
 //!     half in chunk N, the other half in chunk N+1.
@@ -26,7 +26,6 @@
 //! at the unit-test level.
 
 use serde_json::Value;
-use std::sync::Arc;
 use think_watch_test_support::prelude::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -36,24 +35,15 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 async fn streaming_pii_restorer_reassembles_split_placeholder_in_response() {
     let app = TestApp::spawn().await;
 
-    // 1. Configure a single PII rule for emails. The redactor
-    //    inserts `{{EMAIL_<salt>_<counter>}}` into outbound
-    //    messages and keeps the mapping in the per-request
-    //    RedactionContext for the response side to restore.
-    fixtures::set_setting(
-        &app.db,
-        "security.pii_redactor_patterns",
-        json!([{
-            "name": "email",
-            "regex": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}",
-            "placeholder_prefix": "EMAIL"
-        }]),
+    // 1. Redact e-mail addresses (a built-in rule, off out of the box)
+    //    in enforce mode. The redactor puts `<<TW_EMAIL_1>>` into the
+    //    outbound request and keeps the mapping in the request's ledger
+    //    for the response side to restore.
+    app.set_setting(
+        "security.redact",
+        json!({"mode": "enforce", "enable": ["email"]}),
     )
-    .await
-    .unwrap();
-    app.state.dynamic_config.reload().await.unwrap();
-    let pii = think_watch_server::app::load_pii_redactor(&app.state.dynamic_config).await;
-    app.state.pii_redactor.store(Arc::new(pii));
+    .await;
 
     // 2. Stand up a streaming wiremock that introspects the
     //    incoming request body, fishes the `{{EMAIL_…}}` token out
@@ -66,27 +56,29 @@ async fn streaming_pii_restorer_reassembles_split_placeholder_in_response() {
         .and(path("/v1/chat/completions"))
         .respond_with(|req: &Request| {
             let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
-            // The redactor rewrites every "user" message in place.
+            // The redactor rewrote the address wherever it was.
             let placeholder = body["messages"]
                 .as_array()
                 .and_then(|arr| {
                     arr.iter().find_map(|m| {
                         m["content"].as_str().and_then(|s| {
-                            // Find the canonical `{{EMAIL_<salt>_<n>}}` token.
-                            let start = s.find("{{EMAIL_")?;
+                            // Find the `<<TW_EMAIL_<n>>>` token.
+                            let start = s.find("<<TW_EMAIL_")?;
                             let rest = &s[start..];
-                            let end = rest.find("}}")? + 2;
+                            let end = rest.find(">>")? + 2;
                             Some(rest[..end].to_string())
                         })
                     })
                 })
-                .expect("upstream did not see a `{{EMAIL_…}}` placeholder — redactor not engaged");
+                .expect(
+                    "upstream did not see a `<<TW_EMAIL_…>>` placeholder — redactor not engaged",
+                );
 
             // Split right after the prefix: half in the first chunk,
             // half in the second. The split point is INSIDE the
             // placeholder so the restorer must buffer across SSE
             // events to reassemble it.
-            let mid = "{{EMAIL_".len();
+            let mid = "<<TW_EMAIL_".len();
             let head = &placeholder[..mid];
             let tail = &placeholder[mid..];
 
@@ -185,13 +177,13 @@ async fn streaming_pii_restorer_reassembles_split_placeholder_in_response() {
     //    verbatim. Either failure mode shows up here:
     //      a. Restorer disabled → placeholder leaks to client.
     //      b. Restorer present but skipping the chunk-boundary
-    //         buffer → garbage like `{{EMAIL_alice@example.com`.
+    //         buffer → garbage like `<<TW_EMAIL_alice@example.com`.
     assert!(
         body.contains("alice@example.com"),
         "client never saw the restored email — placeholder leaked or split: {body}"
     );
     assert!(
-        !body.contains("{{EMAIL_"),
+        !body.contains("<<TW_EMAIL_"),
         "raw placeholder leaked to the client: {body}"
     );
     assert!(

@@ -24,15 +24,14 @@ import { AlertCircle } from 'lucide-react';
 import { apiPatch, apiPost } from '@/lib/api';
 import { toast } from 'sonner';
 import { CostPreview } from './CostPreview';
-import { OutputGuardrailsCard } from './OutputGuardrailsCard';
 import {
   AFFINITY_MODES,
   CACHE_WEIGHTS,
-  MAX_CHARS_CEILING,
+  MAX_OUTPUT_TOKENS_CEILING,
   ROUTING_STRATEGIES,
   derivedCacheWeight,
   emptyModelForm,
-  parseGuardrails,
+  parseMaxOutputTokens,
   type AffinityMode,
   type CacheWeight,
   type ModelFormState,
@@ -89,7 +88,7 @@ export function ModelEditorDialog({
         routing_strategy: (model.routing_strategy ?? '') as ModelFormState['routing_strategy'],
         affinity_mode: (model.affinity_mode ?? '') as ModelFormState['affinity_mode'],
         affinity_ttl_secs: model.affinity_ttl_secs == null ? '' : String(model.affinity_ttl_secs),
-        output_guardrails: parseGuardrails(model.output_guardrails),
+        max_output_tokens: model.max_output_tokens == null ? '' : String(model.max_output_tokens),
       });
     } else {
       setForm(emptyModelForm);
@@ -125,16 +124,15 @@ export function ModelEditorDialog({
       setError(t('models.errors.affinityTtlRange'));
       return;
     }
-    // Mirror the server's `validate_output_guardrails`: every
-    // max_length entry must be 1..=MAX_CHARS_CEILING. Client-side
-    // check gives a snappier error than a 400 round trip.
-    for (const g of form.output_guardrails) {
-      if (g.type === 'max_length') {
-        if (!Number.isInteger(g.max_chars) || g.max_chars < 1 || g.max_chars > MAX_CHARS_CEILING) {
-          setError(t('models.outputGuardrails.maxLengthRange', { max: MAX_CHARS_CEILING }));
-          return;
-        }
-      }
+    // Empty ⇒ null ⇒ no limit.
+    const maxOutputTokens = parseMaxOutputTokens(form.max_output_tokens);
+    if (maxOutputTokens === 'invalid') {
+      setError(
+        t('models.errors.maxOutputTokensRange', {
+          max: MAX_OUTPUT_TOKENS_CEILING.toLocaleString(),
+        }),
+      );
+      return;
     }
     const body = {
       display_name: form.display_name.trim() || form.model_id.trim(),
@@ -144,7 +142,7 @@ export function ModelEditorDialog({
       routing_strategy: form.routing_strategy === '' ? null : form.routing_strategy,
       affinity_mode: form.affinity_mode === '' ? null : form.affinity_mode,
       affinity_ttl_secs: ttlNum,
-      output_guardrails: form.output_guardrails,
+      max_output_tokens: maxOutputTokens,
     };
     setSaving(true);
     try {
@@ -324,14 +322,20 @@ export function ModelEditorDialog({
                 </div>
               </div>
             </div>
-            {/* Output guardrails — per-model post-flight checks on
-                the provider response. Today only "max_length" is
-                wired; future variants (JSON schema, toxicity) slot
-                in here behind their own add buttons. */}
-            <OutputGuardrailsCard
-              rules={form.output_guardrails}
-              onChange={(next) => setForm({ ...form, output_guardrails: next })}
-            />
+            {/* Caps `max_tokens` on every request to this model: a
+                larger value is lowered, a missing one is filled in.
+                Empty = no limit. */}
+            <div className="space-y-2 border-t pt-4">
+              <Label htmlFor="max_output_tokens">{t('models.field.maxOutputTokens')}</Label>
+              <Input
+                id="max_output_tokens"
+                value={form.max_output_tokens}
+                onChange={(e) => setForm({ ...form, max_output_tokens: e.target.value })}
+                placeholder={t('models.unlimited')}
+                inputMode="numeric"
+              />
+              <p className="text-xs text-muted-foreground">{t('models.maxOutputTokensHint')}</p>
+            </div>
             {error && (
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />

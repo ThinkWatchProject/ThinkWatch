@@ -306,6 +306,16 @@ pub(crate) fn fails(error_tag: &str, status: i64) -> bool {
     }
 }
 
+/// What a buffered request ends with: the route that answered, the
+/// answer, the ledger that restores it (the one its hop went out with),
+/// and what to record against the route.
+pub(super) type Answered<'a> = (
+    &'a RouteEntry,
+    crate::lifecycle::Completed,
+    tw_guard::redact::replace::Ledger,
+    SelectionRecord,
+);
+
 /// Non-streaming selection + failover. All routes are peers (no
 /// priority tier in v2): `pick_with_strategy` picks one healthy
 /// candidate, the proxy calls it, and when the upstream fails (see
@@ -317,7 +327,7 @@ pub(super) async fn select_route_with_failover<'a>(
     call_ctx: &CallCtx,
     ctx: &SelectionCtx<'_>,
     caller_model: &str,
-) -> Result<(&'a RouteEntry, crate::lifecycle::Completed, SelectionRecord), GatewayError> {
+) -> Result<Answered<'a>, GatewayError> {
     let started_at = std::time::Instant::now();
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
@@ -345,6 +355,7 @@ pub(super) async fn select_route_with_failover<'a>(
                 Ok((resp, wire)) => {
                     super::generate::read_whole(resp, &wire, caller_model, outbound.input_estimate)
                         .await
+                        .map(|answer| (answer, wire.ledger))
                 }
                 Err(e) => Err(e),
             };
@@ -355,7 +366,7 @@ pub(super) async fn select_route_with_failover<'a>(
             .min(u32::MAX as u128) as u32;
 
         match result {
-            Ok(response) => {
+            Ok((response, ledger)) => {
                 set_affinity(
                     &ctx.state.redis,
                     ctx.user_id,
@@ -368,6 +379,7 @@ pub(super) async fn select_route_with_failover<'a>(
                 return Ok((
                     entry,
                     response,
+                    ledger,
                     SelectionRecord {
                         picked_route_id: entry.route_id,
                         started_at,

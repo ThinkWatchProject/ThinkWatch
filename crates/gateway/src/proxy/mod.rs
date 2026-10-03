@@ -10,12 +10,10 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::cache::ResponseCache;
-use crate::content_filter::ContentFilter;
 use crate::cost_tracker::CostTracker;
 use crate::error::GatewayError;
 use crate::health::HealthTracker;
 use crate::model_mapping::ModelMapper;
-use crate::pii_redactor::PiiRedactor;
 use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::ModelRouter;
@@ -57,15 +55,12 @@ pub use responses_ws::proxy_responses_ws;
 pub struct GatewayState {
     pub router: Arc<ArcSwap<ModelRouter>>,
     pub model_mapper: Arc<ModelMapper>,
-    /// Hot-swappable so admins can update rules without restarting the gateway.
-    pub content_filter: Arc<ArcSwap<ContentFilter>>,
+    /// The request guards — outbound redaction, the content filter and
+    /// tool-call inspection. Hot-swapped whole when an admin changes a
+    /// policy; each request runs on the snapshot it took on arrival.
+    pub guards: Arc<ArcSwap<crate::guards::Guards>>,
     pub quota: Arc<QuotaManager>,
     pub cache: Arc<ResponseCache>,
-    /// Hot-swappable so admins can update PII patterns without restarting.
-    pub pii_redactor: Arc<ArcSwap<PiiRedactor>>,
-    /// Hot-swappable like the two above: which tool calls an upstream
-    /// returns get recorded or cut.
-    pub tool_inspection: Arc<ArcSwap<crate::tool_inspection::ToolInspection>>,
     pub cost_tracker: Arc<CostTracker>,
     pub rate_limiter: Arc<RateLimiter>,
     /// PG pool — used to query enabled rate-limit rules and budget caps

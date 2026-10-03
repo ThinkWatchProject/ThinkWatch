@@ -118,7 +118,309 @@
     "unknown": "状态未知"
   },
   "contentSecurity": {
-    "subtitle": "应用于 AI 网关流量的内容过滤规则、PII 脱敏和工具调用审查"
+    "subtitle": "出站脱敏、工具调用审查和内容过滤，作用于经过 AI 网关的全部请求。",
+    "loadFailed": "安全设置读取失败",
+    "summary": {
+      "enforce": "{{count}} 项处置",
+      "observe": "{{count}} 项观察",
+      "off": "{{count}} 项关闭"
+    },
+    "modeOff": "关闭",
+    "modeObserve": "观察",
+    "modeFor": "{{guard}}的档位",
+    "nowOff": "当前：不检查，不记录。",
+    "ifEnforced": "切换到「{{mode}}」后：{{effect}}{{risk}}",
+    "guard": {
+      "redact": {
+        "name": "出站脱敏",
+        "enforce": "替换",
+        "lead": "请求发出前，按以下规则查找凭据和个人信息。",
+        "nowObserve": "当前：检出的内容记入审计日志，请求原样发出。",
+        "nowEnforce": "当前：检出的内容替换为占位符后发出，响应中的占位符还原为原值。",
+        "effect": "检出的内容替换为占位符后发出，响应中的占位符还原为原值。",
+        "risk": "请求内容改变后，上游缓存可能无法命中。",
+        "testTitle": "测试出站脱敏",
+        "createTitle": "新建脱敏规则",
+        "editTitle": "编辑脱敏规则",
+        "nameHint": "记入审计日志时显示此名称。",
+        "namePlaceholder": "内部项目号",
+        "samplePlaceholder": "粘贴一段文本，例如一段含有密钥的环境变量"
+      },
+      "inspect_tools": {
+        "name": "工具调用审查",
+        "enforce": "切断",
+        "lead": "检查上游返回的工具调用参数。",
+        "nowObserve": "当前：命中的调用记入审计日志，照常返回。",
+        "nowEnforce": "当前：命中「切断」规则的调用不会完整到达客户端，因而无法执行；命中「仅记录」规则的调用照常返回。两类都记入审计日志。",
+        "effect": "命中「切断」规则的调用不会完整到达客户端，因而无法执行。",
+        "risk": "误判时，回答会在该调用处中断。",
+        "testTitle": "测试工具调用审查",
+        "createTitle": "新建审查规则",
+        "editTitle": "编辑审查规则",
+        "nameHint": "记入审计日志时显示此名称。",
+        "namePlaceholder": "删除集群资源",
+        "samplePlaceholder": "粘贴一段工具调用的参数，例如一条要执行的命令"
+      },
+      "content": {
+        "name": "内容过滤",
+        "enforce": "处置",
+        "lead": "按以下规则检查请求中的用户消息和工具结果。",
+        "nowObserve": "当前：命中的内容记入审计日志，请求原样发出。",
+        "nowEnforce": "当前：命中「拒绝」规则的请求不发出，客户端收到拒绝的原因；命中「删除」规则的内容删除后发出；命中「仅记录」规则的请求照常发出。三类都记入审计日志。",
+        "effect": "命中「拒绝」规则的请求不发出，客户端收到拒绝的原因；命中「删除」规则的内容删除后发出；命中「仅记录」规则的请求照常发出。三类都记入审计日志。",
+        "risk": "误判时，正常的请求会被拒绝，或正常的文字被删除。",
+        "testTitle": "测试内容过滤",
+        "createTitle": "新建内容规则",
+        "editTitle": "编辑内容规则",
+        "nameHint": "记入审计日志和拒绝原因时显示此名称。",
+        "namePlaceholder": "项目代号",
+        "samplePlaceholder": "粘贴一段用户消息或工具结果"
+      }
+    },
+    "rules": "规则",
+    "ruleCount": "已启用 {{on}} 条，共 {{total}} 条",
+    "test": "测试…",
+    "newRule": "新建规则",
+    "builtinGroup": "内置",
+    "col": {
+      "rule": "规则",
+      "match": "匹配",
+      "action": "处置",
+      "replaceWith": "替换为",
+      "enabled": "启用"
+    },
+    "kind": {
+      "api-keys": "API 密钥",
+      "private-keys": "私钥",
+      "jwt": "JWT",
+      "conn-strings": "连接串",
+      "personal": "个人信息",
+      "internal": "内网地址",
+      "command": "内置",
+      "injection": "指令覆盖",
+      "persona": "身份与提示词",
+      "chinese": "中文说法",
+      "invisible": "隐藏字符",
+      "custom": "自定义"
+    },
+    "ruleAction": {
+      "cut": "切断",
+      "block": "拒绝",
+      "strip": "删除",
+      "record": "仅记录"
+    },
+    "menu": {
+      "view": "查看规则",
+      "turnOn": "启用",
+      "turnOff": "停用",
+      "copyAsCustom": "复制为自定义规则"
+    },
+    "actionsFor": "「{{name}}」的操作",
+    "toggleFor": "启用「{{name}}」",
+    "toast": {
+      "modeSet": "{{guard}}已切换到「{{mode}}」",
+      "ruleOn": "已启用「{{name}}」",
+      "ruleOff": "已停用「{{name}}」",
+      "ruleCreated": "已创建规则「{{name}}」",
+      "ruleSaved": "已保存规则「{{name}}」",
+      "ruleDeleted": "已删除规则「{{name}}」",
+      "undo": "撤销",
+      "saveFailed": "未能保存：{{message}}"
+    },
+    "dialog": {
+      "name": "名称",
+      "matchKind": "匹配方式",
+      "match": {
+        "contains": "包含",
+        "regex": "正则",
+        "codepoints": "码位"
+      },
+      "patternContains": "匹配内容",
+      "patternRegex": "正则表达式",
+      "patternCodepoints": "码位",
+      "containsHint": "在用户消息和工具结果中查找这段文字，不区分大小写，首尾空格也参与匹配。",
+      "codepointsHint": "码位或码位范围，多个之间用逗号分隔，如 U+200B, U+E0000–U+E007F",
+      "regexHint": {
+        "redact": "匹配到的整段内容替换为占位符。",
+        "inspect_tools": "按工具调用的参数匹配。",
+        "content": "在用户消息和工具结果中匹配，不区分大小写。"
+      },
+      "label": "占位符名称",
+      "labelHint": "替换为 <<TW_名称_序号>>。只能使用大写字母、数字和下划线。",
+      "becomes": "替换后为",
+      "action": "处置",
+      "actionWhat": {
+        "cut": "在「{{mode}}」档下，命中的调用不会完整到达客户端，因而无法执行。",
+        "block": "在「{{mode}}」档下，命中的请求不发出，客户端收到拒绝的原因。",
+        "strip": "在「{{mode}}」档下，命中的文字从用户消息和工具结果中删除后，请求照常发出。"
+      },
+      "recordWhat": {
+        "inspect_tools": "命中的调用照常返回，只记入审计日志。",
+        "content": "命中的请求照常发出，只记入审计日志。"
+      },
+      "withFactory": "{{what}}出厂设置为「{{action}}」。",
+      "state": "状态",
+      "on": "已启用",
+      "off": "已停用",
+      "category": "类别：{{kind}}",
+      "sample": "测试文本",
+      "hits": "命中 {{count}} 处",
+      "noHit": "未命中",
+      "sent": "「{{mode}}」档下发出的内容",
+      "refused": "在「{{mode}}」档下，这个请求不会发出。",
+      "testDesc": "按当前启用的规则检查一段文本，不发出任何请求。",
+      "content": "内容",
+      "nameRequired": "请填写名称",
+      "nameTaken": "已有同名规则",
+      "patternRequired": "请填写匹配内容",
+      "badCodepoint": "码位写法不对：{{item}}",
+      "tooManyCodepoints": "最多 {{max}} 项",
+      "badLabel": "须以大写字母开头，只含大写字母、数字和下划线，最长 24 个字符。",
+      "saveFailed": "未能保存",
+      "deleteTitle": "删除规则「{{name}}」",
+      "deleteDesc": "删除后不再按此规则检查。审计日志中已有的记录保留。"
+    },
+    "matcher": {
+      "prefix": "{{prefix}} 开头，其后至少 {{n}} 个字符",
+      "openaiLegacy": "{{prefix}} 开头，全长至少 {{n}} 个字符，同时含字母和数字",
+      "pem": "{{begin}} 至对应的 END，整段",
+      "jwt": "三段 base64url，首段解码后含 {{alg}}",
+      "connString": "{{uri}} 中的口令，只换口令",
+      "connStringShape": "协议://用户:口令@主机",
+      "privateIp": "{{ranges}} 开头的地址，不含 {{loopback}}",
+      "domainSuffix": "以 {{suffixes}} 结尾的域名",
+      "cnResidentId": "18 位居民身份证号：地区码、{{year}} 年以来的出生日期和校验码都对得上",
+      "bankCard": "{{networks}} 的卡号：号段、位数对得上并通过 Luhn 校验；公开的测试卡号除外",
+      "email": "邮箱地址，如 {{example}}",
+      "cnMobilePhone": "11 位手机号，以 13–19 开头，前后不紧挨其他数字",
+      "regex": "正则 {{pattern}}",
+      "contains": "包含 {{text}}，不区分大小写",
+      "codepoints": "码位 {{ranges}}",
+      "other": "内置判据"
+    },
+    "check": {
+      "credential-to-network": "凭据发往本机和其服务商以外的主机",
+      "file-to-network": "本地文件上传到外部主机"
+    },
+    "cardNetwork": {
+      "UnionPay": "银联"
+    },
+    "redactRule": {
+      "anthropic-api-key": "Anthropic API 密钥",
+      "openai-project-key": "OpenAI 项目密钥",
+      "openai-api-key": "OpenAI API 密钥",
+      "github-personal-token": "GitHub 个人令牌",
+      "github-oauth-token": "GitHub OAuth 令牌",
+      "github-server-token": "GitHub 服务器令牌",
+      "github-user-token": "GitHub 用户令牌",
+      "github-fine-grained-token": "GitHub 细粒度令牌",
+      "slack-bot-token": "Slack 机器人令牌",
+      "slack-user-token": "Slack 用户令牌",
+      "slack-app-token": "Slack 应用令牌",
+      "aws-access-key-id": "AWS 访问密钥 ID",
+      "aws-temporary-key-id": "AWS 临时访问密钥 ID",
+      "google-api-key": "Google API 密钥",
+      "google-oauth-token": "Google OAuth 令牌",
+      "gitlab-token": "GitLab 令牌",
+      "stripe-live-key": "Stripe 生产密钥",
+      "stripe-restricted-key": "Stripe 受限密钥",
+      "npm-token": "npm 令牌",
+      "digitalocean-token": "DigitalOcean 令牌",
+      "sendgrid-key": "SendGrid 密钥",
+      "private-key": "私钥",
+      "jwt": "JWT",
+      "conn-string-password": "连接串口令",
+      "cn-resident-id": "居民身份证号",
+      "bank-card": "银行卡号",
+      "email": "邮箱地址",
+      "cn-mobile-phone": "中国大陆手机号",
+      "internal-ip": "内网地址",
+      "internal-domain": "内部域名"
+    },
+    "contentRule": {
+      "unicode-tags": "Unicode 标签字符",
+      "bidi-controls": "双向控制符",
+      "zero-width": "零宽字符",
+      "private-use": "私用区字符",
+      "ignore-previous-instructions": "要求忽略先前的指令",
+      "ignore-all-previous": "要求忽略之前的全部内容",
+      "disregard-your-instructions": "要求无视指令",
+      "jailbreak": "越狱",
+      "dan": "DAN",
+      "developer-mode": "开发者模式",
+      "you-are-now": "重新设定身份",
+      "new-persona": "新的人设",
+      "act-as": "要求扮演角色",
+      "pretend-to-be": "要求假装身份",
+      "system-prompt": "索取系统提示词",
+      "reveal-your-instructions": "要求透露指令",
+      "what-are-your-rules": "询问规则",
+      "base64-wall": "长串 Base64",
+      "zh-ignore-previous": "要求忽略先前的指令（中文）",
+      "zh-forget-your": "要求忘记指令（中文）",
+      "zh-do-not-follow": "要求不要遵循（中文）",
+      "zh-you-are-now": "重新设定身份（中文）",
+      "zh-role-play": "要求扮演角色（中文）",
+      "zh-reveal-your": "要求透露指令（中文）",
+      "zh-system-prompt": "系统提示词（中文）",
+      "zh-jailbreak": "越狱（中文）"
+    },
+    "contentWhy": {
+      "unicode-tags": "在编辑器中完全不可见，但会原样进入模型上下文，可用于隐藏整段指令。",
+      "bidi-controls": "可使屏幕上的显示顺序与实际字符顺序不一致。",
+      "zero-width": "在编辑器中不可见，但会被模型读到。表情符号、波斯文等正常文字也会用到。",
+      "private-use": "没有标准含义。部分图标字体会用到。"
+    },
+    "toolRule": {
+      "curl-pipe-sh": {
+        "name": "下载即执行",
+        "why": "下载后直接执行，执行的内容由远端决定且无法预先查看"
+      },
+      "base64-decode-exec": {
+        "name": "解码后执行",
+        "why": "将要执行的内容隐藏在 base64 编码中"
+      },
+      "exfil-env": {
+        "name": "外发环境变量",
+        "why": "将环境变量（通常包含密钥）发送到外部"
+      },
+      "exfil-credentials": {
+        "name": "外发凭据文件",
+        "why": "要求模型将凭据文件的内容发送出去"
+      },
+      "exfil-credentials-reversed": {
+        "name": "外发凭据文件（动词在前）",
+        "why": "要求模型将凭据文件的内容发送出去"
+      },
+      "ssh-key-read": {
+        "name": "读取私钥或云凭据",
+        "why": "读取私钥或云服务凭据"
+      },
+      "secret-to-unknown-host": {
+        "name": "发送凭据到陌生主机",
+        "why": "将凭据发送到本机和该凭据所属服务商以外的主机"
+      },
+      "write-startup-item": {
+        "name": "写入启动项",
+        "why": "写入开机或打开终端时自动执行的位置"
+      },
+      "crontab-install": {
+        "name": "安装定时任务",
+        "why": "安装定时任务，或删除全部现有定时任务"
+      },
+      "rm-rf-root": {
+        "name": "删除主目录或根目录",
+        "why": "删除整个主目录或根目录"
+      },
+      "chmod-777": {
+        "name": "开放全部写权限",
+        "why": "将文件权限设为所有人可写"
+      },
+      "upload-file-to-host": {
+        "name": "上传本地文件到外部主机",
+        "why": "将本地文件的内容上传到外部主机"
+      }
+    }
   },
   "mcpStore": {
     "title": "MCP 商店",
@@ -482,21 +784,14 @@
       "tpmCap": "TPM 上限",
       "cacheReadWeight": "缓存读取权重",
       "cacheWriteWeight": "缓存写入权重",
-      "cacheWrite1hWeight": "1 小时缓存写入权重"
+      "cacheWrite1hWeight": "1 小时缓存写入权重",
+      "maxOutputTokens": "最大输出 token"
     },
     "useGlobalDefault": "使用全局默认",
     "unlimited": "不限制",
     "routingOverrideTitle": "路由覆盖",
     "routingOverrideHint": "针对此模型覆盖网关全局默认。留空则继承「设置 → 网关」中的配置。",
-    "outputGuardrails": {
-      "title": "输出护栏",
-      "description": "在响应返回调用方之前,对上游响应执行针对该模型的检查。当前仅支持最大长度规则,且仅作用于非流式响应——流式补全会绕过此检查。",
-      "addMaxLength": "添加最大长度护栏",
-      "noRules": "未配置任何护栏。",
-      "maxLengthLabel": "最大长度: {{count}} 个字符",
-      "maxLengthLabelShort": "最大字符数",
-      "maxLengthRange": "最大长度必须在 1 与 {{max}} 之间"
-    },
+    "maxOutputTokensHint": "发往此模型的请求最多输出这么多 token：请求中的 max_tokens 更大时改为此值，未写时按此值发送。留空则不限制。",
     "strategy": {
       "weighted": "加权随机",
       "latency": "延迟优先",
@@ -535,7 +830,8 @@
       "weightMustBePositive": "权重必须为正数。",
       "affinityTtlRange": "黏性 TTL 必须在 0 到 86400 秒之间。",
       "capMustBePositive": "RPM/TPM 上限必须是正整数(留空表示不限制)。",
-      "cacheWeightNotNegative": "缓存权重不能为负数。"
+      "cacheWeightNotNegative": "缓存权重不能为负数。",
+      "maxOutputTokensRange": "最大输出 token 必须是 1 到 {{max}} 之间的整数（留空表示不限制）。"
     },
     "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
     "batchImportWarning": "导入后路由立即在 /v1/models 生效。只勾选你确实想暴露的模型。",
@@ -1378,142 +1674,8 @@
     "apiKeysConfig": "API Key 策略",
     "auditConfig": "审计配置",
     "perf": "性能调优",
-    "saved": "设置保存成功",
-    "saveError": "保存设置失败",
     "autosaveHint": "改动自动保存",
     "requiresRestart": "需要重启生效",
-    "addRule": "添加规则",
-    "sandbox": {
-      "title": "测试沙箱",
-      "desc": "粘贴一段示例用户消息，同时测试内容过滤规则和 PII 脱敏效果。使用当前（未保存）的规则。",
-      "placeholder": "在此输入或粘贴示例文本…",
-      "runAll": "运行测试"
-    },
-    "contentFilter": {
-      "title": "内容过滤规则",
-      "intro": "网关在转发请求前会用以下规则逐条检查 user 消息内容。命中后按规则的「动作」执行：拦截会拒绝请求，告警会放行但写入审计告警，记录则只写日志。修改后立即生效，无需重启。",
-      "loadPresets": "预设",
-      "empty": "暂无规则。手动添加或加载预设以开始使用。",
-      "ruleName": "规则名称",
-      "namePlaceholder": "如：越狱检测",
-      "matchType": "匹配方式",
-      "contains": "包含",
-      "regex": "正则",
-      "pattern": "模式",
-      "action": "动作",
-      "actionBlock": "拦截",
-      "actionWarn": "告警",
-      "actionLog": "记录",
-      "actionBlockHint": "拒绝请求并返回错误。",
-      "actionWarnHint": "放行请求，在审计日志中记录告警。",
-      "actionLogHint": "放行请求，仅在日志中静默记录。",
-      "sandboxNoMatches": "没有规则命中。",
-      "sandboxMatchCount": "命中 {{count}} 条规则",
-      "presetsTitle": "内置规则预设",
-      "presetsDesc": "点击预设可将其规则追加到当前列表，已有规则保留。追加后可随时编辑每条规则。",
-      "preset": {
-        "injection": {
-          "name": "指令覆盖",
-          "description": "拦截最常见的越狱和指令覆盖说法。推荐起步配置。"
-        },
-        "persona": {
-          "name": "角色操控与提示词提取",
-          "description": "角色操控、系统提示词提取和 Base64 走私。多数规则只告警、不拦截。"
-        },
-        "chinese": {
-          "name": "中文场景",
-          "description": "中文环境下常见的 Prompt Injection 模式：越狱、忽略指令、扮演……"
-        }
-      }
-    },
-    "pii": {
-      "title": "PII 脱敏",
-      "intro": "用以下正则匹配 user 消息中的敏感信息。命中后会先用占位符替换再转发给 AI，AI 返回后再把原始值还原回来——上游模型永远看不到原始 PII。",
-      "addPattern": "添加规则",
-      "loadPresets": "预设",
-      "presetHint": "点击添加预设规则",
-      "empty": "暂无 PII 规则。添加规则以开始脱敏。",
-      "name": "名称",
-      "namePlaceholder": "如：email",
-      "regex": "正则表达式",
-      "placeholderLabel": "占位符前缀",
-      "behavior": "每条规则会：1）在 user 输入中查找匹配 2）发送上游前替换为 {{PREFIX_xxxx_n}} 占位符 3）在响应中还原原始值。修改后立即生效，无需重启。",
-      "sandboxNoMatches": "（未检测到 PII — 文本未变化）",
-      "sandboxMatchCount": "脱敏 {{count}} 项",
-      "redactedOutput": "脱敏后输出（AI 接收到的内容）"
-    },
-    "hiddenText": {
-      "title": "隐藏字符",
-      "intro": "Unicode 标签字符在屏幕上不显示，却会进入模型的输入，一整段指令可以藏在里面；双向覆盖符会让屏幕上的文字顺序和实际字符顺序不一致。这两种字符在提示词里都没有正当用途，而且常出现在调用方并没有写过的地方，例如工具抓取的网页或文件。检查范围是调用方的消息及其中的工具结果；表情、波斯文和俄文不会被误报。",
-      "action": "发现时",
-      "off": "关闭",
-      "behavior": "告警：放行请求，并在审计日志中写入 gateway.hidden_text_flagged；拦截：以 403 拒绝请求，并写入 gateway.hidden_text_blocked；记录：只写入应用日志。"
-    },
-    "toolInspection": {
-      "title": "工具调用审查",
-      "intro": "响应由上游写出，上游可以在其中加入模型并未发出的工具调用，例如下载并执行脚本的命令。响应中的每个工具调用都会按这些规则检查。观察档只在审计日志中记录命中，不改变响应；拦截档在处置为「切断」的规则命中时截断响应，客户端收不到完整的调用。修改立即生效，无需重启。",
-      "mode": "档位",
-      "modeOff": "关闭",
-      "modeObserve": "观察",
-      "modeEnforce": "拦截",
-      "builtin": "内置规则",
-      "custom": "自定义规则",
-      "rule": "规则",
-      "enabled": "启用",
-      "inEnforce": "拦截档下",
-      "actionCut": "切断",
-      "actionRecord": "仅记录",
-      "addRule": "添加规则",
-      "customEmpty": "暂无自定义规则。",
-      "name": "名称",
-      "namePlaceholder": "例如：删除集群资源",
-      "pattern": "正则（匹配工具调用的参数）",
-      "behavior": "流式响应在补全这次调用的那一帧处截断：此前的内容照常送达，不完整的调用无法执行。非流式响应直接以 403 拒绝。每次命中都会写入审计日志，事件为 gateway.tool_call_flagged 或 gateway.tool_call_blocked。",
-      "sandboxNoMatches": "没有规则命中。",
-      "sandboxMatchCount": "命中 {{count}} 条规则",
-      "rules": {
-        "curl-pipe-sh": {
-          "name": "下载即执行",
-          "why": "下载后直接执行，执行的内容由远端决定且无法预先查看"
-        },
-        "base64-decode-exec": {
-          "name": "解码后执行",
-          "why": "将要执行的内容隐藏在 base64 编码中"
-        },
-        "exfil-env": {
-          "name": "外发环境变量",
-          "why": "将环境变量（通常包含密钥）发送到外部"
-        },
-        "exfil-credentials": {
-          "name": "外发凭据文件",
-          "why": "要求模型将凭据文件的内容发送出去"
-        },
-        "exfil-credentials-reversed": {
-          "name": "外发凭据文件（动词在前）",
-          "why": "要求模型将凭据文件的内容发送出去"
-        },
-        "ssh-key-read": {
-          "name": "读取私钥或云凭据",
-          "why": "读取私钥或云服务凭据"
-        },
-        "write-startup-item": {
-          "name": "写入启动项",
-          "why": "写入开机或打开终端时自动执行的位置"
-        },
-        "crontab-install": {
-          "name": "安装定时任务",
-          "why": "安装定时任务，或删除全部现有定时任务"
-        },
-        "rm-rf-root": {
-          "name": "删除主目录或根目录",
-          "why": "删除整个主目录或根目录"
-        },
-        "chmod-777": {
-          "name": "开放全部写权限",
-          "why": "将文件权限设为所有人可写"
-        }
-      }
-    },
     "defaultExpiry": "默认过期时间（天）",
     "inactivityTimeout": "不活跃超时（天）",
     "rotationPeriod": "轮换周期（天）",

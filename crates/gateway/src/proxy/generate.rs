@@ -5,8 +5,9 @@
 //! # Forward what can be forwarded, convert what must be
 //!
 //! A request that reaches an upstream speaking its own format goes out
-//! **as the caller sent it**: only the model name changes, and any PII is
-//! swapped for placeholders. That is not a shortcut. The intermediate
+//! **as the caller sent it**: only the model name changes, the model's
+//! output cap is applied, and in enforce mode redacted values are swapped
+//! for placeholders. That is not a shortcut. The intermediate
 //! representation the conversion layer uses has no place for Anthropic's
 //! `cache_control` breakpoints, server-side tools, or `metadata`, and a
 //! same-format request rebuilt through it loses all three — the prompt
@@ -20,12 +21,15 @@
 //! array form Claude Code sends, so its whole system prompt was dropped —
 //! along with every tool and every cache breakpoint.
 //!
-//! # One pass of inspection, on a structure that is known
+//! # The guards, on the bytes the caller sent
 //!
-//! The request is still decoded once, whatever its route, because the
-//! content filter and PII detection need to know where the caller's text
-//! is. The decoded form is only read; what is sent is the raw request,
-//! with the found PII carried back onto it.
+//! The content filter reads the caller's text where the request's own
+//! format puts it, and a rule that strips text strips it there: the
+//! request goes on as the stripped one, decoded again. Outbound redaction
+//! then searches the whole request, numbers what it finds once, and every
+//! hop — forwarded or converted — goes out through it (see
+//! `crate::redaction`). Both are thinkwatch-core's, shared with the
+//! desktop gateway.
 
 use std::convert::Infallible;
 
@@ -53,11 +57,13 @@ use super::shaper::{StreamShaper, rewrite_model};
 use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
 
 use crate::cache::ResponseCache;
-use crate::content_filter::Action;
+use crate::guards::Caller;
 use crate::lifecycle::Completed;
 use crate::metadata::RequestMetadata;
 use crate::protocol::UpstreamProtocol;
+use crate::redaction::Redaction;
 use crate::router::RouteEntry;
+use tw_guard::redact::replace::Ledger;
 
 use think_watch_common::audit::BodyCaptureStatus;
 use think_watch_common::limits::weight::TokenCounts;
@@ -209,7 +215,9 @@ pub(crate) struct Outbound {
     /// The path the caller called. A Gemini request's model and action
     /// are in it.
     pub path: String,
-    /// Redacted, otherwise exactly as sent.
+    /// What the caller sent — after the content filter, with the model's
+    /// output cap applied and, in enforce mode, redacted values swapped for
+    /// placeholders — otherwise exactly as sent.
     pub body: Value,
     pub stream: bool,
     /// The caller's headers that belong to its format — `anthropic-beta`
@@ -222,6 +230,10 @@ pub(crate) struct Outbound {
     /// The request's input in tokens, estimated — billed only when the
     /// upstream does not report its own (see `crate::usage_estimate`).
     pub input_estimate: u64,
+    /// Outbound redaction for this request: every hop goes out through it.
+    pub redaction: Redaction,
+    /// The placeholders the caller's request was numbered with.
+    pub ledger: Ledger,
 }
 
 /// The request as it goes out to one upstream, and what it takes to read
@@ -241,6 +253,9 @@ pub(crate) struct Wire {
     /// the audit row. Always present: a same-format stream still needs
     /// assembling.
     pub collect: Session,
+    /// Restores this hop's answer: the request's ledger, and any value
+    /// only this hop carried.
+    pub ledger: Ledger,
 }
 
 impl Outbound {
@@ -319,6 +334,7 @@ impl Outbound {
             if let Some(stripped) = tw_dialect::convert::strip_carried(client, &bytes) {
                 bytes = stripped;
             }
+            let (bytes, ledger) = self.redaction.replace(bytes, &self.ledger);
             return Ok(Wire {
                 body: bytes,
                 path,
@@ -327,6 +343,7 @@ impl Outbound {
                 headers: self.dialect_headers.clone(),
                 convert: None,
                 collect,
+                ledger,
             });
         }
 
@@ -341,14 +358,18 @@ impl Outbound {
                 "Fields the upstream's format cannot carry were left out"
             );
         }
+        // The conversion moved the placeholders along with the text; one it
+        // assembled from two pieces is numbered here.
+        let (body, ledger) = self.redaction.replace(prepared.body, &self.ledger);
         Ok(Wire {
-            body: prepared.body,
+            body,
             path: prepared.path,
             query: prepared.query,
             dialect: protocol.dialect(),
             headers: Vec::new(),
             convert: Some(prepared.session.clone()),
             collect: prepared.session,
+            ledger,
         })
     }
 }
@@ -563,70 +584,86 @@ async fn run(
     //    audit row on short-circuit.
     let preflight = run_preflight_stages(&state, &identity, &trace_id, &mapped_model).await?;
 
-    let metadata = RequestMetadata::extract(&headers, &raw);
+    let mut metadata = RequestMetadata::extract(&headers, &raw);
+    // One id for the request: the one its error rows and the guards'
+    // events carry too. Two ids drawn apart for a caller that sent no
+    // `x-trace-id` would leave a refusal's audit events pointing at no
+    // log row.
+    if trace_id.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+        metadata.request_id = trace_id.clone();
+    }
 
-    // 3. Decode once, to know where the caller's text is.
-    let mut decoded =
+    // The guards this request runs under, whatever an admin changes while
+    // it is in flight.
+    let guards = state.guards.load_full();
+    let caller = Caller::of(&identity, &metadata.request_id, &mapped_model);
+
+    // 3. Content filter, on the caller's text where its own format puts
+    //    it. Every hit is an audit event; a refusal is the caller's 403,
+    //    quoting their words (masked).
+    let screening = guards.content.screen(surface.dialect, &body);
+    crate::content_filter::record(&state.audit, &caller, &screening, &guards.redaction);
+    if let Some(hit) = screening.refusal() {
+        return Err(ctx
+            .emit(crate::content_filter::refusal(hit, &guards.redaction))
+            .into());
+    }
+    // Text was stripped: from here on — decoding, redaction, every hop,
+    // the audit row — the request is the stripped one.
+    let (body, raw) = match screening.body {
+        Some(stripped) => {
+            let raw = serde_json::from_slice(&stripped).map_err(|_| {
+                ctx.emit(GatewayError::TransformError(
+                    "The request could not be read after the content filter removed text from it."
+                        .into(),
+                ))
+            })?;
+            (stripped, raw)
+        }
+        None => (body, raw),
+    };
+
+    // 4. Decode once, for the input estimate.
+    let decoded =
         tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect))
             .map_err(|r| ctx.emit(GatewayError::TransformError(r.0)))?;
 
-    // 4. Content filter. Log lines carry `log_summary` (no snippet) so
-    //    prompt content stays out of the log pipeline; the caller sees
-    //    the full match, since it is their own text.
-    if let Some(m) = state.content_filter.load().check_request(&decoded.request) {
-        use crate::content_filter::{log_summary, refusal};
-        match m.action {
-            Action::Block => {
-                tracing::warn!("Content filter blocked request: {}", log_summary(&m));
-                return Err(ctx.emit(GatewayError::TransformError(refusal(&m))).into());
-            }
-            Action::Warn => tracing::warn!(
-                "Content filter warning (request allowed): {}",
-                log_summary(&m)
-            ),
-            Action::Log => tracing::info!("Content filter log: {}", log_summary(&m)),
-        }
-    }
+    // 5. Outbound redaction: the whole request is searched and what is
+    //    found numbered once, in the order the caller wrote it.
+    //    Placeholders are stable per value, so two callers sending the same
+    //    structure redact to the same bytes and share a cache slot; each
+    //    restores their own values on the way out.
+    //
+    //    The audit row keeps what the caller wrote (their at-rest
+    //    redaction setting applies on top).
+    let (findings, ledger) = guards.redaction.look(&body);
+    crate::redaction::record(&state.audit, &caller, guards.redaction.mode, &findings);
+    let request_for_audit = body.to_vec();
+    let mut outbound_body = if ledger.is_empty() {
+        raw
+    } else {
+        let (replaced, _) = guards.redaction.replace(body.to_vec(), &ledger);
+        serde_json::from_slice(&replaced).map_err(|_| {
+            ctx.emit(GatewayError::TransformError(
+                "The request could not be read after redaction.".into(),
+            ))
+        })?
+    };
 
-    // 4b. Invisible characters that can carry an instruction past a
-    //     reader — in what the caller typed, or in a tool result.
-    let hidden_action = crate::hidden_text::action(&state.dynamic_config).await;
-    if hidden_action != crate::hidden_text::Action::Off {
-        let found = crate::hidden_text::scan(&decoded.request);
-        if !found.is_empty() {
-            use crate::hidden_text::Action as H;
-            use think_watch_common::audit::{AuditActor, GatewayActor, LogType};
-            metrics::counter!("gateway_hidden_text_total", "action" => format!("{hidden_action:?}"))
-                .increment(1);
-            tracing::warn!(trace_id = %trace_id, ?found, "request carries hidden characters");
-            if matches!(hidden_action, H::Warn | H::Block) {
-                let blocked = hidden_action == H::Block;
-                state.audit.log(
-                    GatewayActor {
-                        user_id: identity.user_id.as_deref(),
-                        user_email: identity.user_email.as_deref(),
-                        api_key_id: identity.api_key_id.as_deref(),
-                        api_key_lineage_id: identity.api_key_lineage_id.as_deref(),
-                        ip: identity.ip_address.as_deref(),
-                        session_id: None,
-                    }
-                    .audit(if blocked {
-                        "gateway.hidden_text_blocked"
-                    } else {
-                        "gateway.hidden_text_flagged"
-                    })
-                    .log_type(LogType::Audit)
-                    .detail(serde_json::json!({
-                        "trace_id": trace_id,
-                        "model": mapped_model,
-                        "found": found,
-                    })),
-                );
-            }
-            if hidden_action == H::Block {
-                return Err(ctx.emit(crate::hidden_text::refusal(&found)).into());
-            }
-        }
+    // 6. The model's output cap: a caller asking for more is lowered to
+    //    it, one asking for nothing gets it. The upstream stops there by
+    //    itself; the answer is not measured.
+    if let Some(cap) = state
+        .router
+        .load()
+        .config_for(&mapped_model)
+        .max_output_tokens
+    {
+        tw_dialect::params::cap_max_output_tokens(
+            surface.dialect,
+            &mut outbound_body,
+            u64::from(cap),
+        );
     }
 
     let call_ctx = CallCtx::new(
@@ -635,19 +672,7 @@ async fn run(
         identity.user_email.clone(),
     );
 
-    // 5. PII. Found on the decoded form, carried back onto the raw one.
-    //    Placeholders are stable per value, so two callers sending the
-    //    same structure redact to the same bytes and share a cache slot;
-    //    each restores their own values on the way out.
-    //
-    //    The audit row keeps what the caller actually wrote.
-    let pii_redactor = state.pii_redactor.load_full();
-    let redaction = pii_redactor.redact_request(&mut decoded.request);
-    let mut redacted = raw;
-    crate::pii_redactor::apply_to(&redaction, &mut redacted);
-    let request_for_audit = body.to_vec();
-
-    // 6. Quota, keyed on the model the caller named — that is what their
+    // 7. Quota, keyed on the model the caller named — that is what their
     //    dashboards group by.
     let quota_key = identity
         .user_id
@@ -662,11 +687,11 @@ async fn run(
             .into());
     }
 
-    // 7. Cache. A hit debits quota like a real call would — otherwise a
+    // 8. Cache. A hit debits quota like a real call would — otherwise a
     //    deterministic prompt amortises one upstream call across an
     //    unbounded quota window.
     let cache_fingerprint = if surface.caches {
-        ResponseCache::fingerprint(&redacted)
+        ResponseCache::fingerprint(&outbound_body)
     } else {
         None
     };
@@ -674,26 +699,17 @@ async fn run(
         && let Some(cached) = state.cache.get(fp).await
     {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
+        // With this caller's values in it: what they would run.
+        let restored = crate::redaction::restore_body(&ledger, &cached.body);
         // A stored answer passed the inspection in force when it was
         // stored, not necessarily the one in force now.
         if let Some(e) = crate::tool_inspection::check_whole(
-            &state.tool_inspection.load(),
+            &guards.tools,
+            &guards.redaction,
             &state.audit,
-            &crate::tool_inspection::Caller::of(&identity, &metadata.request_id, &mapped_model),
+            &caller,
             "cache",
-            &cached.body,
-        ) {
-            return Err(ctx.emit(e).into());
-        }
-        // So is the model's length cap.
-        if let Err(e) = crate::output_guardrails::apply_output_guardrails(
-            &cached.body,
-            surface.dialect,
-            &state
-                .router
-                .load()
-                .config_for(&mapped_model)
-                .output_guardrails,
+            &restored,
         ) {
             return Err(ctx.emit(e).into());
         }
@@ -702,11 +718,11 @@ async fn run(
             tracing::warn!(quota_key = %quota_key, tokens = total, "quota consume on cache hit failed: {e}");
         }
 
-        // Same capture pipeline as a fresh request — PII toggle, byte
-        // cap and offload all apply — with the status marked.
+        // Same capture pipeline as a fresh request — redaction toggle,
+        // byte cap and offload all apply — with the status marked.
         let mut capture = prepare_body_capture(
             &state.dynamic_config,
-            &pii_redactor,
+            &guards.redaction,
             &state.blob_store,
             &metadata.request_id,
             &request_for_audit,
@@ -734,7 +750,6 @@ async fn run(
             capture,
         );
 
-        let restored = crate::pii_redactor::restore_body(&redaction, &cached.body);
         let mut response = if is_stream {
             // The stored answer is whole; replay it as one event so the
             // client gets the framing it asked for.
@@ -760,7 +775,7 @@ async fn run(
         metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
     }
 
-    // 8. Route.
+    // 9. Route.
     let router = state.router.load();
     let routes = router.route(&mapped_model).ok_or_else(|| {
         ctx.emit(GatewayError::ProviderError(format!(
@@ -772,14 +787,16 @@ async fn run(
     let outbound = Outbound {
         surface,
         path: path.to_string(),
-        body: redacted,
+        body: outbound_body,
         stream: is_stream,
         dialect_headers: dialect_headers(&headers),
         input_estimate,
+        redaction: guards.redaction.clone(),
+        ledger: ledger.clone(),
     };
     let snapshot = |route: &RouteEntry, sel_record| crate::lifecycle::ChatPostInvokeDeps {
         state: state.clone(),
-        pii_redactor: pii_redactor.clone(),
+        guards: guards.clone(),
         request: crate::lifecycle::ChatRequestSnapshot {
             identity: identity.clone(),
             trace_id: metadata.request_id.clone(),
@@ -835,7 +852,7 @@ async fn run(
         };
 
         let deps = snapshot(entry, sel_record);
-        let shaper = StreamShaper::new(mapped_model.clone(), &redaction, surface.dialect)
+        let shaper = StreamShaper::new(mapped_model.clone(), &ledger, surface.dialect)
             .hiding_usage(hide_usage);
         return Ok(launch_stream_pump(
             deps,
@@ -852,14 +869,14 @@ async fn run(
     // in. Error paths capture the request only — nothing succeeded.
     let error_capture = prepare_body_capture(
         &state.dynamic_config,
-        &pii_redactor,
+        &guards.redaction,
         &state.blob_store,
         &metadata.request_id,
         &request_for_audit,
         None,
     )
     .await;
-    let (entry, completed, sel_record) =
+    let (entry, completed, answer_ledger, sel_record) =
         select_route_with_failover(routes, &outbound, &call_ctx, &sel_ctx, &mapped_model)
             .await
             .map_err(|e| {
@@ -882,28 +899,20 @@ async fn run(
                 GatewayErrorResponse::from(e)
             })?;
 
-    // Output guardrails run on the completion before PII is painted
-    // back, so a placeholder cannot push a legitimate answer past a cap.
-    let model_cfg = router.config_for(&mapped_model);
-    if let Err(e) = crate::output_guardrails::apply_output_guardrails(
-        &completed.body,
-        surface.dialect,
-        &model_cfg.output_guardrails,
-    ) {
-        finalize_health(&state, &sel_record, false).await;
-        return Err(ctx.emit(e).into());
-    }
+    // The answer as the caller will receive it, their values restored.
+    let restored = crate::redaction::restore_body(&answer_ledger, &completed.body);
 
-    // Tool calls, on the whole answer before any of it has gone out. A
-    // refusal is the gateway's policy, not the upstream failing, so the
-    // route's health counts it as a success. Like an output-guardrail
-    // refusal, the answer is neither cached nor billed.
+    // Tool calls, on the whole answer before any of it has gone out — in
+    // the form the caller would run them. A refusal is the gateway's
+    // policy, not the upstream failing, so the route's health counts it as
+    // a success; the answer is neither cached nor billed.
     if let Some(e) = crate::tool_inspection::check_whole(
-        &state.tool_inspection.load(),
+        &guards.tools,
+        &guards.redaction,
         &state.audit,
-        &crate::tool_inspection::Caller::of(&identity, &metadata.request_id, &mapped_model),
+        &caller,
         &entry.provider_name,
-        &completed.body,
+        &restored,
     ) {
         finalize_health(&state, &sel_record, true).await;
         return Err(ctx.emit(e).into());
@@ -928,10 +937,7 @@ async fn run(
         "Audit log: request completed"
     );
 
-    let mut response = json_response(crate::pii_redactor::restore_body(
-        &redaction,
-        &completed.body,
-    ));
+    let mut response = json_response(restored);
     response
         .headers_mut()
         .insert("X-Cache", HeaderValue::from_static("MISS"));

@@ -1,7 +1,12 @@
 //! Hidden characters in a request, end to end at the gateway.
 //!
-//! Unicode tag characters can carry a whole instruction invisibly. They
-//! are checked in what the caller sends, tool results included.
+//! Unicode tag characters can carry a whole instruction invisibly, and
+//! bidirectional controls make text read in another order than it is.
+//! Both are built-in content filter rules (`unicode-tags`,
+//! `bidi-controls`), matched by code point in what the caller sends, tool
+//! results included; out of the box they strip the characters in enforce
+//! mode. Zero-width and private-use characters have rules of their own,
+//! off out of the box: ordinary emoji and Persian text use the former.
 
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
@@ -48,104 +53,6 @@ fn with_tool_result() -> Value {
     })
 }
 
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn block_refuses_a_tool_result_carrying_tag_characters() {
-    let app = TestApp::spawn().await;
-    fixtures::set_setting(&app.db, "security.hidden_text", json!("block"))
-        .await
-        .unwrap();
-    app.state.dynamic_config.reload().await.unwrap();
-    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
-    let (key, _) = seed(&app, &upstream.uri()).await;
-
-    let gw = app.gateway_client();
-    gw.set_bearer(&key);
-    let resp = gw
-        .post("/v1/chat/completions", with_tool_result())
-        .await
-        .unwrap();
-    assert_eq!(resp.status.as_u16(), 403, "{}", resp.text());
-    assert!(resp.text().contains("tool result"), "{}", resp.text());
-    assert!(
-        upstream.received_requests().await.is_empty(),
-        "the upstream saw it anyway"
-    );
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn warn_is_the_default_and_lets_it_through_with_an_audit_event() {
-    let app = TestApp::spawn_with_clickhouse().await;
-    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
-    let (key, user_id) = seed(&app, &upstream.uri()).await;
-
-    let gw = app.gateway_client();
-    gw.set_bearer(&key);
-    gw.post("/v1/chat/completions", with_tool_result())
-        .await
-        .unwrap()
-        .assert_ok();
-
-    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
-    for _ in 0..200 {
-        let rows: Vec<String> = ch
-            .query("SELECT ifNull(detail, '') FROM audit_logs WHERE user_id = ? AND action = ?")
-            .bind(&user_id)
-            .bind("gateway.hidden_text_flagged")
-            .fetch_all()
-            .await
-            .expect("CH query");
-        if let Some(d) = rows.first() {
-            let v: Value = serde_json::from_str(d).unwrap();
-            assert_eq!(v["found"][0]["kind"], "tag", "{v}");
-            assert_eq!(v["found"][0]["in_tool_result"], true, "{v}");
-            // What the tag characters spell, so an operator can judge it.
-            assert_eq!(v["found"][0]["revealed"], "ignore", "{v}");
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("no gateway.hidden_text_flagged audit row");
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn ordinary_multilingual_text_is_not_flagged_even_in_block_mode() {
-    let app = TestApp::spawn().await;
-    fixtures::set_setting(&app.db, "security.hidden_text", json!("block"))
-        .await
-        .unwrap();
-    app.state.dynamic_config.reload().await.unwrap();
-    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
-    let (key, _) = seed(&app, &upstream.uri()).await;
-    let gw = app.gateway_client();
-    gw.set_bearer(&key);
-    gw.post(
-        "/v1/chat/completions",
-        json!({"model": "hidden-model", "messages": [{"role": "user",
-            "content": "👨\u{200D}👩\u{200D}👧 Привет می\u{200C}خواهم مرحبا"}]}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn the_setting_refuses_a_word_it_does_not_know() {
-    let app = TestApp::spawn().await;
-    let con = admin_session(&app).await;
-    let r = con
-        .patch(
-            "/api/admin/settings",
-            json!({"settings": {"security.hidden_text": "maybe"}}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
-}
-
 /// The smuggled text as a tool result on each of the four HTTP surfaces,
 /// streaming or not.
 fn tool_result_on_every_surface(stream: bool) -> Vec<(String, Value)> {
@@ -190,32 +97,38 @@ fn tool_result_on_every_surface(stream: bool) -> Vec<(String, Value)> {
     ]
 }
 
+async fn post_as(app: &TestApp, key: &str, path: &str, body: &Value) -> (u16, String) {
+    let mut req = reqwest::Client::new()
+        .post(format!("{}{path}", app.gateway_url))
+        .json(body);
+    req = if path.starts_with("/v1beta/") {
+        req.header("x-goog-api-key", key)
+    } else {
+        req.bearer_auth(key)
+    };
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap())
+}
+
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn block_refuses_it_in_every_callers_format_streaming_or_not() {
+async fn refusing_them_refuses_a_tool_result_in_every_callers_format_streaming_or_not() {
     let app = TestApp::spawn().await;
-    fixtures::set_setting(&app.db, "security.hidden_text", json!("block"))
-        .await
-        .unwrap();
-    app.state.dynamic_config.reload().await.unwrap();
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce", "actions": {"unicode-tags": "block"}}),
+    )
+    .await;
     let upstream = MockProvider::openai_chat_stream_ok("hidden-model").await;
     let (key, _) = seed(&app, &upstream.uri()).await;
 
     for stream in [false, true] {
         for (path, body) in tool_result_on_every_surface(stream) {
-            let mut req = reqwest::Client::new()
-                .post(format!("{}{path}", app.gateway_url))
-                .json(&body);
-            req = if path.starts_with("/v1beta/") {
-                req.header("x-goog-api-key", &key)
-            } else {
-                req.bearer_auth(&key)
-            };
-            let resp = req.send().await.unwrap();
-            let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap();
+            let (status, text) = post_as(&app, &key, &path, &body).await;
             assert_eq!(status, 403, "{path} stream={stream}: {text}");
             assert!(text.contains("tool result"), "{path}: {text}");
+            assert!(text.contains("6 invisible characters"), "{path}: {text}");
         }
     }
     assert!(
@@ -226,12 +139,10 @@ async fn block_refuses_it_in_every_callers_format_streaming_or_not() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn off_lets_it_through_untouched() {
+async fn enforce_strips_them_out_of_the_box() {
     let app = TestApp::spawn().await;
-    fixtures::set_setting(&app.db, "security.hidden_text", json!("off"))
-        .await
-        .unwrap();
-    app.state.dynamic_config.reload().await.unwrap();
+    app.set_setting("security.content", json!({"mode": "enforce"}))
+        .await;
     let upstream = MockProvider::openai_chat_ok("hidden-model").await;
     let (key, _) = seed(&app, &upstream.uri()).await;
     let gw = app.gateway_client();
@@ -240,7 +151,159 @@ async fn off_lets_it_through_untouched() {
         .await
         .unwrap()
         .assert_ok();
-    // Nothing is stripped: the upstream gets the characters as sent.
+    let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
+    assert_eq!(sent["messages"][2]["content"], "summarise this page");
+    // Only the caller's text is touched.
+    assert_eq!(sent["messages"][0]["content"], "read the page");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn observe_is_the_default_and_records_what_the_characters_spell() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
+    let (key, user_id) = seed(&app, &upstream.uri()).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    gw.post("/v1/chat/completions", with_tool_result())
+        .await
+        .unwrap()
+        .assert_ok();
+    // Nothing changed on the wire.
     let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
     assert_eq!(sent["messages"][2]["content"], smuggled());
+
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    for _ in 0..200 {
+        let rows: Vec<String> = ch
+            .query("SELECT ifNull(detail, '') FROM audit_logs WHERE user_id = ? AND action = ?")
+            .bind(&user_id)
+            .bind("gateway.content_flagged")
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if let Some(d) = rows.first() {
+            let v: Value = serde_json::from_str(d).unwrap();
+            assert_eq!(v["rule"], "unicode-tags", "{v}");
+            assert_eq!(v["action"], "strip", "what enforce mode would do: {v}");
+            assert_eq!(v["outcome"], "recorded", "{v}");
+            assert_eq!(v["in_tool_result"], true, "{v}");
+            assert_eq!(v["count"], 6, "{v}");
+            // What the tag characters spell, so an operator can judge it.
+            assert_eq!(v["revealed"], "ignore", "{v}");
+            // The excerpt shows them, rather than hiding them again.
+            assert!(v["excerpt"].as_str().unwrap().contains("U+E0069"), "{v}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no gateway.content_flagged audit row");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn ordinary_multilingual_text_is_left_alone_even_when_refusing() {
+    let app = TestApp::spawn().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce",
+               "actions": {"unicode-tags": "block", "bidi-controls": "block"}}),
+    )
+    .await;
+    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
+    let (key, _) = seed(&app, &upstream.uri()).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    let said = "👨\u{200D}👩\u{200D}👧 Привет می\u{200C}خواهم مرحبا";
+    gw.post(
+        "/v1/chat/completions",
+        json!({"model": "hidden-model", "messages": [{"role": "user", "content": said}]}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
+    assert_eq!(
+        sent["messages"][0]["content"], said,
+        "zero-width joiners stay"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_keyword_split_by_zero_width_characters_is_caught_once_they_are_stripped() {
+    // Zero-width characters (switched on here) are stripped; what that
+    // joins back together is checked again, and the refusing rule refuses.
+    let app = TestApp::spawn().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce", "enable": ["zero-width", "jailbreak"]}),
+    )
+    .await;
+    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
+    let (key, _) = seed(&app, &upstream.uri()).await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "hidden-model", "messages": [
+            {"role": "user", "content": "please jail\u{200B}break the model"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 403, "{text}");
+    assert!(upstream.received_requests().await.is_empty());
+
+    // Without the refusing rule, the text goes out with them stripped.
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce", "enable": ["zero-width"]}),
+    )
+    .await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "hidden-model", "messages": [
+            {"role": "user", "content": "please jail\u{200B}break the model"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
+    assert_eq!(sent["messages"][0]["content"], "please jailbreak the model");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn off_lets_them_through_untouched() {
+    let app = TestApp::spawn().await;
+    app.set_setting("security.content", json!({"mode": "off"}))
+        .await;
+    let upstream = MockProvider::openai_chat_ok("hidden-model").await;
+    let (key, _) = seed(&app, &upstream.uri()).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    gw.post("/v1/chat/completions", with_tool_result())
+        .await
+        .unwrap()
+        .assert_ok();
+    let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
+    assert_eq!(sent["messages"][2]["content"], smuggled());
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_setting_refuses_a_mode_it_does_not_know() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+    let r = con
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.content": {"mode": "maybe"}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
 }

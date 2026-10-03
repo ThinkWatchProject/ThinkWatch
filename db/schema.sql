@@ -9,7 +9,11 @@
 --
 -- Limits of declarative apply:
 --   * column rename, type narrowing, or DROP COLUMN need an explicit
---     one-off SQL kept in `db/release_migrations/` and run by hand.
+--     one-off SQL kept in `db/release_migrations/` and run by hand —
+--     unless the upgrade has to do it by itself: then it is a conversion
+--     run right after this file and the seeds, in one transaction, that
+--     finds nothing to do on the next boot (see
+--     crates/common/src/db.rs::run_migrations).
 --   * data backfills (UPDATE ... SET ...) are never idempotent in a
 --     useful way; same escape hatch.
 --
@@ -370,13 +374,11 @@ CREATE TABLE IF NOT EXISTS models (
     -- preserved across model disable/re-enable, so flipping this back
     -- on restores the previous traffic split exactly.
     enabled           BOOLEAN NOT NULL DEFAULT TRUE,
-    -- Output guardrails — JSON-encoded list of rule objects applied to
-    -- the upstream response before it reaches the caller. Each entry
-    -- is `{"type": "max_length", "max_chars": N}` (the only variant
-    -- wired today; see crates/gateway/src/output_guardrails.rs). On
-    -- rejection the gateway returns `TransformError` so OBS-05 logs
-    -- carry the triggering rule.
-    output_guardrails JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- The most output tokens a request to this model may ask for: a
+    -- larger max_tokens (in whichever field the caller's API names it)
+    -- is lowered to it, and a request without one gets it. NULL ⇒ no
+    -- limit. See crates/gateway/src/proxy/generate.rs.
+    max_output_tokens INTEGER CHECK (max_output_tokens IS NULL OR max_output_tokens > 0),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -387,6 +389,12 @@ ALTER TABLE models ADD COLUMN IF NOT EXISTS cache_write_weight
     DECIMAL(8, 4) CHECK (cache_write_weight >= 0);
 ALTER TABLE models ADD COLUMN IF NOT EXISTS cache_write_1h_weight
     DECIMAL(8, 4) CHECK (cache_write_1h_weight >= 0);
+-- Replaces the per-model `output_guardrails` column (a cap on the answer's
+-- length in bytes). That column is converted into this one, ceil(N / 4)
+-- tokens, and dropped by the guard-settings conversion that runs right
+-- after this file (crates/common/src/guard_policy/legacy.rs).
+ALTER TABLE models ADD COLUMN IF NOT EXISTS max_output_tokens
+    INTEGER CHECK (max_output_tokens IS NULL OR max_output_tokens > 0);
 
 -- Platform-wide per-token pricing baseline. Single-row singleton
 -- (PK pinned to 1 via CHECK). `cost($) = tokens × weight × baseline`.
