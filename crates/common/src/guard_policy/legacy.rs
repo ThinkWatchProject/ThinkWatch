@@ -177,23 +177,12 @@ pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
 
     let mut capped = 0usize;
     if column {
-        // Each model, with the upstream names its routes send: the cap is
-        // kept within what the gateway knows the family to take.
-        let rows: Vec<(uuid::Uuid, String, Value, Vec<String>)> = sqlx::query_as(
-            "SELECT m.id, m.model_id, m.output_guardrails,
-                    COALESCE(array_agg(r.upstream_model) FILTER (WHERE r.upstream_model IS NOT NULL),
-                             '{}')
-               FROM models m
-               LEFT JOIN model_routes r ON r.model_id = m.model_id
-              GROUP BY m.id",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        for (id, model_id, guardrails, upstreams) in rows {
-            let names: Vec<&str> = std::iter::once(model_id.as_str())
-                .chain(upstreams.iter().map(String::as_str))
-                .collect();
-            if let Some(n) = model_cap(&model_id, &guardrails, &names) {
+        let rows: Vec<(uuid::Uuid, String, Value)> =
+            sqlx::query_as("SELECT id, model_id, output_guardrails FROM models")
+                .fetch_all(&mut *tx)
+                .await?;
+        for (id, model_id, guardrails) in rows {
+            if let Some(n) = model_cap(&model_id, &guardrails) {
                 sqlx::query("UPDATE models SET max_output_tokens = $2 WHERE id = $1")
                     .bind(id)
                     .bind(n)
@@ -632,47 +621,25 @@ pub fn max_output_tokens(guardrails: &Value) -> Option<i32> {
         .map(|n| i32::try_from(n.div_ceil(4)).unwrap_or(i32::MAX))
 }
 
-/// The most output tokens the gateway knows a model of this family to take,
-/// for a model reached under any of `names` (its id and its routes'
-/// upstream names): the least of them. thinkwatch-core's per-family figure
-/// (`tw_dialect::official::fallback_max_output_tokens`) — 32,000 for Claude,
-/// 8,192 for the rest — the same one it writes when a format requires a
-/// limit the caller did not set.
-pub fn family_ceiling<'a>(names: impl IntoIterator<Item = &'a str>) -> u64 {
-    names
-        .into_iter()
-        .map(tw_dialect::official::fallback_max_output_tokens)
-        .min()
-        .unwrap_or_else(|| tw_dialect::official::fallback_max_output_tokens(""))
-}
-
-/// The converted cap of one model ([`max_output_tokens`]), kept within its
-/// family's ceiling ([`family_ceiling`]): a converted cap the model cannot
-/// take would have every request that asks for none refused upstream.
-/// Logs what it could not read, and what it lowered.
-fn model_cap(model_id: &str, guardrails: &Value, names: &[&str]) -> Option<i32> {
-    let empty = guardrails.as_array().is_some_and(Vec::is_empty);
-    let Some(n) = max_output_tokens(guardrails) else {
-        if !empty {
-            tracing::warn!(
-                model = model_id,
-                output_guardrails = %guardrails,
-                "This model's output_guardrails could not be read, so the gateway ran it without \
-                 a cap — converted as no cap"
-            );
-        }
-        return None;
-    };
-    let ceiling = i32::try_from(family_ceiling(names.iter().copied())).unwrap_or(i32::MAX);
-    if n > ceiling {
+/// The converted cap of one model ([`max_output_tokens`]), stored as it
+/// converts. It is not lowered to what the gateway knows the model's
+/// family to take: a lower cap would also lower the limit of every request
+/// that sets one above it, cutting answers 2.2 let through. A request that
+/// sets no limit is held to a cap above that figure only by the model's
+/// own default (see the gateway's `Outbound::cap_output`).
+///
+/// Logs a value it could not read.
+fn model_cap(model_id: &str, guardrails: &Value) -> Option<i32> {
+    let n = max_output_tokens(guardrails);
+    if n.is_none() && !guardrails.as_array().is_some_and(Vec::is_empty) {
         tracing::warn!(
             model = model_id,
-            converted = n,
-            ceiling,
-            "The output cap converted for this model is more than its family takes — lowered"
+            output_guardrails = %guardrails,
+            "This model's output_guardrails could not be read, so the gateway ran it without \
+             a cap — converted as no cap"
         );
     }
-    Some(n.min(ceiling))
+    n
 }
 
 // ---------------------------------------------------------------- shared
@@ -1102,30 +1069,15 @@ mod tests {
     }
 
     #[test]
-    fn a_converted_cap_stays_within_what_the_family_takes() {
+    fn a_converted_cap_is_stored_as_it_converts() {
         let bytes = |n: usize| json!([{"type": "max_length", "max_chars": n}]);
-        assert_eq!(
-            model_cap("gpt-4o", &bytes(100_000), &["gpt-4o"]),
-            Some(8192)
-        );
-        assert_eq!(model_cap("gpt-4o", &bytes(4096), &["gpt-4o"]), Some(1024));
-        assert_eq!(
-            model_cap("claude-opus", &bytes(200_000), &["claude-opus"]),
-            Some(32000)
-        );
-        // The lowest of the names it is reached under.
-        assert_eq!(
-            model_cap(
-                "my-claude",
-                &bytes(100_000),
-                &["my-claude", "claude-sonnet-4", "deepseek-chat"]
-            ),
-            Some(8192)
-        );
-        assert_eq!(model_cap("m", &json!({"oops": 1}), &["m"]), None);
-        assert_eq!(model_cap("m", &json!([]), &["m"]), None);
-        assert_eq!(family_ceiling(["claude-3-5-haiku"]), 32000);
-        assert_eq!(family_ceiling(std::iter::empty()), 8192);
+        // Above the 8,192 the gateway fills in for a non-Claude model, and
+        // above Claude's 32,000: not lowered to either.
+        assert_eq!(model_cap("gpt-4o", &bytes(100_000)), Some(25_000));
+        assert_eq!(model_cap("claude-opus", &bytes(200_000)), Some(50_000));
+        assert_eq!(model_cap("gpt-4o", &bytes(4096)), Some(1024));
+        assert_eq!(model_cap("m", &json!({"oops": 1})), None);
+        assert_eq!(model_cap("m", &json!([])), None);
     }
 
     #[test]

@@ -132,21 +132,25 @@ deploying.
   where 2.2 wrote nothing. Nothing on the wire changes.
 - **The output length guardrail is replaced by a model's maximum output
   tokens — check each model's after upgrading.** A cap of N bytes on
-  the answer converts to `ceil(N / 4)` output tokens, but no more than
-  the gateway knows the model's family to take (32,000 tokens for
-  Claude models, 8,192 for others); raise it where the model allows
-  more. The answer is no longer measured or cut: a request asking for
-  more tokens than the cap is lowered to it, in whichever field its API
-  uses, and the upstream stops there. A request asking for no limit
-  gets the cap when it is within that family figure; above it, the
-  request goes out without one rather than with a value the model could
-  refuse, and the model's own limit applies. Reasoning (thinking)
-  tokens count towards the cap on the APIs that bill them as output, so
-  a cap that fit an answer can cut short a model that thinks first. The
-  model API's `output_guardrails` field is gone: a request that still
-  sets one (anything but `null` or `[]`) is refused with `400`, so a
-  script cannot believe answers are still capped. `max_output_tokens`
-  (1 to 2147483647, `null` for no limit) replaces it.
+  the answer converts to `ceil(N / 4)` output tokens, stored as
+  converted. The answer is no longer measured or cut: a request asking
+  for more tokens than the cap is lowered to it, in whichever field its
+  API uses, and the upstream stops there; one asking for less keeps its
+  own. A request that sets no limit is held to the cap only when the
+  cap is within what the gateway knows the model's family to take
+  (32,000 tokens for Claude models, 8,192 for others). Above that, the
+  request goes out without a limit rather than with one the model could
+  refuse, and the model's own default applies: a 100,000-byte cap on a
+  non-Claude model converts to 25,000 tokens, so its requests that set
+  no limit are not capped at all. To hold every request to a cap, have
+  the clients send a limit, or set the cap to that family figure or
+  below. Reasoning (thinking) tokens count towards the cap on the APIs
+  that bill them as output, so a cap that fit an answer can cut short a
+  model that thinks first. The model API's `output_guardrails` field is
+  gone: a request that still sets one (anything but `null` or `[]`) is
+  refused with `400`, so a script cannot believe answers are still
+  capped. `max_output_tokens` (1 to 2147483647, `null` for no limit)
+  replaces it.
 - **A new installation observes by default.** Every guard starts in
   observe mode, with only the built-in rules that rarely misfire
   switched on (personal data such as e-mail addresses and phone

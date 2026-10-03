@@ -153,7 +153,8 @@ async fn the_old_settings_are_converted_once_and_behave_as_before() {
         .execute(&app.db)
         .await
         .unwrap();
-    // A loose cap, more than a non-Claude model is known to take.
+    // A loose cap, more than the 8,192 tokens the gateway fills in for a
+    // non-Claude model that is asked for no limit: stored as it converts.
     fixtures::create_model_and_route(&app.db, provider.id, "upgraded-big")
         .await
         .unwrap();
@@ -191,8 +192,8 @@ async fn the_old_settings_are_converted_once_and_behave_as_before() {
             .unwrap();
     assert_eq!(
         big,
-        Some(8192),
-        "25,000 tokens, kept within the family's 8,192"
+        Some(25_000),
+        "100,000 bytes is 25,000 tokens, not lowered"
     );
     let marker = setting(&app, "security.legacy_converted").await.unwrap();
     assert_eq!(marker["models_capped"], 2, "{marker}");

@@ -367,8 +367,8 @@ async fn the_model_api_sets_and_clears_the_cap() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn a_cap_above_what_the_family_takes_is_not_filled_in() {
-    // 25,000 tokens: what a converted 100,000-byte cap could have been, on
-    // a model whose family is only known to take 8,192.
+    // 25,000 tokens: what a 100,000-byte cap converts to, on a model whose
+    // family the gateway only knows to take 8,192.
     let app = TestApp::spawn().await;
     let upstream = chat_upstream().await;
     let key = seed(&app, &upstream.uri(), "openai", "cap-loose", Some(25_000)).await;
