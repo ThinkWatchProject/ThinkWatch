@@ -245,11 +245,11 @@ pub struct UpdateSettingsRequest {
 
 /// PATCH /api/admin/settings — update one or more settings.
 ///
-/// Changing a setting takes `settings:write`, except a request guard's
-/// policy (`security.redact`, `security.inspect_tools`,
-/// `security.content`), which takes the permission that guard always had:
-/// `pii_redactor:write` for redaction, `content_filter:write` for the other
-/// two.
+/// Changing a setting takes `settings:write`. A request guard's policy
+/// (`security.redact`, `security.inspect_tools`, `security.content`) takes
+/// the guard's own permission as well — `pii_redactor:write` for redaction,
+/// `content_filter:write` for the other two — the two checks it always
+/// had: the server's, and the console's.
 #[utoipa::path(
     patch,
     path = "/api/admin/settings",
@@ -267,17 +267,14 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let mut permissions: Vec<&'static str> = req
-        .settings
-        .keys()
-        .map(|key| match guard_policy::guard_of(key) {
-            Some(guard) => super::security::write_permission(guard),
-            None => "settings:write",
-        })
+    let mut permissions: Vec<&'static str> = std::iter::once("settings:write")
+        .chain(
+            req.settings
+                .keys()
+                .filter_map(|key| guard_policy::guard_of(key))
+                .map(super::security::write_permission),
+        )
         .collect();
-    if permissions.is_empty() {
-        permissions.push("settings:write");
-    }
     permissions.sort_unstable();
     permissions.dedup();
     for permission in permissions {

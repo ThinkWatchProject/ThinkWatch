@@ -15,10 +15,15 @@
 //! | outbound redaction | `gateway.redaction_flagged` (observe), `gateway.redaction_replaced` (enforce) |
 //! | tool-call inspection | `gateway.tool_call_flagged` (recorded), `gateway.tool_call_blocked` (cut) |
 //!
-//! **What an event quotes is masked first**, with the outbound redaction
-//! rules ([`crate::redaction::Redaction::mask`]): an excerpt of a tool call
-//! or of the caller's text can carry a credential, and the audit log is
-//! forwarded and read far more widely than the request it came from.
+//! **The audit log gets no text of the request.** It is forwarded and read
+//! far more widely than the request it came from (`logs:read_all`, against
+//! `logs:read_bodies` for bodies). A content event names the rule and
+//! counts the matches; a redaction event names the rule and counts the
+//! values, and only a built-in rule's carries a few, masked
+//! (`sk-an…7f9c`); a tool-call event quotes the arguments that matched —
+//! the upstream's text, not the caller's — masked with the redaction rules
+//! ([`crate::redaction::Redaction::mask`]). A request writes at most a
+//! score of events per guard, one per rule.
 
 use std::sync::Arc;
 

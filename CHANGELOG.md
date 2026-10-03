@@ -25,26 +25,59 @@ deploying.
 
 ### Read before upgrading
 
+- **Back up `system_settings` and `models` first, and plan for no way
+  back to 2.2.** The upgrade converts the guard settings and drops a
+  column (next item). Version 2.2 cannot run on the converted database:
+  its settings are gone, so it would start on its seeded defaults, and
+  it can no longer read the models table. Take a copy before deploying:
+
+  ```sh
+  pg_dump --data-only --table=system_settings --table=models "$DATABASE_URL" > thinkwatch-2.2-guards.sql
+  ```
+
+- **Stop every replica of 2.2 before the first 3.0 one starts.** A 2.2
+  replica still running when 3.0 converts finds its settings gone (it
+  then filters and redacts nothing) and cannot rebuild its router; one
+  that restarts writes its seeded defaults back. 3.0 does not convert
+  those a second time — it removes them at its next start and logs a
+  warning — but the 2.2 replica runs on them until then. With the Helm
+  chart (release `thinkwatch`, namespace `thinkwatch` here):
+
+  ```sh
+  kubectl -n thinkwatch scale deployment/thinkwatch-server --replicas=0
+  kubectl -n thinkwatch wait --for=delete pod \
+    -l app.kubernetes.io/name=think-watch,app.kubernetes.io/component=server --timeout=5m
+  helm upgrade thinkwatch deploy/helm/think-watch -n thinkwatch   # with your usual values
+  kubectl -n thinkwatch scale deployment/thinkwatch-server --replicas=<replicas you run>
+  ```
+
+  The last command matters when `autoscaling.enabled` is on: the chart
+  then leaves the replica count alone, and it stays at 0. With Docker
+  Compose, `docker compose stop server` before pulling and starting the
+  new image.
 - **The old guard settings are converted at the first start, and
   behave as before.** `security.content_filter_patterns`,
   `security.hidden_text`, `security.pii_redactor_patterns` and
   `security.tool_inspection` become `security.content`,
   `security.redact` and `security.inspect_tools`, and are deleted, in
-  one transaction during the boot migration; a second start finds
-  nothing to convert. A content rule identical to a built-in rule
-  becomes that rule, switched on, any other a custom rule; a list with
-  rules in it runs in enforce mode with every built-in rule it did not
-  name switched off. The four seeded PII patterns become the built-in
-  rules for the same data (`cn-resident-id`, `bank-card`, `email`,
-  `cn-mobile-phone`), any other pattern a custom rule whose label is
-  its old placeholder prefix. A model's `output_guardrails` length cap
-  becomes `max_output_tokens` (below), and the column is dropped. **Stop
-  every replica of the previous version before the first new one
-  starts**: a replica still running 2.2 finds its settings gone (it
-  then filters and redacts nothing) and can no longer rebuild its
-  router once the column is dropped. To see what was converted, read
-  the three keys from Settings or `system_settings` afterwards; the
-  start-up log lists them too.
+  one transaction during the boot migration. The conversion is recorded
+  in `security.legacy_converted` (when, which version, what it
+  converted); with that record present, old keys or the old column
+  that show up again are removed, never converted, so the policies in
+  force are not overwritten. A content rule identical to a built-in
+  rule becomes that rule, switched on, any other a custom rule; a list
+  with rules in it runs in enforce mode with every built-in rule it did
+  not name switched off. The four seeded PII patterns become the
+  built-in rules for the same data (`cn-resident-id`, `bank-card`,
+  `email`, `cn-mobile-phone`), any other pattern a custom rule whose
+  label is its old placeholder prefix. Whatever the old runtime was
+  skipping (a rule that did not compile, a built-in rule id it did not
+  know, an `output_guardrails` value it could not read) is left out,
+  each with a warning in the start-up log. A model's
+  `output_guardrails` length cap becomes `max_output_tokens` (below),
+  and the column is dropped. To see what was converted, read the three
+  keys from Settings or `system_settings` afterwards; the start-up log
+  lists them too.
 - **Placeholders are written `<<TW_EMAIL_1>>`, not `{{EMAIL_1}}`.** The
   label of a custom rule is upper case letters, digits and
   underscores (an old prefix is converted: `REDACTED-SSN` →
@@ -67,6 +100,14 @@ deploying.
   console's security page. With an empty PII list, redaction
   converts to observe mode: it records what it finds and changes
   nothing.
+- **The built-in rules that replace the seeded PII patterns are
+  stricter.** An identity number has to have a real province code, a
+  real date of birth and a matching check digit; a card number a known
+  network's prefix and length and a valid Luhn digit, and published
+  test card numbers do not count. Numbers the old regexes took for
+  them — any 18 digits, any 16 — are no longer replaced. A deployment
+  that relied on the looser match can add its old regex back as a
+  custom rule.
 - **Tool calls are judged as the client receives them, and two built-in
   rules are new.** Inspection now reads a tool call converted to the
   caller's format and with redacted values restored — what the client
@@ -81,15 +122,31 @@ deploying.
   characters are content filter rules: `unicode-tags` and
   `bidi-controls`, plus `zero-width` and `private-use`, which ship off.
   `security.hidden_text: block` converts to those two rules refusing,
-  `warn` and `log` to recording, `off` to switching them off.
+  `warn` and `log` to recording, `off` to switching them off. Recording
+  writes an audit event: `hidden_text: log` used to reach only the
+  application log, and now writes `gateway.content_flagged`.
+- **A deployment with no content rules starts recording.** An empty
+  content filter list converts to observe mode with the built-in rules
+  that ship on, so requests matching them (`ignore previous
+  instructions` and the like) write `gateway.content_flagged` events
+  where 2.2 wrote nothing. Nothing on the wire changes.
 - **The output length guardrail is replaced by a model's maximum output
-  tokens.** A cap of N bytes on the answer converts to `ceil(N / 4)`
-  output tokens. The answer is no longer measured or cut: a request
-  asking for more tokens than the cap is lowered to it, and one asking
-  for none gets it, in whichever field its API uses; the upstream stops
-  there. The model API's `output_guardrails` field is gone;
-  `max_output_tokens` (1 to 2147483647, `null` for no limit) replaces
-  it.
+  tokens — check each model's after upgrading.** A cap of N bytes on
+  the answer converts to `ceil(N / 4)` output tokens, but no more than
+  the gateway knows the model's family to take (32,000 tokens for
+  Claude models, 8,192 for others); raise it where the model allows
+  more. The answer is no longer measured or cut: a request asking for
+  more tokens than the cap is lowered to it, in whichever field its API
+  uses, and the upstream stops there. A request asking for no limit
+  gets the cap when it is within that family figure; above it, the
+  request goes out without one rather than with a value the model could
+  refuse, and the model's own limit applies. Reasoning (thinking)
+  tokens count towards the cap on the APIs that bill them as output, so
+  a cap that fit an answer can cut short a model that thinks first. The
+  model API's `output_guardrails` field is gone: a request that still
+  sets one (anything but `null` or `[]`) is refused with `400`, so a
+  script cannot believe answers are still capped. `max_output_tokens`
+  (1 to 2147483647, `null` for no limit) replaces it.
 - **A new installation observes by default.** Every guard starts in
   observe mode, with only the built-in rules that rarely misfire
   switched on (personal data such as e-mail addresses and phone
@@ -97,26 +154,52 @@ deploying.
   guard is switched to its third mode.
 - **A content filter refusal is `403`**, with the error type of the
   caller's API (`permission_error` for OpenAI-style APIs). Keyword and
-  regex rules used to refuse with `400`.
-- **Guard policies are changed with their own permissions.** Writing
-  `security.redact` through `PATCH /api/admin/settings` takes
-  `pii_redactor:write`, `security.content` and `security.inspect_tools`
-  take `content_filter:write`; `settings:write` no longer covers them.
-  The seeded `admin` and `super_admin` roles hold both.
+  regex rules used to refuse with `400`. In `gateway_logs`, its
+  `error_type` is `PolicyBlocked`, where it was `TransformError`.
+- **A rule that deletes text changes what is stored.** The request a
+  content rule stripped goes upstream, is redacted and is captured as
+  the stripped one: the audit log's request body is what was sent, not
+  what the caller typed.
+- **Changing a guard policy takes `settings:write` and the guard's own
+  permission**: `pii_redactor:write` for `security.redact`,
+  `content_filter:write` for `security.content` and
+  `security.inspect_tools`, through `PATCH /api/admin/settings`. 2.2
+  checked `settings:write` on the server and the guard permission in
+  the console; both are checked on the server now. Trying a sample
+  takes `pii_redactor:read` or `content_filter:read`. Reading the
+  policies — `GET /api/admin/security`, which the console's security
+  page loads — takes `settings:read`. The seeded `admin` and
+  `super_admin` roles hold all of them.
 - **Console API changes.** `GET /api/admin/security` lists each guard's
   mode and every rule, and `POST /api/admin/security/{guard}/test` tries
   a sample; they replace `/api/admin/settings/content-filter/test`,
   `/content-filter/presets`, `/pii-redactor/test`,
   `/tool-inspection/rules` and `/tool-inspection/test`, which are gone.
-- **Audit events.** Every guard hit writes one event:
-  `gateway.content_flagged`, `gateway.content_stripped` and
+- **Audit events.** Every rule that matches writes one event per
+  request: `gateway.content_flagged`, `gateway.content_stripped` and
   `gateway.content_blocked`; `gateway.redaction_flagged` and
   `gateway.redaction_replaced`; `gateway.tool_call_flagged` and
   `gateway.tool_call_blocked` as before. `gateway.hidden_text_flagged`
   and `gateway.hidden_text_blocked` are gone; hidden characters are
-  content events. With `audit.body_redact_pii` on, captured bodies are
-  redacted with the outbound redaction rules, built-in ones included,
-  whatever the redaction mode.
+  content events. **No event carries the request's text**: a content
+  event names the rule, the outcome, how many matches and whether they
+  were in a tool result; a redaction event names the rule and counts
+  the values and their occurrences, and only a built-in rule's lists a
+  few in masked form (`sk-an…7f9c`) — a custom rule's values are not
+  written at all. A request writes at most 20 events per guard (the
+  rules that changed it, or matched most, first), each with the number
+  of rules that matched (`rules_in_request`). With
+  `audit.body_redact_pii` on, captured bodies are redacted with the
+  outbound redaction rules, built-in ones included, whatever the
+  redaction mode.
+- **Metrics renamed.** `gateway_hidden_text_total` is gone: hidden
+  characters count in `gateway_content_matched_total{outcome,custom}`
+  with every content rule. `pii_pattern_invalid_total{pattern}` is now
+  `guard_policy_invalid_total{guard}` (a stored policy with a rule that
+  does not compile; the rule is left out), next to
+  `guard_policy_unreadable_total{guard}` (a stored policy that cannot be
+  read; the guard runs on its factory policy). Redaction counts values
+  in `gateway_redaction_found_total{kind,outcome}`.
 
 ### Added
 
@@ -141,10 +224,10 @@ deploying.
 ### Fixed
 
 - **A credential in a matched tool call no longer reaches the audit
-  log.** The excerpt of a tool call that inspection cut or recorded —
-  and of a content filter hit — is masked with the redaction rules
-  before it is written; a key the model echoed, or one restored from a
-  placeholder, used to be stored as it was.
+  log.** The excerpt of a tool call that inspection cut or recorded is
+  masked with the redaction rules before it is written; 2.2 stored the
+  matched arguments as they were, a key the model wrote in them
+  included.
 - **A request's audit events and its log row carry the same id** when
   the caller sends no `x-trace-id`. The log row of a request that went
   through used to carry a second, unrelated id.

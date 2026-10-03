@@ -2,9 +2,12 @@
 //!
 //! The cap is applied to the request, not measured on the answer: a caller
 //! asking for more output tokens than the model allows is lowered to the
-//! cap, one asking for none gets it, one asking for less keeps its own. The
-//! upstream stops there by itself. Each format names the field its own way
-//! (`max_tokens`, `max_completion_tokens`, `max_output_tokens`,
+//! cap, one asking for less keeps its own, and one asking for none gets the
+//! cap — unless the cap is more than the model's family is known to take
+//! (8,192 tokens, or 32,000 for Claude), where a filled-in limit could be
+//! refused and the model's own limit applies instead. The upstream stops
+//! there by itself. Each format names the field its own way (`max_tokens`,
+//! `max_completion_tokens`, `max_output_tokens`,
 //! `generationConfig.maxOutputTokens`), and a request forwarded as sent is
 //! capped as surely as a converted one.
 
@@ -331,4 +334,87 @@ async fn the_model_api_sets_and_clears_the_cap() {
             .unwrap();
         assert_eq!(r.status.as_u16(), 400, "{bad}: {}", r.text());
     }
+
+    // The length cap that this replaced is refused, not silently ignored.
+    let r = con
+        .patch(
+            &format!("/api/admin/models/{id}"),
+            json!({"output_guardrails": [{"type": "max_length", "max_chars": 4000}]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
+    assert!(r.text().contains("max_output_tokens"), "{}", r.text());
+    let r = con
+        .post(
+            "/api/admin/models",
+            json!({"model_id": unique_name("cap-old"), "display_name": "Old",
+                   "output_guardrails": [{"type": "max_length", "max_chars": 4000}]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
+    // Asking for none passes.
+    con.patch(
+        &format!("/api/admin/models/{id}"),
+        json!({"output_guardrails": []}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_cap_above_what_the_family_takes_is_not_filled_in() {
+    // 25,000 tokens: what a converted 100,000-byte cap could have been, on
+    // a model whose family is only known to take 8,192.
+    let app = TestApp::spawn().await;
+    let upstream = chat_upstream().await;
+    let key = seed(&app, &upstream.uri(), "openai", "cap-loose", Some(25_000)).await;
+    for (ask, expect) in [
+        (None, None),
+        (Some(30_000), Some(25_000)),
+        (Some(100), Some(100)),
+    ] {
+        let mut body = json!({"model": "cap-loose", "temperature": 0.5,
+                              "messages": [{"role": "user", "content": "ping"}]});
+        if let Some(n) = ask {
+            body["max_tokens"] = json!(n);
+        }
+        let before = upstream.received_requests().await.len();
+        let (status, text) = post(&app, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(status, 200, "{ask:?}: {text}");
+        let sent: Value = upstream.received_requests().await[before]
+            .body_json()
+            .unwrap();
+        assert_eq!(chat_max(&sent), expect, "ask={ask:?}: {sent}");
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_conversion_that_must_write_a_limit_writes_the_lower_one() {
+    // A Chat caller asking for no limit, routed to Anthropic, which requires
+    // one: the conversion writes the family's figure, and the cap lowers it.
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::anthropic_messages_ok("cap-claude-conv").await;
+    let key = seed(
+        &app,
+        &upstream.uri(),
+        "anthropic",
+        "cap-claude-conv",
+        Some(CAP),
+    )
+    .await;
+    let (status, text) = post(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "cap-claude-conv", "messages": [{"role": "user", "content": "ping"}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let sent: Value = upstream.received_requests().await[0].body_json().unwrap();
+    assert_eq!(sent["max_tokens"], CAP, "{sent}");
 }
