@@ -100,6 +100,10 @@ pub struct BlobKeyHint<'a> {
     pub field: &'a str,
 }
 
+// `async_trait` marks every generated method `#[must_use]`, and the boxed
+// future it returns is already must-use; clippy 1.99's `double_must_use`
+// flags that generated code, which there is no way to change from here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// Whether this store can actually offload. `InlineStore` returns

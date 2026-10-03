@@ -8,8 +8,8 @@
 //! endpoints shared one typed shape. Requests now go out in the caller's
 //! own format when the route allows it, and come back in it, so the
 //! shape all three share is simpler: the response bytes as the caller
-//! receives them (before PII is painted back), and the usage read off
-//! the upstream's own bytes.
+//! receives them (before redacted values are painted back), and the usage
+//! read off the upstream's own bytes.
 //!
 //! Hook responsibilities:
 //! - `record_outcome` → `finalize_health` (breaker).
@@ -31,7 +31,7 @@ use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckReco
 use think_watch_common::limits::{BudgetCap, RateLimitRule};
 use tw_dialect::ir::Dialect;
 
-use crate::pii_redactor::PiiRedactor;
+use crate::guards::Guards;
 use crate::proxy::generate::{Wire, priced, tokens};
 use crate::proxy::shaper::{StreamShaper, rewrite_model};
 use crate::proxy::{
@@ -48,8 +48,8 @@ pub(crate) struct ChatCompletionSurface;
 
 /// A whole answer, in the caller's format.
 pub struct Completed {
-    /// As the caller will receive it, except that PII placeholders are
-    /// still in place — this is also the form the cache stores, so a
+    /// As the caller will receive it, except that redaction placeholders
+    /// are still in place — this is also the form the cache stores, so a
     /// later caller can paint in their own values.
     pub body: Vec<u8>,
     /// Read off the upstream's bytes, whatever format they were in, or
@@ -92,9 +92,10 @@ pub(crate) struct ChatRequestSnapshot {
     /// The model the caller named, after aliasing — what lands in
     /// `gateway_logs.model`. Never the upstream's own name.
     pub mapped_model: String,
-    /// The request body exactly as the caller sent it, before redaction:
-    /// the audit row is the record of what the user wrote. Body capture
-    /// applies its own redaction toggle on top.
+    /// The request body as the caller sent it — after the content filter
+    /// stripped anything, before outbound redaction: the audit row is the
+    /// record of what the user wrote. Body capture applies its own
+    /// redaction toggle on top.
     pub request_for_audit: Vec<u8>,
     /// Where the cache keeps this request's answer. `None` when the
     /// request must not be cached.
@@ -125,9 +126,10 @@ pub(crate) struct ChatPickedRoute {
 /// detached tail task for a stream.
 pub(crate) struct ChatPostInvokeDeps {
     pub state: GatewayState,
-    /// Snapshot of the redactor, so body capture sees the same patterns
-    /// the request was redacted with even across a hot swap.
-    pub pii_redactor: Arc<PiiRedactor>,
+    /// The guards the request ran under, so the tool-call inspection and
+    /// body capture use the same rules the request was screened and
+    /// redacted with, even across a hot swap.
+    pub guards: Arc<Guards>,
     pub request: ChatRequestSnapshot,
     pub preflight: ChatPreflightLists,
     pub route: ChatPickedRoute,
@@ -159,12 +161,14 @@ pub(crate) type OpenUpstream = Pin<
 /// **A dropped stream is a cancelled request.** When the client goes,
 /// hyper drops the body, and with it the sender the tail is waiting on;
 /// the tail then records `ClientCancelled`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_chat_pump(
     open: OpenUpstream,
     mut shaper: StreamShaper,
     client: Dialect,
     client_sse: bool,
     deps_state: GatewayState,
+    guards: &Guards,
     request: &ChatRequestSnapshot,
     provider: &str,
 ) -> (
@@ -184,26 +188,15 @@ pub(crate) fn build_chat_pump(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
 
     // Tool calls are inspected on what the client is about to receive —
-    // converted, if it was — since that is what it would execute.
+    // converted, if it was, and with redacted values restored — since that
+    // is what it would execute. A call that sends a restored credential
+    // somewhere is only visible in that form.
     let mut inspector = crate::tool_inspection::StreamInspector::new(
-        deps_state.tool_inspection.load_full(),
+        guards.tools.clone(),
+        guards.redaction.clone(),
         deps_state.audit.clone(),
-        crate::tool_inspection::Caller::of(
-            &request.identity,
-            &request.trace_id,
-            &request.mapped_model,
-        ),
+        crate::guards::Caller::of(&request.identity, &request.trace_id, &request.mapped_model),
         provider.to_string(),
-    );
-
-    // The model's length cap, measured on the same bytes.
-    let mut length = crate::output_guardrails::StreamLimit::new(
-        &deps_state
-            .router
-            .load()
-            .config_for(&request.mapped_model)
-            .output_guardrails,
-        client,
     );
 
     let body = async_stream::stream! {
@@ -232,6 +225,8 @@ pub(crate) fn build_chat_pump(
             r.sniffer = Some(tw_dialect::usage::Sniffer::new());
             r.collector = Some(wire.collect.collector());
         }
+        // The hop that answered can have numbered a value of its own.
+        shaper.restore_with(&wire.ledger);
         let mut convert = wire.convert.as_ref().map(|s| s.stream());
         // Bedrock streams AWS eventstream frames, not SSE. Unframe them at
         // the door, so the sniffer, the collector and the converter all
@@ -260,15 +255,12 @@ pub(crate) fn build_chat_pump(
                         Some(c) => c.process(&chunk),
                         None => chunk.to_vec(),
                     };
-                    // A tool call the inspection stops, or the answer going
-                    // over the model's length cap: what came before still goes
-                    // out, then the refusal.
-                    let stop = inspector
-                        .as_mut()
-                        .and_then(|i| i.check(&client_bytes))
-                        .or_else(|| length.as_mut().and_then(|l| l.check(&client_bytes)));
+                    let out = shaper.process(&client_bytes);
+                    // A tool call the inspection stops: what came before
+                    // still goes out, then the refusal.
+                    let stop = inspector.as_mut().and_then(|i| i.check(&out));
                     if let Some((err, safe)) = stop {
-                        yield Ok(Bytes::from(cut(&mut shaper, convert.as_mut(), client, &client_bytes[..safe], &err)));
+                        yield Ok(Bytes::from(cut(&shaper, convert.as_mut(), client, &out[..safe], &err)));
                         if let Some(tx) = done_tx.take() {
                             let _ = tx.send(StreamOutcome::UpstreamError {
                                 error_type: err.error_tag().to_string(),
@@ -278,7 +270,6 @@ pub(crate) fn build_chat_pump(
                         }
                         return;
                     }
-                    let out = shaper.process(&client_bytes);
                     if !out.is_empty() {
                         yield Ok(Bytes::from(out));
                     }
@@ -306,14 +297,13 @@ pub(crate) fn build_chat_pump(
             }
         }
         let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
+        let mut out = shaper.process(&tail);
+        out.extend(shaper.finish());
         // The converter's last bytes can complete a tool call (the block's
         // stop), so they are inspected too.
-        let stop = inspector
-            .as_mut()
-            .and_then(|i| i.check(&tail))
-            .or_else(|| length.as_mut().and_then(|l| l.check(&tail)));
+        let stop = inspector.as_mut().and_then(|i| i.check(&out));
         if let Some((err, safe)) = stop {
-            yield Ok(Bytes::from(cut(&mut shaper, None, client, &tail[..safe], &err)));
+            yield Ok(Bytes::from(cut(&shaper, None, client, &out[..safe], &err)));
             if let Some(tx) = done_tx.take() {
                 let _ = tx.send(StreamOutcome::UpstreamError {
                     error_type: err.error_tag().to_string(),
@@ -323,8 +313,6 @@ pub(crate) fn build_chat_pump(
             }
             return;
         }
-        let mut out = shaper.process(&tail);
-        out.extend(shaper.finish());
         if !out.is_empty() {
             yield Ok(Bytes::from(out));
         }
@@ -431,28 +419,28 @@ fn as_json_array(
     }
 }
 
-/// End a stream at a tool call the inspection stops, or at the frame that
-/// takes the answer over its length cap: what came before it still goes
-/// out, then the refusal, in the caller's format. A Gemini caller reading
-/// a JSON array gets the refusal as the array's last element, then `]`.
+/// End a stream at a tool call the inspection stops: what came before it
+/// (`safe`, already shaped) still goes out, then the refusal, in the
+/// caller's format. A Gemini caller reading a JSON array gets the refusal
+/// as the array's last element, then `]`.
 ///
 /// An incomplete tool call cannot be executed, so the client is left with
-/// nothing it can run.
+/// nothing it can run. Nothing from the frame that matched on goes out —
+/// not even text the restorer was still holding back.
 fn cut(
-    shaper: &mut StreamShaper,
+    shaper: &StreamShaper,
     convert: Option<&mut tw_dialect::convert::StreamConverter>,
     client: Dialect,
     safe: &[u8],
     err: &crate::error::GatewayError,
 ) -> Vec<u8> {
     let message = err.to_string();
-    let mut out = shaper.process(safe);
     let refusal = match convert {
         Some(c) => c.fail(&message),
         None => error_frame(client, err.status_code(), &message),
     };
-    out.extend(shaper.process(&refusal));
-    out.extend(shaper.finish());
+    let mut out = safe.to_vec();
+    out.extend(shaper.rename(&refusal));
     out
 }
 
@@ -630,7 +618,7 @@ impl Surface for ChatCompletionSurface {
         };
         let body_capture = prepare_body_capture(
             &deps.state.dynamic_config,
-            &deps.pii_redactor,
+            &deps.guards.redaction,
             &deps.state.blob_store,
             &deps.request.trace_id,
             &deps.request.request_for_audit,

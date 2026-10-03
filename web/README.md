@@ -118,10 +118,22 @@ Shown on first run when no users exist. Guides admin through:
 - **General** — System info + site name
 - **Auth** — JWT TTLs, signature parameters
 - **Gateway** — Cache TTL, timeouts
-- **Security** — Content filter rules, PII redactor patterns
+- **Security** — Client IP source, and whether rate limits fail closed without Redis
 - **Budget** — Alert thresholds, webhook URL
 - **API Keys** — Default expiry, rotation, inactivity policies
 - **Data** — Usage/audit log retention periods
+
+### Content Security (`/gateway/security`)
+The three request guards, one tab each — outbound redaction, tool-call
+inspection and the content filter:
+- Mode: off / observe / the guard's third mode (replace, cut off, enforce)
+- Every rule, built-in and custom, with what it matches and what it does
+  (content rules: refuse, delete or record only; redaction rules: the
+  `<<TW_LABEL_n>>` placeholder a match becomes)
+- Custom rules (content rules can match code points), a sample tried
+  against one rule or the whole guard
+- Each change is written as the guard's whole policy under its
+  `security.*` settings key; the rules are read from `GET /api/admin/security`
 
 ### API Keys (`/gateway/api-keys`)
 Full lifecycle management:

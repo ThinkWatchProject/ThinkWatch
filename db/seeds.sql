@@ -82,28 +82,15 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('security.client_ip_source',       '"connection"',    'security', 'Client IP source: "connection", "xff", or "x-real-ip"'),
 ('security.client_ip_xff_position', '"left"',   'security', 'XFF pick direction: "left" (first) or "right" (last)'),
 ('security.client_ip_xff_depth',    '1',        'security', 'Position depth (1-based) from chosen XFF direction'),
-('security.content_filter_patterns', '[
-    {"name": "Ignore Previous Instructions", "pattern": "ignore previous instructions", "match_type": "contains", "action": "block"},
-    {"name": "Ignore All Previous",          "pattern": "ignore all previous",          "match_type": "contains", "action": "block"},
-    {"name": "Disregard Instructions",       "pattern": "disregard your instructions",  "match_type": "contains", "action": "block"},
-    {"name": "Jailbreak",                    "pattern": "jailbreak",                    "match_type": "contains", "action": "block"},
-    {"name": "DAN",                          "pattern": " dan ",                        "match_type": "contains", "action": "block"},
-    {"name": "Developer Mode",               "pattern": "developer mode",               "match_type": "contains", "action": "block"},
-    {"name": "Persona Manipulation",         "pattern": "you are now",                  "match_type": "contains", "action": "warn"},
-    {"name": "Act As",                       "pattern": "act as",                       "match_type": "contains", "action": "warn"},
-    {"name": "System Prompt Extraction",     "pattern": "system prompt",                "match_type": "contains", "action": "warn"},
-    {"name": "Reveal Instructions",          "pattern": "reveal your instructions",     "match_type": "contains", "action": "warn"}
-]', 'security', 'Content filter rules (JSON array of {name, pattern, match_type, action})'),
-('security.pii_redactor_patterns', '[
-    {"name": "email",       "regex": "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",           "placeholder_prefix": "EMAIL"},
-    {"name": "id_card_cn",  "regex": "\\b\\d{17}[\\dXx]\\b",                                       "placeholder_prefix": "ID"},
-    {"name": "credit_card", "regex": "\\b\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}\\b",        "placeholder_prefix": "CARD"},
-    {"name": "phone_cn",    "regex": "1[3-9]\\d{9}",                                                "placeholder_prefix": "PHONE"},
-    {"name": "phone_us",    "regex": "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b",                          "placeholder_prefix": "PHONE"},
-    {"name": "ipv4",        "regex": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",             "placeholder_prefix": "IP"}
-]', 'security', 'PII redactor patterns (JSON array)'),
-('security.hidden_text', '"warn"', 'security', 'What a request carrying hidden characters (Unicode tag characters, bidi overrides) gets: off, log, warn or block'),
-('security.tool_inspection', '{"mode": "observe", "disabled": [], "actions": {}, "custom": []}', 'security', 'Tool-call inspection: mode, built-in rules switched off or re-graded, custom rules (JSON object)'),
+-- The request guards: one policy object each, the shape thinkwatch-core's
+-- tw_guard::policy defines. `{}` is the factory policy (observe mode:
+-- every hit is recorded, nothing on the wire changes; the built-in rules
+-- at their factory switches and actions). A deployment upgraded from the
+-- settings these replace has them converted at boot instead (see
+-- crates/common/src/guard_policy/legacy.rs).
+('security.redact', '{}', 'security', 'Outbound redaction: mode, built-in rules switched on or off, custom rules (JSON object)'),
+('security.inspect_tools', '{}', 'security', 'Tool-call inspection: mode, built-in rules switched off or re-graded, custom rules (JSON object)'),
+('security.content', '{}', 'security', 'Content filter: mode, built-in rules switched on or off or re-graded, custom rules (JSON object)'),
 ('security.budget_alert_webhook_url', '""', 'security', 'Webhook URL for budget cap alerts'),
 ('security.trusted_proxies', '[]', 'security', 'JSON array of trusted reverse proxy IPs')
 ON CONFLICT (key) DO NOTHING;

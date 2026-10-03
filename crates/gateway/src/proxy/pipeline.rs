@@ -115,6 +115,7 @@ pub(super) fn launch_stream_pump(
         client,
         client_sse,
         deps.state.clone(),
+        &deps.guards,
         &deps.request,
         &deps.route.provider_name,
     );
@@ -128,8 +129,8 @@ pub(super) fn launch_stream_pump(
 /// Drive a whole answer through the post-invoke pipeline — cache fill,
 /// audit, breaker, budget debit — and hand it back.
 ///
-/// PII restoration is the caller's job: the hooks see, and the cache
-/// keeps, the placeholder form.
+/// Restoring redacted values is the caller's job: the hooks see, and the
+/// cache keeps, the placeholder form.
 pub(super) async fn run_buffered_post_invoke(
     deps: &ChatPostInvokeDeps,
     completed: Completed,

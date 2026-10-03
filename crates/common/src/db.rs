@@ -41,7 +41,10 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<PgPool> {
 ///
 /// What this can't do: column rename, type narrowing, DROP COLUMN,
 /// data backfills. Those need an explicit one-off SQL kept in
-/// `db/release_migrations/` and applied by hand.
+/// `db/release_migrations/` and applied by hand — or, when an upgrade has
+/// to carry them out by itself, a conversion that runs here in one
+/// transaction and finds nothing left to do on the next boot (the guard
+/// settings, [`crate::guard_policy::legacy`]).
 pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
     let schema = include_str!("../../../db/schema.sql");
     sqlx::raw_sql(schema)
@@ -53,6 +56,9 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
         .execute(pool)
         .await
         .map_err(|e| anyhow::anyhow!("apply db/seeds.sql: {e}"))?;
+    crate::guard_policy::legacy::upgrade(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("convert the previous guard settings: {e}"))?;
     tracing::info!("Database schema + seeds applied");
     Ok(())
 }

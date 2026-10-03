@@ -38,12 +38,12 @@
 ## Highlights
 
 - **MCP tool calls run as the real user.** Each user connects their own GitHub, Notion, Linear, Slack or Atlassian account through OAuth or a personal token, so the upstream's own audit log shows who acted. Tokens are encrypted at rest, tool lists are cached per user, and each tool can be granted per role and per API key.
-- **Security guards on every request.** PII such as emails, phone numbers and card numbers is replaced with placeholders before a request goes upstream and restored in the answer, including streamed ones. Tool calls in model responses are checked against rules for dangerous commands, and hidden Unicode characters and prompt-injection phrases in requests are logged or refused.
+- **Security guards on every request.** Outbound redaction replaces credentials and personal data anywhere in a request with placeholders such as `<<TW_EMAIL_1>>` before it goes upstream, and restores them in the answer, streamed ones included. Tool-call inspection checks the tool calls in each response for dangerous commands, and the content filter looks for prompt-injection phrases and hidden characters in what the caller sent, then refuses the request, deletes them or records them.
 - **Identity from the organization's directory.** Sign-in works through any OIDC provider (Zitadel, Okta, Azure AD and others), with optional TOTP. Five built-in roles, from Super Admin to Viewer, and custom roles decide who may use which models, tools and admin pages.
 - **One key for AI and MCP.** Users receive `tw-` virtual keys that can be scoped to the AI gateway, the MCP gateway or both. Keys are stored only as hashes and rotate with a grace period.
 - **Rate limits and budgets.** Sliding windows from one minute to one week limit requests or tokens, and daily, weekly or monthly budgets cap spending. Both attach to users, API keys or roles, and rate limits apply to MCP tool calls as well as model requests.
 - **Cost accounting that finance can use.** Spend is reported by model, user, provider and cost center, with CSV chargeback reports and a month-end forecast. Per-model weights make expensive models count for more against the same quota.
-- **Audit trail in ClickHouse.** Every model request and tool call is recorded with user, parameters, response, latency and errors, and request bodies can be PII-redacted before storage (off by default). Events can be forwarded to a SIEM over Syslog, Kafka (through a REST proxy) or signed webhooks.
+- **Audit trail in ClickHouse.** Every model request and tool call is recorded with user, parameters, response, latency and errors, and captured bodies can be redacted with the outbound redaction rules before storage (off by default). Events can be forwarded to a SIEM over Syslog, Kafka (through a REST proxy) or signed webhooks.
 - **One endpoint for every client.** OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini requests are served on one port and converted to whatever the upstream speaks. Routing spreads traffic by weight, latency or health, and a circuit breaker takes failing upstreams out of rotation.
 
 ## Quick start
@@ -82,9 +82,12 @@ The gateway (port `3000`) is the only part that clients need to reach. The conso
 - Responses from servers that use per-user credentials are cached per user and account, never shared.
 
 **Security guards**
-- Tool-call inspection starts in observe mode: hits are recorded, and nothing is cut off until enforce mode is chosen. Built-in rules can be switched off or re-graded, and custom rules added.
-- Hidden-character detection defaults to warn; it covers Unicode tag characters and bidirectional overrides in the caller's messages and tool results.
-- The content filter ships with rules for common prompt-injection phrases, each set to block, warn or log. PII patterns are editable in the console.
+- There are three guards, each with three modes: off, observe, and one named for what it does — replace (outbound redaction), cut off (tool-call inspection) and enforce (content filter). A new installation starts all three in observe mode: hits go to the audit log and nothing is changed until a guard is switched to its third mode.
+- Every rule is listed on the console's security page, built-in and custom. Built-in rules can be switched on or off, tool-call and content rules can take another action, custom rules can be added, and a sample can be tried against one rule or a whole guard first.
+- Outbound redaction searches the whole request, system prompt and earlier answers included, but not base64 payloads. A match becomes `<<TW_LABEL_n>>` — `SECRET` for credentials, `ID_NUMBER`, `CARD_NUMBER`, `EMAIL` and `PHONE` for personal data, a label of its own for a custom rule — and is restored in the answer. E-mail addresses and phone numbers ship switched off.
+- A content rule matches a phrase, a regular expression or code points (`U+200B`, `U+E0000–U+E007F`), and either refuses the request, deletes what it matched from the caller's messages and tool results, or records only. Hidden characters are content rules: Unicode tag characters and bidirectional controls ship on, zero-width and private-use characters off.
+- A tool-call rule cuts the response at the call or records it. Besides the dangerous-command rules, two built-in rules catch a credential sent to an unknown host and a local file uploaded to an external host.
+- A model's maximum output tokens, set on the Models page, caps `max_tokens` on every request to that model; it replaces the old output length guardrail.
 
 **Limits and budgets**
 - Request-count limits are checked before the request; token limits and budgets are counted after the response, so one request can cross a budget before the next is refused.

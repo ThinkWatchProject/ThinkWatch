@@ -1,6 +1,6 @@
 /// Shared types, constants, and pure helpers for the Models page.
 /// Pulled out of the route's `index.tsx` so subcomponents
-/// (`ModelRowCell`, `CostPreview`, `OutputGuardrailsCard`, …) can
+/// (`ModelRowCell`, `CostPreview`, `ModelEditorDialog`, …) can
 /// reference them without the whole route having to re-export them.
 
 // Decimal fields come back from sqlx as strings (rust_decimal's default
@@ -32,33 +32,27 @@ export interface ModelRow {
   routing_strategy?: RoutingStrategy | null;
   affinity_mode?: AffinityMode | null;
   affinity_ttl_secs?: number | null;
-  /// Raw guardrails JSON from the server — discriminator-tagged
-  /// objects. Decoded into known variants at edit-open via
-  /// `parseGuardrails`; today only `max_length` lands.
-  output_guardrails?: OutputGuardrail[] | null;
+  /// Most output tokens a request to this model may ask for: a larger
+  /// limit in the request is lowered to it, and a request without one
+  /// gets it when it is within the model family's default (32,000 for
+  /// Claude, 8,192 for others). null ⇒ no limit.
+  max_output_tokens?: number | null;
 }
 
-/// Output guardrail rule shape — discriminated on `type` to match
-/// the Rust `#[serde(tag = "type", rename_all = "snake_case")]`
-/// encoding in `crates/gateway/src/output_guardrails.rs`. Today only
-/// `max_length` lands; other variants stay TODO in the roadmap.
-export type OutputGuardrail = { type: 'max_length'; max_chars: number };
+/// Upper bound the form accepts for `max_output_tokens` — the largest
+/// value a Postgres `INTEGER` column holds.
+export const MAX_OUTPUT_TOKENS_CEILING = 2_147_483_647;
 
-export function parseGuardrails(
-  value: OutputGuardrail[] | null | undefined,
-): OutputGuardrail[] {
-  if (!Array.isArray(value)) return [];
-  // Filter to known variants — keeps the form state strongly typed so
-  // future additions (json_schema, toxicity) require an explicit branch.
-  return value.filter((g): g is OutputGuardrail => g?.type === 'max_length');
+/// Parses the "max output tokens" field: empty ⇒ null (no limit), a
+/// whole number from 1 to the ceiling ⇒ that number, anything else ⇒
+/// 'invalid'.
+export function parseMaxOutputTokens(raw: string): number | null | 'invalid' {
+  const v = raw.trim();
+  if (!v) return null;
+  if (!/^\d+$/.test(v)) return 'invalid';
+  const n = Number(v);
+  return n >= 1 && n <= MAX_OUTPUT_TOKENS_CEILING ? n : 'invalid';
 }
-
-/// Default for the inline add form. 4096 covers most chat-completion
-/// caps without surprising the admin who immediately saves.
-export const DEFAULT_MAX_CHARS = 4096;
-/// Mirrors the server-side ceiling in
-/// `crates/gateway/src/output_guardrails.rs::MAX_LENGTH_CAP_CEILING`.
-export const MAX_CHARS_CEILING = 1_000_000;
 
 export type RoutingStrategy = 'weighted' | 'latency' | 'health' | 'latency_health';
 export type AffinityMode = 'none' | 'provider' | 'route';
@@ -160,9 +154,8 @@ export interface ModelFormState {
   routing_strategy: '' | RoutingStrategy;
   affinity_mode: '' | AffinityMode;
   affinity_ttl_secs: string;
-  /// Per-model output guardrails. Replaced wholesale on submit
-  /// (PATCH array semantics on the server). Empty = no guardrails.
-  output_guardrails: OutputGuardrail[];
+  /// Empty string ⇒ no limit (stored as NULL).
+  max_output_tokens: string;
 }
 
 export interface RouteFormState {
@@ -189,7 +182,7 @@ export const emptyModelForm: ModelFormState = {
   routing_strategy: '',
   affinity_mode: '',
   affinity_ttl_secs: '',
-  output_guardrails: [],
+  max_output_tokens: '',
 };
 
 export const emptyRouteForm: RouteFormState = {

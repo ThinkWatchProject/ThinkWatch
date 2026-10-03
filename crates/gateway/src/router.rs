@@ -1,4 +1,3 @@
-use crate::output_guardrails::OutputGuardrail;
 use crate::protocol::UpstreamProtocol;
 use crate::strategy::RoutingStrategy;
 use std::collections::HashMap;
@@ -74,13 +73,11 @@ pub struct ModelRoutingConfig {
     pub strategy: Option<RoutingStrategy>,
     pub affinity_mode: Option<AffinityMode>,
     pub affinity_ttl_secs: Option<u32>,
-    /// Per-model output guardrails — applied to provider responses
-    /// before they reach the caller (see
-    /// `crate::output_guardrails::apply_output_guardrails`). Empty ⇒
-    /// no guardrails (the common case). Carried alongside the
-    /// strategy override so the proxy reads everything model-scoped
-    /// in one HashMap lookup.
-    pub output_guardrails: Vec<OutputGuardrail>,
+    /// The most output tokens a request to this model may ask for
+    /// (`models.max_output_tokens`): see `proxy::generate`. `None` ⇒ no
+    /// limit. Carried alongside the routing overrides so the proxy reads
+    /// everything model-scoped in one HashMap lookup.
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Affinity scope — see `proxy.rs` for the runtime semantics.
@@ -336,7 +333,7 @@ mod tests {
                 strategy: Some(RoutingStrategy::Latency),
                 affinity_mode: Some(AffinityMode::None),
                 affinity_ttl_secs: Some(60),
-                output_guardrails: Vec::new(),
+                max_output_tokens: None,
             },
         );
         let cfg = router.config_for("gpt-4o-mini");

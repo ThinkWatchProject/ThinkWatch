@@ -26,7 +26,8 @@ export const ROUTE_PERMISSIONS: Record<string, string | undefined> = {
   // --- AI Gateway ---
   '/gateway/providers': 'providers:read',
   '/gateway/models': 'models:read',
-  '/gateway/security': 'content_filter:read',
+  // Reading the guards' policies is reading settings (GET /api/admin/security).
+  '/gateway/security': 'settings:read',
 
   // --- MCP Gateway ---
   '/mcp/servers': 'mcp_servers:read',

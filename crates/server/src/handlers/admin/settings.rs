@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use think_watch_common::dynamic_config::{self, SettingEntry};
 use think_watch_common::errors::AppError;
+use think_watch_common::guard_policy;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -243,6 +244,12 @@ pub struct UpdateSettingsRequest {
 }
 
 /// PATCH /api/admin/settings — update one or more settings.
+///
+/// Changing a setting takes `settings:write`. A request guard's policy
+/// (`security.redact`, `security.inspect_tools`, `security.content`) takes
+/// the guard's own permission as well — `pii_redactor:write` for redaction,
+/// `content_filter:write` for the other two — the two checks it always
+/// had: the server's, and the console's.
 #[utoipa::path(
     patch,
     path = "/api/admin/settings",
@@ -260,9 +267,21 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user
-        .require_global_permission(&state.db, "settings:write")
-        .await?;
+    let mut permissions: Vec<&'static str> = std::iter::once("settings:write")
+        .chain(
+            req.settings
+                .keys()
+                .filter_map(|key| guard_policy::guard_of(key))
+                .map(super::security::write_permission),
+        )
+        .collect();
+    permissions.sort_unstable();
+    permissions.dedup();
+    for permission in permissions {
+        auth_user
+            .require_global_permission(&state.db, permission)
+            .await?;
+    }
     // Validate each setting
     for (key, value) in &req.settings {
         validate_setting(key, value)?;
@@ -284,22 +303,14 @@ pub async fn update_settings(
         .await
         .map_err(AppError::Internal)?;
 
-    // Hot-reload content filter / PII redactor immediately on this instance
-    // (other instances pick it up via the Redis Pub/Sub subscriber).
+    // Hot-reload the request guards immediately on this instance (other
+    // instances pick it up via the Redis Pub/Sub subscriber).
     if req
         .settings
-        .contains_key("security.content_filter_patterns")
+        .keys()
+        .any(|key| guard_policy::guard_of(key).is_some())
     {
-        let cf = crate::app::load_content_filter(&state.dynamic_config).await;
-        state.content_filter.store(std::sync::Arc::new(cf));
-    }
-    if req.settings.contains_key("security.pii_redactor_patterns") {
-        let pii = crate::app::load_pii_redactor(&state.dynamic_config).await;
-        state.pii_redactor.store(std::sync::Arc::new(pii));
-    }
-    if req.settings.contains_key("security.tool_inspection") {
-        let tools = crate::app::load_tool_inspection(&state.dynamic_config).await;
-        state.tool_inspection.store(std::sync::Arc::new(tools));
+        crate::app::reload_guards(&state).await;
     }
 
     // Apply ClickHouse TTL changes for any retention setting that was updated.
@@ -592,141 +603,11 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        // Content filter rules: each rule requires pattern, match_type, action, and name.
-        "security.content_filter_patterns" => {
-            let arr = value
-                .as_array()
-                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a JSON array")))?;
-            if arr.len() > 500 {
-                return Err(AppError::BadRequest(
-                    "Content filter rules: max 500 rules".into(),
-                ));
-            }
-            for (i, item) in arr.iter().enumerate() {
-                let pattern = item
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        AppError::BadRequest(format!("Rule {i}: missing 'pattern' string"))
-                    })?;
-                if pattern.len() > 500 {
-                    return Err(AppError::BadRequest(format!(
-                        "Rule {i}: pattern max 500 characters"
-                    )));
-                }
-                let match_type =
-                    item.get("match_type")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            AppError::BadRequest(format!("Rule {i}: missing 'match_type' field"))
-                        })?;
-                if !["contains", "regex"].contains(&match_type) {
-                    return Err(AppError::BadRequest(format!(
-                        "Rule {i}: match_type must be 'contains' or 'regex'"
-                    )));
-                }
-                let action = item.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AppError::BadRequest(format!("Rule {i}: missing 'action' field"))
-                })?;
-                if !["block", "warn", "log"].contains(&action) {
-                    return Err(AppError::BadRequest(format!(
-                        "Rule {i}: action must be 'block', 'warn', or 'log'"
-                    )));
-                }
-                let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                    return Err(AppError::BadRequest(format!(
-                        "Rule {i}: missing 'name' field"
-                    )));
-                };
-                // The same compile the gateway runs: an empty pattern, a bad
-                // or oversized regex is refused here rather than skipped there.
-                use tw_guard::content::{Action, Match, Rule, RuleInput};
-                if let (Some(matching), Some(action)) =
-                    (Match::from_slug(match_type), Action::from_slug(action))
-                    && let Err(e) = Rule::new(RuleInput {
-                        id: name,
-                        name,
-                        custom: true,
-                        pattern,
-                        matching,
-                        action,
-                    })
-                {
-                    return Err(AppError::BadRequest(format!("Rule {i}: {}", e.detail)));
-                }
-            }
-        }
-
-        "security.pii_redactor_patterns" => {
-            let arr = value
-                .as_array()
-                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a JSON array")))?;
-            if arr.len() > 100 {
-                return Err(AppError::BadRequest(
-                    "PII redactor patterns: max 100 rules".into(),
-                ));
-            }
-            for (i, item) in arr.iter().enumerate() {
-                let regex_str = item.get("regex").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AppError::BadRequest(format!("PII pattern {i}: missing 'regex' string"))
-                })?;
-                if regex_str.len() > 1000 {
-                    return Err(AppError::BadRequest(format!(
-                        "PII pattern {i}: regex max 1000 characters"
-                    )));
-                }
-                // Compiled exactly as the redactor will compile it, bounds
-                // included, so what is saved is what runs.
-                if tw_guard::redact::rules::compile("", regex_str).is_err() {
-                    return Err(AppError::BadRequest(format!(
-                        "PII pattern {i}: invalid or oversized regex"
-                    )));
-                }
-                // The prefix lands inside the placeholder (`{{EMAIL_1}}`);
-                // a brace or a space there would make one that can never be
-                // told apart from ordinary text.
-                let prefix = item
-                    .get("placeholder_prefix")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        AppError::BadRequest(format!(
-                            "PII pattern {i}: missing 'placeholder_prefix'"
-                        ))
-                    })?;
-                if prefix.is_empty()
-                    || prefix.len() > 32
-                    || !prefix
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
-                    return Err(AppError::BadRequest(format!(
-                        "PII pattern {i}: 'placeholder_prefix' must be 1-32 letters, digits or underscores"
-                    )));
-                }
-                if item.get("name").and_then(|v| v.as_str()).is_none() {
-                    return Err(AppError::BadRequest(format!(
-                        "PII pattern {i}: missing 'name'"
-                    )));
-                }
-            }
-        }
-
-        "security.hidden_text" => {
-            serde_json::from_value::<think_watch_gateway::hidden_text::Action>(value.clone())
-                .map_err(|_| {
-                    AppError::BadRequest(format!(
-                        "{key} must be one of \"off\", \"log\", \"warn\", \"block\""
-                    ))
-                })?;
-        }
-
-        "security.tool_inspection" => {
-            let cfg: think_watch_gateway::tool_inspection::ToolInspectionConfig =
-                serde_json::from_value(value.clone())
-                    .map_err(|e| AppError::BadRequest(format!("{key}: {e}")))?;
-            if let Some(problem) = cfg.problem() {
-                return Err(AppError::BadRequest(format!("{key}: {problem}")));
-            }
+        // The request guards: one policy object each, checked by
+        // thinkwatch-core's own validation (`tw_guard::policy`).
+        "security.redact" | "security.inspect_tools" | "security.content" => {
+            let guard = guard_policy::guard_of(key).expect("one of the three guard keys");
+            guard_policy::validate(guard, value).map_err(AppError::BadRequest)?;
         }
 
         "security.budget_alert_webhook_url" => {
@@ -873,67 +754,62 @@ mod tests {
     }
 
     #[test]
-    fn validates_content_filter_patterns() {
-        // Empty array is valid
-        assert!(validate_setting("security.content_filter_patterns", &json!([])).is_ok());
-        // Valid rule
+    fn validates_the_guard_policies_with_the_shared_check() {
+        for key in [
+            "security.redact",
+            "security.inspect_tools",
+            "security.content",
+        ] {
+            assert!(validate_setting(key, &json!({})).is_ok(), "{key}");
+            assert!(
+                validate_setting(key, &json!({"mode": "enforce"})).is_ok(),
+                "{key}"
+            );
+            assert!(
+                validate_setting(key, &json!({"mode": "block"})).is_err(),
+                "{key}"
+            );
+            assert!(validate_setting(key, &json!([])).is_err(), "{key}");
+        }
         assert!(
             validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "test", "action": "block", "name": "Test", "match_type": "contains"}])
+                "security.content",
+                &json!({"custom": [{"name": "zw", "pattern": "U+200B", "match": "codepoints", "action": "strip"}]})
             )
             .is_ok()
         );
-        // Regex match_type with valid pattern
+        let e = validate_setting(
+            "security.content",
+            &json!({"custom": [{"name": "a", "pattern": "[x", "match": "regex"}]}),
+        )
+        .unwrap_err();
         assert!(
-            validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "\\d{4}", "action": "warn", "name": "Test", "match_type": "regex"}])
-            )
-            .is_ok()
+            e.to_string().contains("not a valid regular expression"),
+            "{e}"
         );
-        // Regex match_type with invalid regex → rejected
         assert!(
             validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "[invalid((", "action": "block", "name": "T", "match_type": "regex"}])
-            )
-            .is_err()
-        );
-        // Missing match_type → rejected
-        assert!(
-            validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "test", "action": "block", "name": "T"}])
+                "security.redact",
+                &json!({"custom": [{"name": "a", "pattern": "x", "label": "a b"}]})
             )
             .is_err()
         );
-        // Missing action → rejected
         assert!(
             validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "test", "name": "T", "match_type": "contains"}])
+                "security.inspect_tools",
+                &json!({"actions": {"nope": "cut"}})
             )
             .is_err()
         );
-        // Missing name → rejected
-        assert!(
-            validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "test", "action": "block", "match_type": "contains"}])
-            )
-            .is_err()
-        );
-        // Not an array → rejected
-        assert!(validate_setting("security.content_filter_patterns", &json!("not array")).is_err());
-        // Invalid action value → rejected
-        assert!(
-            validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "test", "action": "invalid", "name": "x", "match_type": "contains"}])
-            )
-            .is_err()
-        );
+        // The settings these replaced are gone.
+        for old in [
+            "security.content_filter_patterns",
+            "security.pii_redactor_patterns",
+            "security.hidden_text",
+            "security.tool_inspection",
+        ] {
+            assert!(validate_setting(old, &json!([])).is_err(), "{old}");
+        }
     }
 
     #[test]

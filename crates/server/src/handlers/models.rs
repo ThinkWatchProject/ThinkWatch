@@ -20,7 +20,6 @@ use uuid::Uuid;
 
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Model;
-use think_watch_gateway::output_guardrails::{MAX_LENGTH_CAP_CEILING, OutputGuardrail};
 
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
@@ -120,12 +119,15 @@ pub struct CreateModelRequest {
     /// Free-form admin tags. NULL = no tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Optional per-model output guardrails. NULL/missing = empty
-    /// list. See [`OutputGuardrail`] for the variant set; the
-    /// gateway crate is the source of truth.
+    /// The most output tokens a request to this model may ask for, 1 to
+    /// 2147483647. A request asking for more is lowered to it, one asking
+    /// for nothing gets it. NULL/missing = no limit.
     #[serde(default)]
-    #[schema(value_type = Vec<serde_json::Value>)]
-    pub output_guardrails: Option<Vec<OutputGuardrail>>,
+    pub max_output_tokens: Option<i64>,
+    /// Removed: see [`refuse_output_guardrails`].
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<serde_json::Value>>, deprecated)]
+    pub output_guardrails: Option<Value>,
 }
 
 #[utoipa::path(
@@ -171,10 +173,8 @@ pub async fn create_model(
         req.affinity_mode.as_deref(),
         req.affinity_ttl_secs,
     )?;
-    let guardrails = req.output_guardrails.unwrap_or_default();
-    validate_output_guardrails(&guardrails)?;
-    let guardrails_json = serde_json::to_value(&guardrails)
-        .map_err(|e| AppError::BadRequest(format!("failed to serialize output_guardrails: {e}")))?;
+    refuse_output_guardrails(req.output_guardrails.as_ref())?;
+    let max_output_tokens = max_output_tokens(req.max_output_tokens)?;
 
     let model = repo::insert(
         &state.db,
@@ -187,7 +187,7 @@ pub async fn create_model(
             affinity_mode: req.affinity_mode.as_deref(),
             affinity_ttl_secs: req.affinity_ttl_secs,
             tags: req.tags.as_deref(),
-            output_guardrails: &guardrails_json,
+            max_output_tokens,
             cache_weights: cache,
         },
     )
@@ -206,6 +206,12 @@ pub async fn create_model(
     // limits engine and cost tracker run on stale cache misses until
     // the 5-min TTL elapses.
     state.weight_cache.invalidate_all().await;
+
+    // The output cap is read from the router's per-model config; a route
+    // naming this model id may already exist.
+    if max_output_tokens.is_some() {
+        crate::app::rebuild_gateway_router(&state).await;
+    }
 
     Ok(Json(model))
 }
@@ -243,35 +249,47 @@ pub struct UpdateModelRequest {
     pub tags: Option<Option<Vec<String>>>,
     /// Model-level kill switch. Absent = unchanged.
     pub enabled: Option<bool>,
-    /// PATCH-clearable output guardrails. Absent = unchanged, JSON
-    /// `null` = clear (no guardrails), array = replace the whole
-    /// list. Validation runs over the supplied list before persisting.
+    /// PATCH-clearable output-token cap. Absent = unchanged, JSON `null`
+    /// = clear (no limit), number (1 to 2147483647) = set.
     #[serde(default, deserialize_with = "deserialize_some")]
-    #[schema(value_type = Option<Vec<serde_json::Value>>)]
-    pub output_guardrails: Option<Option<Vec<OutputGuardrail>>>,
+    #[schema(value_type = Option<i64>)]
+    pub max_output_tokens: Option<Option<i64>>,
+    /// Removed: see [`refuse_output_guardrails`].
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<serde_json::Value>>, deprecated)]
+    pub output_guardrails: Option<Value>,
 }
 
-/// Validate each guardrail's parameters before they hit the DB.
-/// Today only `MaxLength` is wired; future variants land here as
-/// their own match arm. Rejection short-circuits with a 400 so the
-/// admin sees a useful message rather than the row landing and then
-/// blowing up at request time.
-pub(crate) fn validate_output_guardrails(rules: &[OutputGuardrail]) -> Result<(), AppError> {
-    for rule in rules {
-        match rule {
-            OutputGuardrail::MaxLength { max_chars } => {
-                // 0 is a config bug (every response is rejected). The
-                // ceiling caps absurd values so the column can't be
-                // used as a "guardrail off-but-not-removed" toggle.
-                if *max_chars == 0 || *max_chars > MAX_LENGTH_CAP_CEILING {
-                    return Err(AppError::BadRequest(format!(
-                        "output_guardrails: max_length.max_chars must be 1..={MAX_LENGTH_CAP_CEILING}"
-                    )));
-                }
-            }
-        }
+/// `output_guardrails`, the length cap measured on the answer, is gone
+/// (`max_output_tokens` caps the request instead). A client still sending
+/// one is refused rather than ignored: ignored, it would believe answers
+/// are still capped. An empty list or `null` asks for nothing and passes.
+pub(crate) fn refuse_output_guardrails(value: Option<&Value>) -> Result<(), AppError> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(rules)) if rules.is_empty() => Ok(()),
+        Some(_) => Err(AppError::BadRequest(
+            "output_guardrails was removed: answers are no longer measured. Set \
+             max_output_tokens instead (a cap of N bytes is about N / 4 tokens)."
+                .into(),
+        )),
     }
-    Ok(())
+}
+
+/// A model's output-token cap as stored: 1 to 2147483647 (the column is a
+/// Postgres `INTEGER`), or none. Zero would refuse every answer and a
+/// negative cap means nothing, so both are a 400 rather than a row the
+/// gateway cannot use.
+pub(crate) fn max_output_tokens(n: Option<i64>) -> Result<Option<i32>, AppError> {
+    n.map(|n| {
+        i32::try_from(n).ok().filter(|n| *n > 0).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "max_output_tokens must be between 1 and {}",
+                i32::MAX
+            ))
+        })
+    })
+    .transpose()
 }
 
 /// Cache weights may be zero (an upstream that does not bill cache
@@ -379,17 +397,10 @@ pub async fn update_model(
         None => existing.tags.clone(),
         Some(inner) => inner.clone(),
     };
-    // Guardrails PATCH: absent ⇒ keep existing JSON as-is; Some(None)
-    // ⇒ clear (empty list); Some(Some(rules)) ⇒ validate + replace.
-    let new_guardrails_json: serde_json::Value = match &req.output_guardrails {
-        None => existing.output_guardrails.clone(),
-        Some(None) => serde_json::Value::Array(Vec::new()),
-        Some(Some(rules)) => {
-            validate_output_guardrails(rules)?;
-            serde_json::to_value(rules).map_err(|e| {
-                AppError::BadRequest(format!("failed to serialize output_guardrails: {e}"))
-            })?
-        }
+    refuse_output_guardrails(req.output_guardrails.as_ref())?;
+    let new_max_output_tokens: Option<i32> = match req.max_output_tokens {
+        None => existing.max_output_tokens,
+        Some(inner) => max_output_tokens(inner)?,
     };
     validate_routing_overrides(
         new_strategy.as_deref(),
@@ -411,7 +422,7 @@ pub async fn update_model(
             affinity_mode: new_affinity_mode.as_deref(),
             affinity_ttl_secs: new_affinity_ttl,
             tags: new_tags.as_deref(),
-            output_guardrails: &new_guardrails_json,
+            max_output_tokens: new_max_output_tokens,
             cache_weights: cache,
         },
         req.enabled.unwrap_or(existing.enabled),
@@ -1599,58 +1610,41 @@ mod tests {
     }
 
     #[test]
-    fn output_guardrails_empty_passes() {
-        // No rules = no constraints — trivially valid.
-        assert!(validate_output_guardrails(&[]).is_ok());
-    }
-
-    #[test]
-    fn output_guardrails_accepts_canonical_value() {
-        let rules = [OutputGuardrail::MaxLength { max_chars: 4096 }];
-        assert!(validate_output_guardrails(&rules).is_ok());
-    }
-
-    #[test]
-    fn output_guardrails_accepts_inclusive_endpoints() {
-        // 1 is the smallest sensible cap (one-character responses are
-        // pathological but not invalid); the ceiling is the documented
-        // upper bound. Lock both edges so a future tightening doesn't
-        // silently invalidate previously-stored configs.
-        assert!(validate_output_guardrails(&[OutputGuardrail::MaxLength { max_chars: 1 }]).is_ok());
-        assert!(
-            validate_output_guardrails(&[OutputGuardrail::MaxLength {
-                max_chars: MAX_LENGTH_CAP_CEILING,
-            }])
-            .is_ok()
+    fn max_output_tokens_is_a_positive_postgres_integer_or_none() {
+        assert_eq!(max_output_tokens(None).unwrap(), None);
+        assert_eq!(max_output_tokens(Some(1)).unwrap(), Some(1));
+        assert_eq!(
+            max_output_tokens(Some(i64::from(i32::MAX))).unwrap(),
+            Some(i32::MAX)
         );
+        // Zero would refuse every answer; past INTEGER the column cannot
+        // hold it.
+        for bad in [0, -1, i64::from(i32::MAX) + 1] {
+            assert!(max_output_tokens(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]
-    fn output_guardrails_rejects_zero_max_chars() {
-        // 0 would reject every response — that's a config bug, not a
-        // valid "guardrail off" toggle. Admins clear by removing the
-        // rule entirely.
-        let rules = [OutputGuardrail::MaxLength { max_chars: 0 }];
-        assert!(validate_output_guardrails(&rules).is_err());
+    fn a_length_cap_is_refused_not_ignored() {
+        assert!(refuse_output_guardrails(None).is_ok());
+        assert!(refuse_output_guardrails(Some(&Value::Null)).is_ok());
+        assert!(refuse_output_guardrails(Some(&serde_json::json!([]))).is_ok());
+        let e = refuse_output_guardrails(Some(
+            &serde_json::json!([{"type": "max_length", "max_chars": 4096}]),
+        ))
+        .unwrap_err();
+        assert!(e.to_string().contains("max_output_tokens"), "{e}");
     }
 
     #[test]
-    fn output_guardrails_rejects_above_ceiling() {
-        let rules = [OutputGuardrail::MaxLength {
-            max_chars: MAX_LENGTH_CAP_CEILING + 1,
-        }];
-        assert!(validate_output_guardrails(&rules).is_err());
-    }
-
-    #[test]
-    fn output_guardrails_rejects_any_bad_rule_in_list() {
-        // A list with one valid + one invalid rule must still fail —
-        // partial-acceptance would let admins store a misconfiguration
-        // and only notice at runtime.
-        let rules = [
-            OutputGuardrail::MaxLength { max_chars: 100 },
-            OutputGuardrail::MaxLength { max_chars: 0 },
-        ];
-        assert!(validate_output_guardrails(&rules).is_err());
+    fn a_patch_tells_absent_from_null() {
+        let absent: UpdateModelRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(absent.max_output_tokens, None);
+        let cleared: UpdateModelRequest =
+            serde_json::from_value(serde_json::json!({"max_output_tokens": null})).unwrap();
+        assert_eq!(cleared.max_output_tokens, Some(None));
+        let set: UpdateModelRequest =
+            serde_json::from_value(serde_json::json!({"max_output_tokens": 4096})).unwrap();
+        assert_eq!(set.max_output_tokens, Some(Some(4096)));
     }
 }

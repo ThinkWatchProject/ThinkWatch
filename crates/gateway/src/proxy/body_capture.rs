@@ -1,5 +1,5 @@
 //! Full request/response payload snapshots for the enterprise audit
-//! trail. Gating + truncation + optional PII redaction happens once
+//! trail. Gating + truncation + optional redaction happens once
 //! per request inside [`prepare_body_capture`]; the resulting struct is
 //! passed verbatim into every `emit_gateway_log*` call site so the
 //! success / streaming / error / cache-hit paths all carry the same
@@ -8,7 +8,7 @@
 //! Not shared with the desktop gateway, on purpose. That one hands
 //! bodies to a local store through a small bounded channel and keeps
 //! the first 256 KB of a response; this one is an audit trail — gated
-//! per field by dynamic config, PII-redacted on request, offloaded to
+//! per field by dynamic config, redacted on request, offloaded to
 //! object storage when oversize. The two answer different questions, and
 //! one abstraction over both would serve neither.
 //!
@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use crate::pii_redactor::PiiRedactor;
+use crate::redaction::Redaction;
 use think_watch_common::audit::BodyCaptureStatus;
 use think_watch_common::dynamic_config::DynamicConfig;
 
@@ -83,22 +83,23 @@ impl BodyCapture {
 /// Walk a request body + optional response through the
 /// dynamic-config-driven capture pipeline:
 ///   1. capture-enabled gate (per-field)
-///   2. optional PII redaction (when `audit.body_redact_pii` is on)
+///   2. optional redaction for storage (when `audit.body_redact_pii` is
+///      on), with the outbound redaction rules
 ///   3. blob-store offload when oversize and a backend is configured
 ///   4. byte-cap truncation when offload isn't available (fallback)
 ///
-/// `messages` is the post-PII-redaction set the gateway already
-/// passes to upstream; for the audit blob we want the version users
-/// actually authored. The caller hands us the original
-/// pre-redaction slice when both forms exist (`prepare_body_capture`
-/// itself does not know which was sent upstream).
+/// The request is the one the caller sent — after the content filter
+/// stripped anything, before outbound redaction swapped values for
+/// placeholders: the audit row is the record of what the user wrote. The
+/// response is the answer before placeholders are painted back, the form
+/// the cache keeps too.
 ///
 /// `trace_id` is woven into the offload object key so an operator
 /// browsing the bucket can correlate objects back to the audit row
 /// without a CH query.
 pub(crate) async fn prepare_body_capture(
     dynamic_config: &DynamicConfig,
-    pii_redactor: &PiiRedactor,
+    redaction: &Redaction,
     blob_store: &Arc<dyn think_watch_common::blob_store::BlobStore>,
     trace_id: &str,
     request: &[u8],
@@ -125,7 +126,7 @@ pub(crate) async fn prepare_body_capture(
                 raw,
                 max_bytes,
                 redact_pii,
-                pii_redactor,
+                redaction,
                 blob_store,
                 can_offload,
                 trace_id,
@@ -147,7 +148,7 @@ pub(crate) async fn prepare_body_capture(
                     raw,
                     max_bytes,
                     redact_pii,
-                    pii_redactor,
+                    redaction,
                     blob_store,
                     can_offload,
                     trace_id,
@@ -188,7 +189,7 @@ async fn process_body(
     mut s: String,
     max_bytes: usize,
     redact_pii: bool,
-    pii_redactor: &PiiRedactor,
+    redaction: &Redaction,
     blob_store: &Arc<dyn think_watch_common::blob_store::BlobStore>,
     can_offload: bool,
     trace_id: &str,
@@ -197,7 +198,7 @@ async fn process_body(
     offloaded_flag: &mut bool,
 ) -> String {
     if redact_pii {
-        s = pii_redactor.redact_blob(&s);
+        s = redaction.redact_blob(&s);
     }
     if s.len() <= max_bytes {
         return s;

@@ -4,19 +4,12 @@
 //! call shape (52 sites across app routes, openapi, main) keeps
 //! working without a sweep.
 
-mod content_filter;
 mod oidc;
 mod retention;
+mod security;
 mod settings;
 mod users;
 
-pub use content_filter::{
-    ContentFilterPreset, ContentFilterTestMatch, ContentFilterTestRequest,
-    ContentFilterTestResponse, PiiRedactorTestMatch, PiiRedactorTestRequest,
-    PiiRedactorTestResponse, ToolInspectionTestMatch, ToolInspectionTestRequest,
-    ToolInspectionTestResponse, ToolRuleView, list_content_filter_presets, list_tool_rules,
-    test_content_filter, test_pii_redactor, test_tool_inspection,
-};
 pub use oidc::{
     DisableOidcRequest, OidcActiveSnapshot, OidcDraftSnapshot, OidcSettingsResponse,
     OidcTestResult, StartOidcTestLoginResponse, UpdateOidcDraftRequest, activate_oidc_draft,
@@ -26,6 +19,7 @@ pub use oidc::{
 pub use retention::{
     check_body_retention_vs_lifecycle, reconcile_blob_lifecycle, reconcile_clickhouse_ttls,
 };
+pub use security::{get_security, test_security};
 pub use settings::{
     AuditConfigResponse, SystemInfo, UpdateSettingsRequest, get_all_settings, get_audit_settings,
     get_settings_by_category, get_system_settings, update_settings,
@@ -42,16 +36,13 @@ pub use users::{
 // point at `crate::handlers::admin::<fn>`) finding their companion
 // types after the submodule split.
 #[allow(unused_imports)]
-pub use content_filter::{
-    __path_list_content_filter_presets, __path_list_tool_rules, __path_test_content_filter,
-    __path_test_pii_redactor, __path_test_tool_inspection,
-};
-#[allow(unused_imports)]
 pub use oidc::{
     __path_activate_oidc_draft, __path_delete_oidc_draft, __path_discover_oidc_draft,
     __path_get_oidc_settings, __path_start_oidc_test_login, __path_toggle_oidc_active,
     __path_update_oidc_draft,
 };
+#[allow(unused_imports)]
+pub use security::{__path_get_security, __path_test_security};
 #[allow(unused_imports)]
 pub use settings::{
     __path_get_all_settings, __path_get_audit_settings, __path_get_settings_by_category,

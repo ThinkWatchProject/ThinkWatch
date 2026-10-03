@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.2.0"
+version = "3.0.0"
 edition = "2024"
 # Pin the MSRV to the first stable rustc that ships edition 2024 (1.85,
 # released 2025-02-20). Without this, contributors on older toolchains
@@ -70,10 +70,10 @@ opt-level = 3
 # never re-exported through a local shim. And the reverse: something only
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.55.0" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.55.0" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.55.0" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.55.0" }
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.59.0" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.59.0" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.59.0" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.59.0" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }

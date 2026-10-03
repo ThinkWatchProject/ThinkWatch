@@ -26,6 +26,13 @@ forces a future cleanup.
 | Rate limit       | 限流        | Sliding-window limits in `rate_limit_rules`. |
 | Webhook outbox   | Webhook 出箱 | Durable retry queue. |
 | Forwarder        | 转发器      | Audit log forwarder (syslog / Kafka / webhook). |
+| Outbound redaction | 出站脱敏  | Request guard: credentials and personal information become placeholders. Permission resource stays `pii_redactor`. |
+| Tool-call inspection | 工具调用审查 | Request guard on the tool calls an upstream returns. |
+| Content filter   | 内容过滤    | Request guard on user messages and tool results. |
+| Off / Observe    | 关闭 / 观察 | The first two guard modes. Observe only records hits. |
+| Replace / Cut off / Enforce | 替换 / 切断 / 处置 | Third guard mode, named for what it does: redaction, tool-call inspection, content filter. Not 拦截. |
+| Refuse / Delete / Record only | 拒绝 / 删除 / 仅记录 | What a content rule does in Enforce. Tool rules: Cut off / Record only. |
+| Placeholder      | 占位符      | What redaction puts in place of a value: `<<TW_LABEL_n>>`. |
 
 ## Style
 
