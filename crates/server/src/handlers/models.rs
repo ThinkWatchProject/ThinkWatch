@@ -124,6 +124,10 @@ pub struct CreateModelRequest {
     /// for nothing gets it. NULL/missing = no limit.
     #[serde(default)]
     pub max_output_tokens: Option<i64>,
+    /// Removed: see [`refuse_output_guardrails`].
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<serde_json::Value>>, deprecated)]
+    pub output_guardrails: Option<Value>,
 }
 
 #[utoipa::path(
@@ -169,6 +173,7 @@ pub async fn create_model(
         req.affinity_mode.as_deref(),
         req.affinity_ttl_secs,
     )?;
+    refuse_output_guardrails(req.output_guardrails.as_ref())?;
     let max_output_tokens = max_output_tokens(req.max_output_tokens)?;
 
     let model = repo::insert(
@@ -249,6 +254,26 @@ pub struct UpdateModelRequest {
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<i64>)]
     pub max_output_tokens: Option<Option<i64>>,
+    /// Removed: see [`refuse_output_guardrails`].
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<serde_json::Value>>, deprecated)]
+    pub output_guardrails: Option<Value>,
+}
+
+/// `output_guardrails`, the length cap measured on the answer, is gone
+/// (`max_output_tokens` caps the request instead). A client still sending
+/// one is refused rather than ignored: ignored, it would believe answers
+/// are still capped. An empty list or `null` asks for nothing and passes.
+pub(crate) fn refuse_output_guardrails(value: Option<&Value>) -> Result<(), AppError> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(rules)) if rules.is_empty() => Ok(()),
+        Some(_) => Err(AppError::BadRequest(
+            "output_guardrails was removed: answers are no longer measured. Set \
+             max_output_tokens instead (a cap of N bytes is about N / 4 tokens)."
+                .into(),
+        )),
+    }
 }
 
 /// A model's output-token cap as stored: 1 to 2147483647 (the column is a
@@ -372,6 +397,7 @@ pub async fn update_model(
         None => existing.tags.clone(),
         Some(inner) => inner.clone(),
     };
+    refuse_output_guardrails(req.output_guardrails.as_ref())?;
     let new_max_output_tokens: Option<i32> = match req.max_output_tokens {
         None => existing.max_output_tokens,
         Some(inner) => max_output_tokens(inner)?,
@@ -1596,6 +1622,18 @@ mod tests {
         for bad in [0, -1, i64::from(i32::MAX) + 1] {
             assert!(max_output_tokens(Some(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_length_cap_is_refused_not_ignored() {
+        assert!(refuse_output_guardrails(None).is_ok());
+        assert!(refuse_output_guardrails(Some(&Value::Null)).is_ok());
+        assert!(refuse_output_guardrails(Some(&serde_json::json!([]))).is_ok());
+        let e = refuse_output_guardrails(Some(
+            &serde_json::json!([{"type": "max_length", "max_chars": 4096}]),
+        ))
+        .unwrap_err();
+        assert!(e.to_string().contains("max_output_tokens"), "{e}");
     }
 
     #[test]

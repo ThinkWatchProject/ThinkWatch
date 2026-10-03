@@ -81,8 +81,19 @@ fn description(guard: Guard) -> &'static str {
     }
 }
 
-/// Convert whatever the old settings left behind. A no-op on a database
-/// that has none of them.
+/// The key that records that this database runs the unified guard
+/// settings: written once, by the first start of a version that has them —
+/// with what it converted, if there was anything to convert.
+pub const MARKER: &str = "security.legacy_converted";
+
+/// Convert whatever the old settings left behind, once.
+///
+/// **The first start converts; no later start does.** Once [`MARKER`] is
+/// written, old keys or the old column showing up again were written by a
+/// version from before the unification started against this database —
+/// a rollback, or an old replica restarting, whose seeds write their
+/// defaults back. Converting them would overwrite the policies in force
+/// with those defaults, so they are only removed, with a warning.
 pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -90,6 +101,11 @@ pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    let marker: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM system_settings WHERE key = $1")
+            .bind(MARKER)
+            .fetch_optional(&mut *tx)
+            .await?;
     let old_keys: Vec<String> = OLD_KEYS.iter().map(|k| k.to_string()).collect();
     let old: Vec<(String, Value)> =
         sqlx::query_as("SELECT key, value FROM system_settings WHERE key = ANY($1) FOR UPDATE")
@@ -103,7 +119,30 @@ pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(&mut *tx)
     .await?;
-    if old.is_empty() && !column {
+    let removed: Vec<&str> = old.iter().map(|(k, _)| k.as_str()).collect();
+
+    if let Some(marker) = marker {
+        if old.is_empty() && !column {
+            return Ok(());
+        }
+        sqlx::query("DELETE FROM system_settings WHERE key = ANY($1)")
+            .bind(&old_keys)
+            .execute(&mut *tx)
+            .await?;
+        if column {
+            sqlx::query("ALTER TABLE models DROP COLUMN output_guardrails")
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        tracing::warn!(
+            keys = ?removed,
+            column = column.then_some("models.output_guardrails"),
+            converted = %marker,
+            "Guard settings of a version before 3.0 reappeared after they were converted \
+             (was an older version started against this database?): removed, not converted; \
+             the policies in force are unchanged"
+        );
         return Ok(());
     }
 
@@ -138,12 +177,12 @@ pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
 
     let mut capped = 0usize;
     if column {
-        let rows: Vec<(uuid::Uuid, Value)> =
-            sqlx::query_as("SELECT id, output_guardrails FROM models")
+        let rows: Vec<(uuid::Uuid, String, Value)> =
+            sqlx::query_as("SELECT id, model_id, output_guardrails FROM models")
                 .fetch_all(&mut *tx)
                 .await?;
-        for (id, guardrails) in rows {
-            if let Some(n) = max_output_tokens(&guardrails) {
+        for (id, model_id, guardrails) in rows {
+            if let Some(n) = model_cap(&model_id, &guardrails) {
                 sqlx::query("UPDATE models SET max_output_tokens = $2 WHERE id = $1")
                     .bind(id)
                     .bind(n)
@@ -156,14 +195,36 @@ pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
             .execute(&mut *tx)
             .await?;
     }
+
+    let record = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "converted": removed,
+        "models_capped": capped,
+    });
+    sqlx::query(
+        "INSERT INTO system_settings (key, value, category, description)
+         VALUES ($1, $2, 'security', $3)
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .bind(MARKER)
+    .bind(&record)
+    .bind(
+        "When this database moved to the unified guard settings, and what it converted \
+         (written once at start-up; not editable)",
+    )
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
-    tracing::info!(
-        converted = ?converted.iter().map(|(g, v)| format!("{}={v}", super::key(*g))).collect::<Vec<_>>(),
-        removed = ?old.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-        models_capped = capped,
-        "Converted the previous guard settings"
-    );
+    if !removed.is_empty() || column {
+        tracing::info!(
+            converted = ?converted.iter().map(|(g, v)| format!("{}={v}", super::key(*g))).collect::<Vec<_>>(),
+            removed = ?removed,
+            models_capped = capped,
+            "Converted the previous guard settings"
+        );
+    }
     Ok(())
 }
 
@@ -270,9 +331,14 @@ pub fn content(patterns: Option<&Value>, hidden: Option<&Value>) -> ContentPolic
             usable
         })
         .collect();
-    let hidden: HiddenText = hidden
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+    let hidden: HiddenText = match hidden.map(|v| serde_json::from_value(v.clone())) {
+        Some(Ok(h)) => h,
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "{HIDDEN_TEXT} was unreadable, so it ran as `warn` — converted as `warn`");
+            HiddenText::default()
+        }
+        None => HiddenText::default(),
+    };
 
     // Built-in rules the list named, with the action they had there. The
     // same rule twice reported its most severe action.
@@ -483,11 +549,20 @@ pub fn tools(stored: Option<&Value>) -> ToolPolicy {
         }
         None => OldToolInspection::default(),
     };
+    // A built-in id the engine does not know: the old runtime ignored it,
+    // and the policy would refuse it.
     let known = |id: &String| {
-        tw_guard::tools::rules::builtin()
+        let ok = tw_guard::tools::rules::builtin()
             .dangerous
             .iter()
-            .any(|s| &s.id == id)
+            .any(|s| &s.id == id);
+        if !ok {
+            tracing::warn!(
+                rule = %id,
+                "{TOOL_INSPECTION} named a built-in rule that does not exist — not converted"
+            );
+        }
+        ok
     };
     let mut names = Names::default();
     ToolPolicy {
@@ -503,8 +578,16 @@ pub fn tools(stored: Option<&Value>) -> ToolPolicy {
             .custom
             .into_iter()
             .filter(|c| {
-                tw_guard::tools::rules::single(&c.name, &c.pattern, false).is_ok()
-                    && !c.name.trim().is_empty()
+                let ok = tw_guard::tools::rules::single(&c.name, &c.pattern, false).is_ok()
+                    && !c.name.trim().is_empty();
+                if !ok {
+                    tracing::warn!(
+                        rule = %c.name,
+                        "Tool-call rule the gateway was skipping (no name, or a pattern that does \
+                         not compile) — not converted"
+                    );
+                }
+                ok
             })
             .map(|c| CustomToolRule {
                 name: names.unique(&c.name),
@@ -538,6 +621,27 @@ pub fn max_output_tokens(guardrails: &Value) -> Option<i32> {
         .map(|n| i32::try_from(n.div_ceil(4)).unwrap_or(i32::MAX))
 }
 
+/// The converted cap of one model ([`max_output_tokens`]), stored as it
+/// converts. It is not lowered to what the gateway knows the model's
+/// family to take: a lower cap would also lower the limit of every request
+/// that sets one above it, cutting answers 2.2 let through. A request that
+/// sets no limit is held to a cap above that figure only by the model's
+/// own default (see the gateway's `Outbound::cap_output`).
+///
+/// Logs a value it could not read.
+fn model_cap(model_id: &str, guardrails: &Value) -> Option<i32> {
+    let n = max_output_tokens(guardrails);
+    if n.is_none() && !guardrails.as_array().is_some_and(Vec::is_empty) {
+        tracing::warn!(
+            model = model_id,
+            output_guardrails = %guardrails,
+            "This model's output_guardrails could not be read, so the gateway ran it without \
+             a cap — converted as no cap"
+        );
+    }
+    n
+}
+
 // ---------------------------------------------------------------- shared
 
 /// A list stored under `key`, every element read strictly. One element
@@ -566,6 +670,9 @@ impl Names {
         while !self.0.insert(candidate.clone()) {
             candidate = format!("{name} ({n})");
             n += 1;
+        }
+        if candidate != name {
+            tracing::warn!(rule = %name, renamed = %candidate, "Two old rules shared a name — the second is renamed");
         }
         candidate
     }
@@ -959,6 +1066,18 @@ mod tests {
         let seeded = json!({"mode": "observe", "disabled": [], "actions": {}, "custom": []});
         assert_eq!(tools(Some(&seeded)), ToolPolicy::default());
         assert_eq!(tools(Some(&json!({"mode": "loud"}))), ToolPolicy::default());
+    }
+
+    #[test]
+    fn a_converted_cap_is_stored_as_it_converts() {
+        let bytes = |n: usize| json!([{"type": "max_length", "max_chars": n}]);
+        // Above the 8,192 the gateway fills in for a non-Claude model, and
+        // above Claude's 32,000: not lowered to either.
+        assert_eq!(model_cap("gpt-4o", &bytes(100_000)), Some(25_000));
+        assert_eq!(model_cap("claude-opus", &bytes(200_000)), Some(50_000));
+        assert_eq!(model_cap("gpt-4o", &bytes(4096)), Some(1024));
+        assert_eq!(model_cap("m", &json!({"oops": 1})), None);
+        assert_eq!(model_cap("m", &json!([])), None);
     }
 
     #[test]

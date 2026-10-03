@@ -215,9 +215,9 @@ pub(crate) struct Outbound {
     /// The path the caller called. A Gemini request's model and action
     /// are in it.
     pub path: String,
-    /// What the caller sent — after the content filter, with the model's
-    /// output cap applied and, in enforce mode, redacted values swapped for
-    /// placeholders — otherwise exactly as sent.
+    /// What the caller sent — after the content filter and, in enforce
+    /// mode, with redacted values swapped for placeholders — otherwise
+    /// exactly as sent.
     pub body: Value,
     pub stream: bool,
     /// The caller's headers that belong to its format — `anthropic-beta`
@@ -234,6 +234,9 @@ pub(crate) struct Outbound {
     pub redaction: Redaction,
     /// The placeholders the caller's request was numbered with.
     pub ledger: Ledger,
+    /// The model's output cap (`models.max_output_tokens`), applied to each
+    /// hop as it is addressed (see [`Outbound::cap_output`]).
+    pub max_output_tokens: Option<u32>,
 }
 
 /// The request as it goes out to one upstream, and what it takes to read
@@ -267,6 +270,34 @@ impl Outbound {
         self.surface.dialect == Dialect::Chat
             && self.stream
             && self.body.pointer("/stream_options/include_usage") != Some(&Value::Bool(true))
+    }
+
+    /// The model's output cap, on what one hop sends: `body`, in `dialect`,
+    /// to `model`.
+    ///
+    /// A limit the request carries (the caller's, or the one a conversion
+    /// to Anthropic writes) is lowered to the cap. One it does not carry is
+    /// filled in only when the cap is no more than what the gateway knows
+    /// the model's family to take (`fallback_max_output_tokens`: 32,000 for
+    /// Claude, 8,192 otherwise). Above that, a filled-in limit could be one
+    /// the model refuses outright, and the model's own limit applies
+    /// instead.
+    ///
+    /// `official` is whether the hop goes to the vendor's own endpoint, the
+    /// same flag the conversion gets: a Chat request with no limit is given
+    /// `max_completion_tokens` there (OpenAI's reasoning models refuse
+    /// `max_tokens`) and `max_tokens` elsewhere, where compatible servers
+    /// mostly read only that.
+    fn cap_output(&self, dialect: Dialect, body: &mut Value, model: &str, official: bool) {
+        let Some(cap) = self.max_output_tokens.map(u64::from) else {
+            return;
+        };
+        if tw_dialect::params::max_output_tokens(dialect, body).is_none()
+            && cap > tw_dialect::official::fallback_max_output_tokens(model)
+        {
+            return;
+        }
+        tw_dialect::params::cap_max_output_tokens(dialect, body, cap, official);
     }
 
     /// Address the request to `protocol`, naming `model` upstream.
@@ -325,6 +356,7 @@ impl Outbound {
                     opts["include_usage"] = Value::Bool(true);
                 }
             }
+            self.cap_output(client, &mut body, model, official);
             let collect = decode(&body)?.encode(&target(client)).session;
             let mut bytes = serde_json::to_vec(&body).unwrap_or_default();
             // Reasoning signatures a conversion wrote earlier in this
@@ -358,9 +390,16 @@ impl Outbound {
                 "Fields the upstream's format cannot carry were left out"
             );
         }
+        let mut body = prepared.body;
+        if self.max_output_tokens.is_some()
+            && let Ok(mut v) = serde_json::from_slice::<Value>(&body)
+        {
+            self.cap_output(protocol.dialect(), &mut v, model, official);
+            body = serde_json::to_vec(&v).unwrap_or(body);
+        }
         // The conversion moved the placeholders along with the text; one it
         // assembled from two pieces is numbered here.
-        let (body, ledger) = self.redaction.replace(prepared.body, &self.ledger);
+        let (body, ledger) = self.redaction.replace(body, &self.ledger);
         Ok(Wire {
             body,
             path: prepared.path,
@@ -599,10 +638,10 @@ async fn run(
     let caller = Caller::of(&identity, &metadata.request_id, &mapped_model);
 
     // 3. Content filter, on the caller's text where its own format puts
-    //    it. Every hit is an audit event; a refusal is the caller's 403,
-    //    quoting their words (masked).
+    //    it. Every hit is an audit event (without the text); a refusal is
+    //    the caller's 403, quoting their words (masked).
     let screening = guards.content.screen(surface.dialect, &body);
-    crate::content_filter::record(&state.audit, &caller, &screening, &guards.redaction);
+    crate::content_filter::record(&state.audit, &caller, &screening);
     if let Some(hit) = screening.refusal() {
         return Err(ctx
             .emit(crate::content_filter::refusal(hit, &guards.redaction))
@@ -639,7 +678,7 @@ async fn run(
     let (findings, ledger) = guards.redaction.look(&body);
     crate::redaction::record(&state.audit, &caller, guards.redaction.mode, &findings);
     let request_for_audit = body.to_vec();
-    let mut outbound_body = if ledger.is_empty() {
+    let outbound_body = if ledger.is_empty() {
         raw
     } else {
         let (replaced, _) = guards.redaction.replace(body.to_vec(), &ledger);
@@ -650,21 +689,15 @@ async fn run(
         })?
     };
 
-    // 6. The model's output cap: a caller asking for more is lowered to
-    //    it, one asking for nothing gets it. The upstream stops there by
-    //    itself; the answer is not measured.
-    if let Some(cap) = state
+    // 6. The model's output cap. Applied to each hop as it is addressed
+    //    (`Outbound::cap_output`): whether to fill one in depends on the
+    //    upstream model, and the field on the upstream's format. The
+    //    upstream stops there by itself; the answer is not measured.
+    let max_output_tokens = state
         .router
         .load()
         .config_for(&mapped_model)
-        .max_output_tokens
-    {
-        tw_dialect::params::cap_max_output_tokens(
-            surface.dialect,
-            &mut outbound_body,
-            u64::from(cap),
-        );
-    }
+        .max_output_tokens;
 
     let call_ctx = CallCtx::new(
         Some(trace_id.clone()),
@@ -691,7 +724,14 @@ async fn run(
     //    deterministic prompt amortises one upstream call across an
     //    unbounded quota window.
     let cache_fingerprint = if surface.caches {
-        ResponseCache::fingerprint(&outbound_body)
+        ResponseCache::fingerprint(&outbound_body).map(|mut fp| {
+            // The cap is applied after this, per hop: an answer made under
+            // one cap must not be served under another.
+            if let Some(cap) = max_output_tokens {
+                fp.extend_from_slice(format!("\nmax_output_tokens={cap}").as_bytes());
+            }
+            fp
+        })
     } else {
         None
     };
@@ -793,6 +833,7 @@ async fn run(
         input_estimate,
         redaction: guards.redaction.clone(),
         ledger: ledger.clone(),
+        max_output_tokens,
     };
     let snapshot = |route: &RouteEntry, sel_record| crate::lifecycle::ChatPostInvokeDeps {
         state: state.clone(),
@@ -1019,5 +1060,63 @@ mod tests {
         // Not a generation: nothing to convert it to.
         assert_eq!(gemini_target("/v1beta/models/g:countTokens"), None);
         assert_eq!(gemini_target("/v1beta/models/:generateContent"), None);
+    }
+
+    /// The body a Chat caller's request goes out with to a Chat upstream,
+    /// under a model cap of `cap`.
+    fn sent_to_chat(ask: Value, cap: u32, official: bool) -> Value {
+        let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
+            mode: tw_guard::policy::Mode::Off,
+            ..Default::default()
+        });
+        let (_, ledger) = redaction.look(b"{}");
+        let outbound = Outbound {
+            surface: CHAT,
+            path: "/v1/chat/completions".into(),
+            body: ask,
+            stream: false,
+            dialect_headers: Vec::new(),
+            input_estimate: 0,
+            redaction,
+            ledger,
+            max_output_tokens: Some(cap),
+        };
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", official)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        serde_json::from_slice(&wire.body).unwrap()
+    }
+
+    #[test]
+    fn a_chat_request_without_a_limit_gets_the_field_its_endpoint_reads() {
+        let ask = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        // OpenAI's own endpoint: its reasoning models refuse `max_tokens`.
+        let sent = sent_to_chat(ask.clone(), 4096, true);
+        assert_eq!(sent["max_completion_tokens"], 4096, "{sent}");
+        assert!(sent.get("max_tokens").is_none(), "{sent}");
+        // Anywhere else: compatible servers mostly read only `max_tokens`.
+        let sent = sent_to_chat(ask, 4096, false);
+        assert_eq!(sent["max_tokens"], 4096, "{sent}");
+        assert!(sent.get("max_completion_tokens").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn both_chat_limits_are_held_to_the_cap() {
+        // An upstream that reads only `max_tokens` would otherwise go
+        // uncapped; the smaller one the caller wrote is kept.
+        let ask = serde_json::json!({
+            "model": "gpt-5",
+            "max_tokens": 99_999,
+            "max_completion_tokens": 100,
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        for official in [true, false] {
+            let sent = sent_to_chat(ask.clone(), 4096, official);
+            assert_eq!(sent["max_tokens"], 4096, "{sent}");
+            assert_eq!(sent["max_completion_tokens"], 100, "{sent}");
+        }
     }
 }

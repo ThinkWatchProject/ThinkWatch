@@ -791,7 +791,7 @@
     "unlimited": "不限制",
     "routingOverrideTitle": "路由覆盖",
     "routingOverrideHint": "针对此模型覆盖网关全局默认。留空则继承「设置 → 网关」中的配置。",
-    "maxOutputTokensHint": "发往此模型的请求最多输出这么多 token：请求中的 max_tokens 更大时改为此值，未写时按此值发送。留空则不限制。",
+    "maxOutputTokensHint": "发往此模型的请求最多输出这么多 token。请求写了上限时取两者中较小的；未写时，此值不超过该模型系列的默认上限（Claude 32,000，其他 8,192）则按此值发送，否则按模型默认。留空则不限制。",
     "strategy": {
       "weighted": "加权随机",
       "latency": "延迟优先",

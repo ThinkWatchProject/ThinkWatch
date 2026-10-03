@@ -13,8 +13,10 @@
 //!     request. In enforce mode the upstream sees `<<TW_…_n>>` placeholders
 //!     and the caller gets the values back in the answer.
 //!
-//! Both policies are thinkwatch-core's shape (`tw_guard::policy`); every
-//! hit is an audit event, its excerpt masked.
+//! Both policies are thinkwatch-core's shape (`tw_guard::policy`). Every
+//! rule that matches writes an audit event — without the request's text: a
+//! content event names the rule and counts the matches, a redaction event
+//! counts the values and, for a built-in rule only, lists a few masked.
 
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
@@ -313,18 +315,18 @@ async fn observe_is_the_default_records_the_hit_and_changes_nothing() {
     assert_eq!(e["rule"], "ignore-previous-instructions", "{e}");
     assert_eq!(e["action"], "block", "what enforce mode would do");
     assert_eq!(e["outcome"], "recorded");
+    assert_eq!(e["count"], 1);
+    // The request's text is not the audit log's.
     assert!(
-        e["excerpt"]
-            .as_str()
-            .unwrap()
-            .contains("ignore previous instructions"),
+        e.get("excerpt").is_none() && e.get("revealed").is_none(),
         "{e}"
     );
+    assert!(!e.to_string().contains("write a poem"), "{e}");
 }
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn a_refusal_quoting_a_credential_masks_it_in_the_answer_and_the_audit_log() {
+async fn a_refusal_quoting_a_credential_masks_it_and_the_audit_log_quotes_nothing() {
     let app = TestApp::spawn_with_clickhouse().await;
     app.set_setting(
         "security.content",
@@ -344,10 +346,13 @@ async fn a_refusal_quoting_a_credential_masks_it_in_the_answer_and_the_audit_log
     .await;
     assert_eq!(status, 403, "{text}");
     assert!(!text.contains(KEY), "{text}");
+    // The caller is told what matched, in their own words, masked.
+    assert!(text.contains("here is my key sk-an…"), "{text}");
     let events = audited(&app, &user_id, "gateway.content_blocked").await;
-    let excerpt = events[0]["excerpt"].as_str().unwrap();
-    assert!(!excerpt.contains(KEY), "{excerpt}");
-    assert!(excerpt.contains("sk-an…"), "{excerpt}");
+    let e = &events[0];
+    assert_eq!(e["rule"], "Keys", "{e}");
+    assert!(e.get("excerpt").is_none(), "{e}");
+    assert!(!e.to_string().contains("sk-an"), "{e}");
 }
 
 // ---------------------------------------------------------------- redaction
@@ -418,8 +423,87 @@ async fn redaction_observes_by_default_and_records_the_masked_value() {
     let e = &events[0];
     assert_eq!(e["rule"], "anthropic-api-key", "{e}");
     assert_eq!(e["outcome"], "recorded");
-    let masked = e["masked"].as_str().unwrap();
+    assert_eq!(
+        (e["values"].as_u64(), e["count"].as_u64()),
+        (Some(1), Some(1))
+    );
+    // A built-in rule's event keeps the masked form core gives it.
+    let masked = e["masked"][0].as_str().unwrap();
     assert!(!masked.contains(KEY) && masked.starts_with("sk-an"), "{e}");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_custom_redaction_rule_records_one_event_with_counts_and_no_values() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.redact",
+        json!({"custom": [{"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}"}]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "redact-custom").await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "redact-custom", "messages": [
+            {"role": "user", "content": "123-45-6789, 987-65-4321, 123-45-6789 and 555-12-3456"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+
+    let events = audited(&app, &user_id, "gateway.redaction_flagged").await;
+    assert_eq!(events.len(), 1, "one event per rule: {events:?}");
+    let e = &events[0];
+    assert_eq!(e["rule"], "ssn", "{e}");
+    assert_eq!(e["custom"], true);
+    assert_eq!(
+        (e["values"].as_u64(), e["count"].as_u64()),
+        (Some(3), Some(4))
+    );
+    // Masking keeps most of a short number; a custom rule's values are
+    // not written at all.
+    assert!(e.get("masked").is_none(), "{e}");
+    for digits in ["6789", "4321", "3456"] {
+        assert!(!e.to_string().contains(digits), "{e}");
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn one_request_writes_at_most_twenty_redaction_events() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let custom: Vec<Value> = (0..25)
+        .map(|i| json!({"name": format!("r{i:02}"), "pattern": format!("tok{i:02}x")}))
+        .collect();
+    app.set_setting("security.redact", json!({"custom": custom}))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "redact-many").await;
+    let said: Vec<String> = (0..25).map(|i| format!("tok{i:02}x")).collect();
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "redact-many", "messages": [
+            {"role": "user", "content": said.join(" ")}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+
+    let first = audited(&app, &user_id, "gateway.redaction_flagged").await;
+    // The audit pipeline flushes in batches: give the rest time to land.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let events = audited(&app, &user_id, "gateway.redaction_flagged").await;
+    assert!(events.len() >= first.len());
+    assert_eq!(events.len(), 20, "{} events", events.len());
+    assert!(
+        events.iter().all(|e| e["rules_in_request"] == 25),
+        "{events:?}"
+    );
 }
 
 // ---------------------------------------------------------------- console
@@ -627,22 +711,19 @@ async fn saving_a_policy_the_gateway_cannot_run_is_refused() {
     assert_eq!(r.status.as_u16(), 400, "{}", r.text());
 }
 
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn each_guard_is_changed_and_tried_with_the_permission_it_always_had() {
-    let app = TestApp::spawn().await;
+/// A console session for a user holding one custom role that allows
+/// exactly `actions`.
+async fn session_with(app: &TestApp, actions: &[&str]) -> TestClient {
     // Short: the seeded user's address is built from it.
     let role = format!("gd{}", &Uuid::new_v4().simple().to_string()[..8]);
     sqlx::query(
         "INSERT INTO rbac_roles (name, description, is_system, policy_document)
-         VALUES ($1, 'content filter only', FALSE, $2)",
+         VALUES ($1, 'guard permissions test', FALSE, $2)",
     )
     .bind(&role)
-    .bind(
-        json!({"Version": "2024-01-01", "Statement": [{"Sid": "Guards", "Effect": "Allow",
-        "Action": ["content_filter:read", "content_filter:write", "settings:read"],
-        "Resource": "*"}]}),
-    )
+    .bind(json!({"Version": "2024-01-01", "Statement": [
+        {"Sid": "Test", "Effect": "Allow", "Action": actions, "Resource": "*"}
+    ]}))
     .execute(&app.db)
     .await
     .unwrap();
@@ -657,30 +738,139 @@ async fn each_guard_is_changed_and_tried_with_the_permission_it_always_had() {
     .await
     .unwrap()
     .assert_ok();
+    con
+}
 
-    con.get("/api/admin/security").await.unwrap().assert_ok();
-    for key in ["security.content", "security.inspect_tools"] {
-        con.patch(
-            "/api/admin/settings",
-            json!({"settings": {key: {"mode": "enforce"}}}),
-        )
+async fn patch_status(con: &TestClient, key: &str, value: Value) -> u16 {
+    con.patch("/api/admin/settings", json!({"settings": {key: value}}))
         .await
         .unwrap()
-        .assert_ok();
-    }
-    con.patch(
-        "/api/admin/settings",
-        json!({"settings": {"security.redact": {"mode": "enforce"}}}),
+        .status
+        .as_u16()
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn each_guard_is_changed_and_tried_with_the_permission_it_always_had() {
+    let app = TestApp::spawn().await;
+
+    // The guard's own permission is not enough: a policy is a setting.
+    let guard_only = session_with(
+        &app,
+        &[
+            "content_filter:read",
+            "content_filter:write",
+            "settings:read",
+        ],
     )
-    .await
-    .unwrap()
-    .assert_status(403);
-    con.post("/api/admin/security/content/test", json!({"sample": "x"}))
+    .await;
+    guard_only
+        .get("/api/admin/security")
         .await
         .unwrap()
         .assert_ok();
-    con.post("/api/admin/security/redact/test", json!({"sample": "x"}))
+    for key in ["security.content", "security.inspect_tools"] {
+        assert_eq!(
+            patch_status(&guard_only, key, json!({"mode": "off"})).await,
+            403,
+            "{key}"
+        );
+    }
+    // Trying a sample takes only the guard's read permission.
+    guard_only
+        .post("/api/admin/security/content/test", json!({"sample": "x"}))
+        .await
+        .unwrap()
+        .assert_ok();
+    guard_only
+        .post("/api/admin/security/redact/test", json!({"sample": "x"}))
         .await
         .unwrap()
         .assert_status(403);
+
+    // Nor is `settings:write` alone: a role made to change settings does
+    // not get to switch the guards off on upgrade.
+    let settings_only = session_with(&app, &["settings:read", "settings:write"]).await;
+    for key in [
+        "security.content",
+        "security.inspect_tools",
+        "security.redact",
+    ] {
+        assert_eq!(
+            patch_status(&settings_only, key, json!({"mode": "off"})).await,
+            403,
+            "{key}"
+        );
+    }
+    assert_eq!(
+        patch_status(&settings_only, "setup.site_name", json!("Renamed")).await,
+        200
+    );
+
+    // Both: the content filter and tool-call inspection, not redaction.
+    let both = session_with(
+        &app,
+        &["content_filter:write", "settings:read", "settings:write"],
+    )
+    .await;
+    for key in ["security.content", "security.inspect_tools"] {
+        assert_eq!(
+            patch_status(&both, key, json!({"mode": "enforce"})).await,
+            200,
+            "{key}"
+        );
+    }
+    assert_eq!(
+        patch_status(&both, "security.redact", json!({"mode": "enforce"})).await,
+        403
+    );
+    // A request mixing a guard with another setting needs all of it.
+    let r = both
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.redact": {}, "setup.site_name": "x"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 403, "{}", r.text());
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_policy_past_the_limits_is_refused() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+    let custom: Vec<Value> = (0..101)
+        .map(|i| json!({"name": format!("r{i}"), "pattern": format!("p{i}")}))
+        .collect();
+    let r = con
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.redact": {"custom": custom}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
+    assert!(r.text().contains("at most 100"), "{}", r.text());
+    let long = "a".repeat(501);
+    let r = con
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.content": {"custom": [{"name": "long", "pattern": long}]}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
+    assert!(r.text().contains("501 characters"), "{}", r.text());
+    let r = con
+        .patch(
+            "/api/admin/settings",
+            json!({"settings": {"security.inspect_tools": {"custom": [
+                {"name": "rm-rf-root", "pattern": "rm"}
+            ]}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 400, "{}", r.text());
+    assert!(r.text().contains("built-in rule"), "{}", r.text());
 }

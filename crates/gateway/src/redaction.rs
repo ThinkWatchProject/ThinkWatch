@@ -27,7 +27,7 @@ use std::sync::Arc;
 use think_watch_common::audit::AuditLogger;
 use tw_guard::policy::{Mode, RedactPolicy};
 use tw_guard::redact::replace::Ledger;
-use tw_guard::redact::rules::{Finding, RuleSet};
+use tw_guard::redact::rules::{Finding, Rule, RuleSet};
 
 use crate::guards::Caller;
 
@@ -118,43 +118,112 @@ pub fn restore_body(ledger: &Ledger, body: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Record what was found in a request: one audit event per value
+/// At most this many redaction events per request: one per rule, the rules
+/// that found the most first. A request carrying thousands of values writes
+/// a handful of rows, not thousands.
+pub const RULE_EVENTS_MAX: usize = 20;
+
+/// A built-in rule's event lists at most this many of the values it found,
+/// masked.
+pub const MASKED_MAX: usize = 5;
+
+/// What one rule found in one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleHits {
+    pub rule: Rule,
+    /// How many different values.
+    pub values: usize,
+    /// How many times, all values together.
+    pub count: u64,
+    /// The first few values in their masked form (`sk-an…7f9c`, `…1234`) —
+    /// built-in rules only. **A custom rule's values are not written at
+    /// all**: masking keeps the first five and last four characters, and of
+    /// a phone number or an IP address that is nearly all of it.
+    pub masked: Vec<String>,
+}
+
+/// The findings of one request, one entry per rule, the rule with the most
+/// occurrences first (ties in the order found).
+pub fn per_rule(findings: &[Finding]) -> Vec<RuleHits> {
+    let mut out: Vec<RuleHits> = Vec::new();
+    for f in findings {
+        let at = match out.iter().position(|r| r.rule == f.rule) {
+            Some(at) => at,
+            None => {
+                out.push(RuleHits {
+                    rule: f.rule.clone(),
+                    values: 0,
+                    count: 0,
+                    masked: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        let r = &mut out[at];
+        r.values += 1;
+        r.count += f.count;
+        if !f.rule.custom() && r.masked.len() < MASKED_MAX {
+            r.masked.push(f.masked.clone());
+        }
+    }
+    out.sort_by_key(|r| std::cmp::Reverse(r.count));
+    out
+}
+
+/// Record what was found in a request: an audit event per rule
 /// (`gateway.redaction_replaced` in enforce mode, `gateway.redaction_flagged`
-/// in observe mode) and a counter. The value itself is never written —
-/// only its masked form.
+/// in observe mode), at most [`RULE_EVENTS_MAX`] of them, and a counter.
+/// A value is never written as it is: a built-in rule's event carries a
+/// few in masked form, a custom rule's only how many there were.
 pub fn record(audit: &AuditLogger, caller: &Caller, mode: Mode, findings: &[Finding]) {
     if findings.is_empty() {
         return;
     }
-    let replaced = mode.acts();
-    let (action, outcome) = if replaced {
+    let (action, outcome) = if mode.acts() {
         ("gateway.redaction_replaced", "replaced")
     } else {
         ("gateway.redaction_flagged", "recorded")
     };
+    let rules = per_rule(findings);
     tracing::info!(
         trace_id = %caller.trace_id,
-        found = findings.len(),
+        rules = rules.len(),
+        values = findings.len(),
         outcome,
         "outbound redaction found values in the request"
     );
-    for f in findings {
+    if rules.len() > RULE_EVENTS_MAX {
+        tracing::warn!(
+            trace_id = %caller.trace_id,
+            rules = rules.len(),
+            written = RULE_EVENTS_MAX,
+            "more redaction rules matched one request than are written to the audit log"
+        );
+    }
+    for r in &rules {
         metrics::counter!(
             "gateway_redaction_found_total",
-            "kind" => f.rule.kind().slug(),
+            "kind" => r.rule.kind().slug(),
             "outcome" => outcome,
         )
-        .increment(1);
-        audit.log(caller.audit(action).detail(serde_json::json!({
+        .increment(r.values as u64);
+    }
+    for r in rules.iter().take(RULE_EVENTS_MAX) {
+        let mut detail = serde_json::json!({
             "trace_id": caller.trace_id,
             "model": caller.model,
-            "rule": f.rule.id(),
-            "custom": f.rule.custom(),
-            "kind": f.rule.kind().slug(),
-            "masked": f.masked,
-            "count": f.count,
+            "rule": r.rule.id(),
+            "custom": r.rule.custom(),
+            "kind": r.rule.kind().slug(),
+            "values": r.values,
+            "count": r.count,
             "outcome": outcome,
-        })));
+            "rules_in_request": rules.len(),
+        });
+        if !r.rule.custom() {
+            detail["masked"] = serde_json::json!(r.masked);
+        }
+        audit.log(caller.audit(action).detail(detail));
     }
 }
 
@@ -243,6 +312,62 @@ mod tests {
             redaction(Mode::Enforce).mask("nothing here"),
             "nothing here"
         );
+    }
+
+    #[test]
+    fn findings_are_one_entry_per_rule_and_a_custom_rule_keeps_no_values() {
+        let r = Redaction::new(&RedactPolicy {
+            mode: Mode::Enforce,
+            custom: vec![tw_guard::policy::CustomRedactRule {
+                name: "ssn".into(),
+                pattern: r"\d{3}-\d{2}-\d{4}".into(),
+                label: None,
+                disabled: false,
+            }],
+            ..Default::default()
+        });
+        let other = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let body = serde_json::json!({"messages": [{"role": "user", "content": format!(
+            "{KEY} {other} {KEY} 123-45-6789 987-65-4321 123-45-6789 111-22-3333"
+        )}]})
+        .to_string();
+        let (found, _) = r.look(body.as_bytes());
+        let rules = per_rule(&found);
+        assert_eq!(rules.len(), 2, "{rules:?}");
+        // The rule with the most occurrences first.
+        assert_eq!(rules[0].rule.id(), "ssn");
+        assert_eq!((rules[0].values, rules[0].count), (3, 4));
+        assert!(
+            rules[0].masked.is_empty(),
+            "a custom rule's values are not kept"
+        );
+        assert_eq!(rules[1].rule.id(), "anthropic-api-key");
+        assert_eq!((rules[1].values, rules[1].count), (2, 3));
+        assert_eq!(rules[1].masked.len(), 2);
+        assert!(
+            rules[1]
+                .masked
+                .iter()
+                .all(|m| m.starts_with("sk-an") && !m.contains(KEY) && !m.contains(other))
+        );
+    }
+
+    #[test]
+    fn a_built_in_rule_lists_only_a_few_masked_values() {
+        let r = Redaction::new(&RedactPolicy {
+            mode: Mode::Observe,
+            ..Default::default()
+        });
+        let keys: Vec<String> = (0..12)
+            .map(|i| format!("sk-ant-api03-{}", format!("{i:02}").repeat(14)))
+            .collect();
+        let body = serde_json::json!({"messages": [{"role": "user", "content": keys.join(" ")}]})
+            .to_string();
+        let (found, _) = r.look(body.as_bytes());
+        let rules = per_rule(&found);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].values, 12);
+        assert_eq!(rules[0].masked.len(), MASKED_MAX);
     }
 
     #[test]

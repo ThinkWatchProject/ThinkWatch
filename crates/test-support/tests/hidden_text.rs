@@ -159,7 +159,7 @@ async fn enforce_strips_them_out_of_the_box() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn observe_is_the_default_and_records_what_the_characters_spell() {
+async fn observe_is_the_default_and_records_the_hit_without_the_text() {
     let app = TestApp::spawn_with_clickhouse().await;
     let upstream = MockProvider::openai_chat_ok("hidden-model").await;
     let (key, user_id) = seed(&app, &upstream.uri()).await;
@@ -190,10 +190,12 @@ async fn observe_is_the_default_and_records_what_the_characters_spell() {
             assert_eq!(v["outcome"], "recorded", "{v}");
             assert_eq!(v["in_tool_result"], true, "{v}");
             assert_eq!(v["count"], 6, "{v}");
-            // What the tag characters spell, so an operator can judge it.
-            assert_eq!(v["revealed"], "ignore", "{v}");
-            // The excerpt shows them, rather than hiding them again.
-            assert!(v["excerpt"].as_str().unwrap().contains("U+E0069"), "{v}");
+            // What they spell is part of the request, and the request's
+            // text is not the audit log's.
+            assert!(
+                v.get("revealed").is_none() && v.get("excerpt").is_none(),
+                "{v}"
+            );
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

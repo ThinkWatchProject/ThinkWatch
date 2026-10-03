@@ -7,9 +7,11 @@
 //! policy from it and writes it back through `PATCH /api/admin/settings`
 //! (one `security.*` key per guard, see `think_watch_common::guard_policy`).
 //!
-//! Permissions are the ones these features always had: `pii_redactor:*`
-//! for outbound redaction, `content_filter:*` for the content filter and
-//! tool-call inspection. Reading the policies is reading settings.
+//! Permissions are the ones these features always had: trying a sample
+//! takes `pii_redactor:read` for outbound redaction and
+//! `content_filter:read` for the content filter and tool-call inspection;
+//! changing a policy takes `settings:write` and the guard's `:write`.
+//! Reading the policies is reading settings.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -22,7 +24,8 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-/// The permission that changes a guard's policy.
+/// The permission that changes a guard's policy, on top of `settings:write`
+/// (see `settings::update_settings`).
 pub(crate) fn write_permission(guard: Guard) -> &'static str {
     match guard {
         Guard::Redact => "pii_redactor:write",

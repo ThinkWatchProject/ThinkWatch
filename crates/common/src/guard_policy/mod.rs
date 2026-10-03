@@ -42,18 +42,101 @@ pub fn guard_of(key: &str) -> Option<Guard> {
     Guard::ALL.iter().copied().find(|g| self::key(*g) == key)
 }
 
+/// How many custom rules a policy may hold, and how long one's pattern
+/// may be, in characters. Every rule runs on every request: a policy past
+/// these is a mistake, or an attempt to slow the gateway down, rather than
+/// a configuration. The limits this gateway had before the guards were
+/// unified.
+pub struct Limits {
+    pub custom_rules: usize,
+    pub pattern_chars: usize,
+}
+
+/// The limits of one guard's policy.
+pub fn limits(guard: Guard) -> Limits {
+    match guard {
+        Guard::Redact => Limits {
+            custom_rules: 100,
+            pattern_chars: 1000,
+        },
+        Guard::InspectTools => Limits {
+            custom_rules: 100,
+            pattern_chars: 1000,
+        },
+        Guard::Content => Limits {
+            custom_rules: 500,
+            pattern_chars: 500,
+        },
+    }
+}
+
 /// Check a value for one guard's key before it is saved: its shape (a
-/// misspelt field is an error, not a silent factory value) and its rules
-/// (unknown built-in ids, patterns that do not compile, malformed code
-/// points or placeholder names, custom rules without a name or sharing
-/// one). The error is the sentence the admin sees.
+/// misspelt field is an error, not a silent factory value), its size
+/// ([`limits`]; a custom tool-call rule may not take a built-in rule's
+/// name either), and its rules (unknown built-in ids, patterns that do not
+/// compile, malformed code points or placeholder names, custom rules
+/// without a name or sharing one). The error is the sentence the admin
+/// sees.
 pub fn validate(guard: Guard, value: &Value) -> Result<(), String> {
     let checked = match guard {
-        Guard::Redact => parse::<RedactPolicy>(guard, value)?.check(),
-        Guard::InspectTools => parse::<ToolPolicy>(guard, value)?.check(),
-        Guard::Content => parse::<ContentPolicy>(guard, value)?.check(),
+        Guard::Redact => {
+            let p = parse::<RedactPolicy>(guard, value)?;
+            within_limits(guard, p.custom.iter().map(|c| (&c.name, &c.pattern)))?;
+            p.check()
+        }
+        Guard::InspectTools => {
+            let p = parse::<ToolPolicy>(guard, value)?;
+            within_limits(guard, p.custom.iter().map(|c| (&c.name, &c.pattern)))?;
+            let builtin = &tw_guard::tools::rules::builtin().dangerous;
+            if let Some(c) = p
+                .custom
+                .iter()
+                .find(|c| builtin.iter().any(|b| b.id == c.name))
+            {
+                return Err(format!(
+                    "{}: custom rule `{}` has the name of a built-in rule; give it another name",
+                    key(guard),
+                    c.name
+                ));
+            }
+            p.check()
+        }
+        Guard::Content => {
+            let p = parse::<ContentPolicy>(guard, value)?;
+            within_limits(guard, p.custom.iter().map(|c| (&c.name, &c.pattern)))?;
+            p.check()
+        }
     };
     checked.map_err(|e| e.to_string())
+}
+
+/// Custom rules no more and no longer than [`limits`] allows.
+fn within_limits<'a>(
+    guard: Guard,
+    custom: impl ExactSizeIterator<Item = (&'a String, &'a String)>,
+) -> Result<(), String> {
+    let Limits {
+        custom_rules,
+        pattern_chars,
+    } = limits(guard);
+    if custom.len() > custom_rules {
+        return Err(format!(
+            "{}: {} custom rules; at most {custom_rules} are allowed",
+            key(guard),
+            custom.len()
+        ));
+    }
+    for (name, pattern) in custom {
+        let n = pattern.chars().count();
+        if n > pattern_chars {
+            return Err(format!(
+                "{}: the pattern of custom rule `{name}` is {n} characters long; at most \
+                 {pattern_chars} are allowed",
+                key(guard)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse<T: DeserializeOwned>(guard: Guard, value: &Value) -> Result<T, String> {
@@ -207,6 +290,59 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("placeholder name"), "{e}");
+    }
+
+    #[test]
+    fn a_policy_past_the_limits_is_refused_with_the_reason() {
+        let rules = |n: usize, pattern: &str| -> Vec<Value> {
+            (0..n)
+                .map(|i| json!({"name": format!("r{i}"), "pattern": pattern}))
+                .collect()
+        };
+        // At the limit: fine.
+        for (g, n) in [
+            (Guard::Content, 500),
+            (Guard::Redact, 100),
+            (Guard::InspectTools, 100),
+        ] {
+            assert_eq!(
+                validate(g, &json!({"custom": rules(n, "x")})),
+                Ok(()),
+                "{g}"
+            );
+            let e = validate(g, &json!({"custom": rules(n + 1, "x")})).unwrap_err();
+            assert!(e.contains(&format!("at most {n}")), "{g}: {e}");
+        }
+        for (g, n) in [
+            (Guard::Content, 500),
+            (Guard::Redact, 1000),
+            (Guard::InspectTools, 1000),
+        ] {
+            let long = "a".repeat(n);
+            assert_eq!(
+                validate(g, &json!({"custom": rules(1, &long)})),
+                Ok(()),
+                "{g}"
+            );
+            let longer = "a".repeat(n + 1);
+            let e = validate(g, &json!({"custom": rules(1, &longer)})).unwrap_err();
+            assert!(
+                e.contains(&format!("{} characters long", n + 1)),
+                "{g}: {e}"
+            );
+        }
+        // Characters, not bytes.
+        let cjk = "字".repeat(500);
+        assert_eq!(
+            validate(Guard::Content, &json!({"custom": rules(1, &cjk)})),
+            Ok(())
+        );
+        let e = validate(
+            Guard::InspectTools,
+            &json!({"custom": [{"name": "curl-pipe-sh", "pattern": "curl"}]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("name of a built-in rule"), "{e}");
     }
 
     #[test]

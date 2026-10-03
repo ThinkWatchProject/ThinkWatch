@@ -85,18 +85,45 @@ pub fn refusal(hit: &ScreenHit, mask: &Redaction) -> GatewayError {
     GatewayError::PolicyBlocked(message)
 }
 
-/// Record every hit of a screening: one audit event each
+/// At most this many content filter events per request: the refusing hit
+/// first, then what was stripped, then what was only recorded.
+pub const RULE_EVENTS_MAX: usize = 20;
+
+/// The hits of a screening in the order their events are written, the
+/// ones that changed the request first.
+pub fn by_weight(screening: &Screening) -> Vec<&ScreenHit> {
+    let weight = |o: Outcome| match o {
+        Outcome::Blocked => 0,
+        Outcome::Stripped => 1,
+        Outcome::Recorded => 2,
+    };
+    let mut hits: Vec<&ScreenHit> = screening.hits.iter().collect();
+    hits.sort_by_key(|h| weight(h.outcome));
+    hits
+}
+
+/// Record the hits of a screening: an audit event per rule
 /// (`gateway.content_flagged`, `gateway.content_stripped` or
-/// `gateway.content_blocked`), a counter, and a log line that carries no
-/// text of the caller's. The event's excerpt and revealed text are masked.
-pub fn record(audit: &AuditLogger, caller: &Caller, screening: &Screening, mask: &Redaction) {
-    for s in &screening.hits {
+/// `gateway.content_blocked`), at most [`RULE_EVENTS_MAX`] of them, a
+/// counter, and a log line.
+///
+/// **No text of the request is written**, not even a masked excerpt: the
+/// matched text is part of the request body, and the body is for those who
+/// may read bodies (`logs:read_bodies`), not for everyone who reads the
+/// audit log. An event says which rule, what became of the request, how
+/// many matches and whether they were in a tool result.
+pub fn record(audit: &AuditLogger, caller: &Caller, screening: &Screening) {
+    let hits = by_weight(screening);
+    if hits.len() > RULE_EVENTS_MAX {
+        tracing::warn!(
+            trace_id = %caller.trace_id,
+            rules = hits.len(),
+            written = RULE_EVENTS_MAX,
+            "more content rules matched one request than are written to the audit log"
+        );
+    }
+    for (i, s) in hits.iter().enumerate() {
         let h = &s.hit;
-        let action = match s.outcome {
-            Outcome::Recorded => "gateway.content_flagged",
-            Outcome::Stripped => "gateway.content_stripped",
-            Outcome::Blocked => "gateway.content_blocked",
-        };
         tracing::info!(
             trace_id = %caller.trace_id,
             rule = %h.rule,
@@ -111,7 +138,15 @@ pub fn record(audit: &AuditLogger, caller: &Caller, screening: &Screening, mask:
             "custom" => if h.custom { "true" } else { "false" },
         )
         .increment(1);
-        let mut detail = serde_json::json!({
+        if i >= RULE_EVENTS_MAX {
+            continue;
+        }
+        let action = match s.outcome {
+            Outcome::Recorded => "gateway.content_flagged",
+            Outcome::Stripped => "gateway.content_stripped",
+            Outcome::Blocked => "gateway.content_blocked",
+        };
+        audit.log(caller.audit(action).detail(serde_json::json!({
             "trace_id": caller.trace_id,
             "model": caller.model,
             "rule": h.rule,
@@ -121,12 +156,8 @@ pub fn record(audit: &AuditLogger, caller: &Caller, screening: &Screening, mask:
             "outcome": s.outcome.slug(),
             "in_tool_result": h.in_tool_result,
             "count": h.count,
-            "excerpt": mask.mask(&h.snippet),
-        });
-        if !h.revealed.is_empty() {
-            detail["revealed"] = serde_json::Value::String(mask.mask(&h.revealed));
-        }
-        audit.log(caller.audit(action).detail(detail));
+            "rules_in_request": hits.len(),
+        })));
     }
 }
 
@@ -271,6 +302,41 @@ mod tests {
         let s = f.screen(Dialect::Chat, &chat("jail\u{200B}break"));
         let body: serde_json::Value = serde_json::from_slice(s.body.as_ref().unwrap()).unwrap();
         assert_eq!(body["messages"][1]["content"], "jailbreak");
+    }
+
+    #[test]
+    fn the_events_put_what_changed_the_request_first() {
+        let f = filter(
+            Mode::Enforce,
+            vec![
+                rule(
+                    "Rec",
+                    "alpha",
+                    ContentMatch::Contains,
+                    ContentAction::Record,
+                ),
+                rule(
+                    "Strip",
+                    "beta",
+                    ContentMatch::Contains,
+                    ContentAction::Strip,
+                ),
+                rule(
+                    "Block",
+                    "gamma",
+                    ContentMatch::Contains,
+                    ContentAction::Block,
+                ),
+            ],
+        );
+        let order = |text: &str| -> Vec<String> {
+            by_weight(&f.screen(Dialect::Chat, &chat(text)))
+                .iter()
+                .map(|h| h.hit.rule.clone())
+                .collect()
+        };
+        assert_eq!(order("alpha beta gamma"), ["Block", "Rec", "Strip"]);
+        assert_eq!(order("alpha beta"), ["Strip", "Rec"]);
     }
 
     #[test]

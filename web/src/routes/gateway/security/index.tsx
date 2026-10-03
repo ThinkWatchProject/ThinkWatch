@@ -50,6 +50,9 @@ const READ_PERMISSION: Record<Guard, string> = {
   content: 'content_filter:read',
 };
 
+/** A policy is saved through the settings endpoint: that takes `settings:write` as well as the guard's own. */
+const mayWrite = (g: Guard) => hasPermission('settings:write') && hasPermission(WRITE_PERMISSION[g]);
+
 type DialogState =
   | null
   | { kind: 'custom'; guard: Guard; editing: SecurityRuleView | null; seed?: RuleSeed }
@@ -282,7 +285,7 @@ export function GatewaySecurityPage() {
               <GuardPanel
                 guard={g}
                 detail={detail[g]}
-                canWrite={hasPermission(WRITE_PERMISSION[g])}
+                canWrite={mayWrite(g)}
                 canTest={hasPermission(READ_PERMISSION[g])}
                 actions={actions(g)}
               />
@@ -299,7 +302,7 @@ export function GatewaySecurityPage() {
           taken={(detail?.[dialog.guard].rules ?? [])
             .filter((r) => r.custom && r.id !== dialog.editing?.id)
             .map((r) => r.id)}
-          canWrite={hasPermission(WRITE_PERMISSION[dialog.guard])}
+          canWrite={mayWrite(dialog.guard)}
           onClose={() => setDialog(null)}
           onSave={(input) => saveCustom(dialog.guard, dialog.editing, input)}
         />
@@ -308,7 +311,7 @@ export function GatewaySecurityPage() {
         <BuiltinRuleDialog
           guard={dialog.guard}
           rule={dialog.rule}
-          canWrite={hasPermission(WRITE_PERMISSION[dialog.guard])}
+          canWrite={mayWrite(dialog.guard)}
           onClose={() => setDialog(null)}
           onCopy={
             hasAction(dialog.guard) && patternOf(dialog.rule)
