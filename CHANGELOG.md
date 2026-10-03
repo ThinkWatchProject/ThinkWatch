@@ -132,6 +132,12 @@ deploying.
   box; a sample can be tried against one rule, an unsaved one, or all
   of them.
 
+### Changed
+
+- **Core crates at ThinkWatch-Core v0.58.0.** `tw-dialect`, `tw-guard`,
+  `tw-breaker` and `tw-bedrock` move from v0.55.0; the shared guard model
+  described above comes with them.
+
 ### Fixed
 
 - **A credential in a matched tool call no longer reaches the audit
