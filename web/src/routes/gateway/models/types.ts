@@ -33,8 +33,9 @@ export interface ModelRow {
   affinity_mode?: AffinityMode | null;
   affinity_ttl_secs?: number | null;
   /// Most output tokens a request to this model may ask for: a larger
-  /// `max_tokens` is lowered to it, and a request without one gets it.
-  /// null ⇒ no limit.
+  /// limit in the request is lowered to it, and a request without one
+  /// gets it when it is within the model family's default (32,000 for
+  /// Claude, 8,192 for others). null ⇒ no limit.
   max_output_tokens?: number | null;
 }
 

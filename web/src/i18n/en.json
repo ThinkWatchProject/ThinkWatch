@@ -791,7 +791,7 @@
     "unlimited": "Unlimited",
     "routingOverrideTitle": "Routing overrides",
     "routingOverrideHint": "Override the gateway-wide defaults for this model. Leave blank to inherit from Settings → Gateway.",
-    "maxOutputTokensHint": "The most output tokens a request to this model can ask for: a larger max_tokens is lowered to it, and a request without one gets it. Leave blank for no limit.",
+    "maxOutputTokensHint": "The most output tokens a request to this model can ask for. A request that sets a limit gets the smaller of the two; one that sets none gets this value if it is within the model family's default (32,000 for Claude, 8,192 for others), and the model's own default otherwise. Leave blank for no limit.",
     "strategy": {
       "weighted": "Weighted random",
       "latency": "Latency-first",

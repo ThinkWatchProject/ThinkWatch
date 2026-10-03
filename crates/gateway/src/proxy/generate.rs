@@ -282,7 +282,13 @@ impl Outbound {
     /// Claude, 8,192 otherwise). Above that, a filled-in limit could be one
     /// the model refuses outright, and the model's own limit applies
     /// instead.
-    fn cap_output(&self, dialect: Dialect, body: &mut Value, model: &str, _official: bool) {
+    ///
+    /// `official` is whether the hop goes to the vendor's own endpoint, the
+    /// same flag the conversion gets: a Chat request with no limit is given
+    /// `max_completion_tokens` there (OpenAI's reasoning models refuse
+    /// `max_tokens`) and `max_tokens` elsewhere, where compatible servers
+    /// mostly read only that.
+    fn cap_output(&self, dialect: Dialect, body: &mut Value, model: &str, official: bool) {
         let Some(cap) = self.max_output_tokens.map(u64::from) else {
             return;
         };
@@ -291,7 +297,7 @@ impl Outbound {
         {
             return;
         }
-        tw_dialect::params::cap_max_output_tokens(dialect, body, cap);
+        tw_dialect::params::cap_max_output_tokens(dialect, body, cap, official);
     }
 
     /// Address the request to `protocol`, naming `model` upstream.
@@ -1054,5 +1060,63 @@ mod tests {
         // Not a generation: nothing to convert it to.
         assert_eq!(gemini_target("/v1beta/models/g:countTokens"), None);
         assert_eq!(gemini_target("/v1beta/models/:generateContent"), None);
+    }
+
+    /// The body a Chat caller's request goes out with to a Chat upstream,
+    /// under a model cap of `cap`.
+    fn sent_to_chat(ask: Value, cap: u32, official: bool) -> Value {
+        let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
+            mode: tw_guard::policy::Mode::Off,
+            ..Default::default()
+        });
+        let (_, ledger) = redaction.look(b"{}");
+        let outbound = Outbound {
+            surface: CHAT,
+            path: "/v1/chat/completions".into(),
+            body: ask,
+            stream: false,
+            dialect_headers: Vec::new(),
+            input_estimate: 0,
+            redaction,
+            ledger,
+            max_output_tokens: Some(cap),
+        };
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", official)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        serde_json::from_slice(&wire.body).unwrap()
+    }
+
+    #[test]
+    fn a_chat_request_without_a_limit_gets_the_field_its_endpoint_reads() {
+        let ask = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        // OpenAI's own endpoint: its reasoning models refuse `max_tokens`.
+        let sent = sent_to_chat(ask.clone(), 4096, true);
+        assert_eq!(sent["max_completion_tokens"], 4096, "{sent}");
+        assert!(sent.get("max_tokens").is_none(), "{sent}");
+        // Anywhere else: compatible servers mostly read only `max_tokens`.
+        let sent = sent_to_chat(ask, 4096, false);
+        assert_eq!(sent["max_tokens"], 4096, "{sent}");
+        assert!(sent.get("max_completion_tokens").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn both_chat_limits_are_held_to_the_cap() {
+        // An upstream that reads only `max_tokens` would otherwise go
+        // uncapped; the smaller one the caller wrote is kept.
+        let ask = serde_json::json!({
+            "model": "gpt-5",
+            "max_tokens": 99_999,
+            "max_completion_tokens": 100,
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        for official in [true, false] {
+            let sent = sent_to_chat(ask.clone(), 4096, official);
+            assert_eq!(sent["max_tokens"], 4096, "{sent}");
+            assert_eq!(sent["max_completion_tokens"], 100, "{sent}");
+        }
     }
 }
