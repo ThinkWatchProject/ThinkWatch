@@ -20,6 +20,8 @@
 
 **A self-hosted AI API and MCP gateway for organizations.** Every model request and every MCP tool call passes through one gateway, where it is authenticated against the organization's identity provider, checked against limits and budgets, inspected by security guards, priced, and written to the audit log. It plays the role for AI access that a bastion host plays for server access.
 
+**For individual developers:** [ThinkWatch Lite](https://github.com/ThinkWatchProject/ThinkWatch-Lite) is a free desktop app (MIT) that runs a local gateway for Claude Code, Codex and other AI clients on macOS, Windows and Linux.
+
 **Sponsors:** [Want to appear here?](mailto:fylorn@outlook.com?subject=ThinkWatch%20Lite%20Sponsorship)
 
 ```
