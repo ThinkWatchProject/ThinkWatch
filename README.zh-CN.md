@@ -20,6 +20,8 @@
 
 **面向组织自托管的 AI API 与 MCP 网关。** 组织内的每一次模型请求和 MCP 工具调用都经过同一个网关：以组织的身份系统认证，按限流与预算检查，经安全防护审查，核算费用并写入审计日志。它在 AI 访问中的作用，相当于堡垒机在服务器访问中的作用。
 
+**个人开发者**：[ThinkWatch Lite](https://github.com/ThinkWatchProject/ThinkWatch-Lite) 是免费的桌面应用（MIT 许可证），在 macOS、Windows 与 Linux 上为 Claude Code、Codex 等 AI 客户端运行本地网关。
+
 **赞助商**：[想出现在这里吗？](mailto:fylorn@outlook.com?subject=ThinkWatch%20Lite%20Sponsorship)
 
 ```
