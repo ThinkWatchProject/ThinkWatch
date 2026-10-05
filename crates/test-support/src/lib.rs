@@ -151,9 +151,7 @@ impl TestApp {
     pub async fn try_spawn_with(opts: SpawnOptions) -> anyhow::Result<Self> {
         init_test_tracing();
 
-        let base_url = std::env::var("TEST_DATABASE_BASE_URL").unwrap_or_else(|_| {
-            "postgres://thinkwatch:7c3fe6307d00fe3f2f29f534e806ac71@localhost:5432".into()
-        });
+        let base_url = database_base_url();
         // Default to logical DB 1 so we never trample the dev Redis
         // (DB 0). Override via env when CI uses a dedicated instance.
         let redis_url = std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| {
@@ -195,14 +193,7 @@ impl TestApp {
 
         // Per-test ClickHouse — only when the test asked for it.
         let (ch_owner, ch_client, ch_url, ch_db, ch_user, ch_password) = if opts.clickhouse {
-            let url = std::env::var("TEST_CLICKHOUSE_URL")
-                .unwrap_or_else(|_| "http://localhost:8123".into());
-            let user = std::env::var("TEST_CLICKHOUSE_USER")
-                .ok()
-                .or_else(|| Some("thinkwatch".into()));
-            let password = std::env::var("TEST_CLICKHOUSE_PASSWORD")
-                .ok()
-                .or_else(|| Some("c693ded3da8388c7b6a4288dac91a2ad".into()));
+            let (url, user, password) = clickhouse_env();
             let owner =
                 IsolatedClickHouseDatabase::create(&url, user.as_deref(), password.as_deref())
                     .await
@@ -521,6 +512,28 @@ fn init_test_tracing() {
             .with_test_writer()
             .try_init();
     });
+}
+
+/// The Postgres server tests create their databases on
+/// (`TEST_DATABASE_BASE_URL`), without a database name.
+pub fn database_base_url() -> String {
+    std::env::var("TEST_DATABASE_BASE_URL").unwrap_or_else(|_| {
+        "postgres://thinkwatch:7c3fe6307d00fe3f2f29f534e806ac71@localhost:5432".into()
+    })
+}
+
+/// The ClickHouse server tests create their databases on: URL, user and
+/// password (`TEST_CLICKHOUSE_URL`, `_USER`, `_PASSWORD`).
+pub fn clickhouse_env() -> (String, Option<String>, Option<String>) {
+    let url =
+        std::env::var("TEST_CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".into());
+    let user = std::env::var("TEST_CLICKHOUSE_USER")
+        .ok()
+        .or_else(|| Some("thinkwatch".into()));
+    let password = std::env::var("TEST_CLICKHOUSE_PASSWORD")
+        .ok()
+        .or_else(|| Some("c693ded3da8388c7b6a4288dac91a2ad".into()));
+    (url, user, password)
 }
 
 /// Convenience re-exports so test files only need one `use`.

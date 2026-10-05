@@ -72,6 +72,19 @@ helm upgrade --install thinkwatch deploy/helm/think-watch \
 When `bundled=false` and `externalUrl` is empty the chart fails at
 install-time with an explicit message — no silent broken Secret.
 
+### PostgreSQL behind a connection pooler
+
+Each server instance sets up the schema when it starts, holding a
+Postgres session-level advisory lock so that instances starting together
+take turns. The lock belongs to one Postgres session, so `externalUrl`
+must reach Postgres directly or through a pooler in session mode, never
+one in transaction mode (PgBouncer `pool_mode = transaction`, or the
+transaction-mode port of a managed pooler such as Supabase's): there,
+the lock can stay held on a server connection the pooler keeps after the
+instance is done with it, and every later start waits for it for good.
+The server runs its schema setup on the connections of `DATABASE_URL`;
+there is no separate URL for it.
+
 ### Redis Cluster
 
 The external Redis can be a Redis Cluster. Give its URL the
@@ -86,7 +99,9 @@ redis:
 
 - Every node must be reachable from the server pods at the address it
   announces to the cluster (`cluster-announce-ip` / `-port`): the server
-  follows the cluster's redirects to it.
+  follows the cluster's redirects to it. With `networkPolicy.enabled`,
+  ports the URL doesn't name go in `networkPolicy.extraEgress` (see
+  [Network policy](#network-policy)).
 - A cluster has only database 0, so the URL names no `/<db>`.
 - Nothing else is needed. Every script the server runs keeps its keys in
   one hash slot — the counters of one user's request share the tag
@@ -119,8 +134,8 @@ redis:
   IP addresses that their certificates do not name cannot be used over
   TLS.
 - The port is whatever the service uses for TLS (Azure Cache for Redis:
-  `6380`). With `networkPolicy.enabled`, the chart's egress rule lets
-  the server reach Redis on `6379` only.
+  `6380`). Write it in the URL: a `rediss://` URL without one means
+  `6379`, as `redis://` does.
 
 A self-hosted Redis whose certificate a private CA signed needs that
 CA. Put its PEM certificate in a Secret and name it; the server then
@@ -145,6 +160,41 @@ server pods after changing the Secret. Outside the chart, set
 `REDIS_CA_CERT` to the PEM file's path yourself. Client certificates
 (mutual TLS) are not supported: give such a Redis `tls-auth-clients no`
 and authenticate with the password.
+
+## Network policy
+
+`networkPolicy.enabled` limits what the server pods may reach: DNS, port
+`443` (upstreams, the OIDC provider), and PostgreSQL, Redis and
+ClickHouse on the ports the server connects to them on:
+
+- A bundled database: its service port (`5432`, `6379`, `8123`).
+- An external one: every port its `externalUrl` names, so a database on
+  another port needs no setting of its own. That is the port of each host
+  in the URL, of each `node=` of a Redis Cluster or Sentinel URL, and a
+  Postgres `?port=`.
+- A URL without a port: the client's default for the scheme, which is
+  `5432` for `postgres://`, `6379` for `redis://` and `rediss://` (TLS
+  does not change it), `26379` for a Sentinel and `6379` for the primary it
+  points to, `80` for `http://` and `443` for `https://`.
+
+The server talks to ClickHouse over HTTP only, so ClickHouse's native port
+(`9000`) is not allowed.
+
+What no URL names goes in `networkPolicy.extraEgress`, rules added to the
+server's egress as written: Redis Cluster nodes that announce ports the
+URL doesn't list, a Sentinel's primary on a port other than `6379`, an
+upstream, MCP server or S3 endpoint on a port other than `443` (RustFS and
+MinIO listen on `9000`).
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraEgress:
+    - ports:
+        - port: 7000
+          endPort: 7005
+          protocol: TCP
+```
 
 ## Rotating secrets
 

@@ -29,6 +29,14 @@ target.
   narrow what its owner may do through that key, never widen it. A key given a
   higher limit than its owner to give it more room needs the owner's limit
   raised instead.
+- **Upgrade with an ordinary rollout.** Earlier versions don't take the lock
+  that now makes instances set up the schema one at a time, so don't restart
+  instances of the old version while the first one of this version starts.
+- **No transaction-mode pooler in front of Postgres.** Schema setup now holds a
+  Postgres session-level advisory lock, which a pooler in transaction mode
+  (PgBouncer `pool_mode = transaction`) can leave held, and every later start
+  then waits for it: point `DATABASE_URL` at Postgres itself or at a pooler in
+  session mode (the Helm chart's README has the details).
 
 ### Fixed
 
@@ -75,6 +83,46 @@ target.
   file with that CA, which is then trusted alone; the Helm chart sets it
   from a Secret given in `redis.caSecret`. The chart's README describes
   both.
+- **Several instances starting at once.** Server instances starting together
+  against one database — a Helm `replicaCount` above 1, a rolling upgrade, an
+  autoscaler adding pods — applied the schema side by side, and all but one
+  could exit with `Database migration failed: apply db/schema.sql: … deadlock
+  detected` (on an empty database: `duplicate key value violates unique
+  constraint "pg_extension_name_index"`). With ClickHouse, the rollups that an
+  instance fills from the logs when it finds them empty (`cost_rollup_hourly`,
+  `provider_health_5m`, `mcp_server_call_counts`) could be filled by each of
+  them, counting every request once per instance on the cost pages, the
+  dashboard and the MCP server list. Instances now set up Postgres and
+  ClickHouse one at a time, under Postgres advisory locks: the others wait,
+  logging `Another instance is setting up the database schema; waiting for it
+  to finish`, then find it done. An instance that dies holding a lock releases
+  it with its connection.
+- **Captured bodies kept as long as configured.** With ClickHouse and
+  `audit.body_retention_days` above 30, every server start could clear the
+  captured request and response bodies older than 30 days
+  (`gateway_logs.request_body` / `response_body`, `mcp_logs.tool_arguments`
+  / `tool_result`; the rows themselves stayed). The start-up table setup set
+  those columns' TTL to 30 days each time, and ClickHouse applies a TTL to
+  the data already stored as soon as it is set, before the server put the
+  configured TTL back a moment later. The setup now gives these columns a
+  TTL only when it creates them, so a restart leaves the configured one in
+  place. Bodies already cleared cannot be recovered. The log tables' own
+  TTLs (`data.retention_days_*`) were not affected.
+- **Helm network policy and databases on other ports.** With
+  `networkPolicy.enabled`, the server could reach PostgreSQL only on `5432`,
+  Redis on `6379` and ClickHouse on `8123`, whatever their `externalUrl` said,
+  so a database on another port was blocked — Azure Cache for Redis over TLS
+  (`6380`), ClickHouse Cloud (`8443`), a managed Postgres on a port of its own:
+  the server could not start, or started without writing to ClickHouse. The
+  allowed ports now follow `postgres.externalUrl`, `redis.externalUrl` and
+  `clickhouse.externalUrl`: every port a URL names, and the client's default
+  for its scheme where it names none. `networkPolicy.extraEgress` adds egress
+  rules as written, for ports no URL names (Redis Cluster nodes announcing
+  other ports, an upstream or MCP server on a port other than `443`). The
+  chart's README describes both. Port `9000`, ClickHouse's native protocol,
+  is no longer allowed: the server reaches ClickHouse over HTTP only. An S3
+  endpoint on `9000` (RustFS, MinIO) configured outside the chart needs a
+  rule in `networkPolicy.extraEgress`.
 
 ## [3.1.0] — 2026-10-05
 

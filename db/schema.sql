@@ -5,7 +5,10 @@
 -- in place when the schema changes; the application calls
 -- `sqlx::raw_sql(include_str!("../../../db/schema.sql"))` on every
 -- boot, and every statement here is wrapped in `IF NOT EXISTS` /
--- `OR REPLACE` so a re-run is a no-op on an up-to-date DB.
+-- `OR REPLACE` so a re-run is a no-op on an up-to-date DB. Replicas
+-- starting together apply it one at a time, under an advisory lock
+-- (crates/common/src/db.rs::run_migrations): run side by side, its DDL
+-- deadlocks.
 --
 -- Limits of declarative apply:
 --   * column rename, type narrowing, or DROP COLUMN need an explicit
