@@ -185,23 +185,23 @@ ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_latency (
 -- compression dominates the cold-storage footprint. Sit AFTER
 -- session_id so the existing column order is preserved and new
 -- deployments + upgraded ones converge on the same shape.
-ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS request_body  Nullable(String) CODEC(ZSTD(6)) AFTER session_id;
-ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS response_body Nullable(String) CODEC(ZSTD(6)) AFTER request_body;
+--
+-- Body columns get a SHORTER TTL than the row-level retention: when it
+-- fires, the value is reset to NULL while the row stays around for the
+-- full table TTL, so metadata queries remain whole after bodies have
+-- aged out. The 30 days here is only the TTL a column is created with.
+-- The server sets the operator's `audit.body_retention_days` once it is
+-- up (`apply_body_column_ttls`, crates/server/src/handlers/admin/
+-- retention.rs), and this file runs on every start, so it must never
+-- set the TTL of a column that exists: a 30-day TTL applied, even for
+-- the moment until the server restores a longer one, makes ClickHouse
+-- clear every body older than 30 days.
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS request_body  Nullable(String) CODEC(ZSTD(6)) TTL toDateTime(created_at) + INTERVAL 30 DAY AFTER session_id;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS response_body Nullable(String) CODEC(ZSTD(6)) TTL toDateTime(created_at) + INTERVAL 30 DAY AFTER request_body;
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS request_body_bytes  Nullable(UInt32) AFTER response_body;
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS response_body_bytes Nullable(UInt32) AFTER request_body_bytes;
 -- 'captured' | 'truncated' | 'disabled' | 'from_cache' | 'error'
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality(Nullable(String)) AFTER response_body_bytes;
-
--- Body columns get a SHORTER TTL than the row-level retention. The
--- Rust side (`apply_body_column_ttls` in handlers/admin.rs) re-issues
--- these at startup against the operator-configurable
--- `audit.body_retention_days` setting (default 30); this seed-default
--- exists so a CH bootstrap that happens before the server ever runs
--- still has the right shape. When the column TTL fires, the value is
--- reset to NULL while the row stays around for the full table TTL —
--- so metadata queries remain whole even after bodies have aged out.
-ALTER TABLE gateway_logs MODIFY COLUMN request_body  TTL toDateTime(created_at) + INTERVAL 30 DAY;
-ALTER TABLE gateway_logs MODIFY COLUMN response_body TTL toDateTime(created_at) + INTERVAL 30 DAY;
 
 -- Substring search across captured bodies — auditors searching
 -- "which conversations mentioned API key XYZ" or "which tool calls
@@ -254,15 +254,13 @@ ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
 -- by sanitize_detail); promote both arguments and the upstream result
 -- to first-class columns so audit queries don't have to JSON-parse on
 -- every row. Same ZSTD(6) trade-off as gateway_logs.
-ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_arguments     Nullable(String) CODEC(ZSTD(6)) AFTER detail;
-ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_result        Nullable(String) CODEC(ZSTD(6)) AFTER tool_arguments;
+-- Their TTL as gateway_logs' body columns above: set when the column
+-- is created, never again by this file.
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_arguments     Nullable(String) CODEC(ZSTD(6)) TTL toDateTime(created_at) + INTERVAL 30 DAY AFTER detail;
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_result        Nullable(String) CODEC(ZSTD(6)) TTL toDateTime(created_at) + INTERVAL 30 DAY AFTER tool_arguments;
 ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS arguments_bytes    Nullable(UInt32) AFTER tool_result;
 ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS result_bytes       Nullable(UInt32) AFTER arguments_bytes;
 ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality(Nullable(String)) AFTER result_bytes;
-
--- Same body-column TTL story as gateway_logs above; see comment there.
-ALTER TABLE mcp_logs MODIFY COLUMN tool_arguments TTL toDateTime(created_at) + INTERVAL 30 DAY;
-ALTER TABLE mcp_logs MODIFY COLUMN tool_result    TTL toDateTime(created_at) + INTERVAL 30 DAY;
 
 -- Same substring-search rationale as gateway_logs above.
 ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_tool_arguments ifNull(tool_arguments, '') TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;

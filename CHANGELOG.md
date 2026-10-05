@@ -89,6 +89,17 @@ target.
   logging `Another instance is setting up the database schema; waiting for it
   to finish`, then find it done. An instance that dies holding a lock releases
   it with its connection.
+- **Captured bodies kept as long as configured.** With ClickHouse and
+  `audit.body_retention_days` above 30, every server start could clear the
+  captured request and response bodies older than 30 days
+  (`gateway_logs.request_body` / `response_body`, `mcp_logs.tool_arguments`
+  / `tool_result`; the rows themselves stayed). The start-up table setup set
+  those columns' TTL to 30 days each time, and ClickHouse applies a TTL to
+  the data already stored as soon as it is set, before the server put the
+  configured TTL back a moment later. The setup now gives these columns a
+  TTL only when it creates them, so a restart leaves the configured one in
+  place. Bodies already cleared cannot be recovered. The log tables' own
+  TTLs (`data.retention_days_*`) were not affected.
 - **Helm network policy and databases on other ports.** With
   `networkPolicy.enabled`, the server could reach PostgreSQL only on `5432`,
   Redis on `6379` and ClickHouse on `8123`, whatever their `externalUrl` said,
