@@ -112,17 +112,18 @@ target.
   `networkPolicy.enabled`, the server could reach PostgreSQL only on `5432`,
   Redis on `6379` and ClickHouse on `8123`, whatever their `externalUrl` said,
   so a database on another port was blocked — Azure Cache for Redis over TLS
-  (`6380`), ClickHouse Cloud (`8443`), a managed Postgres on a port of its own:
-  the server could not start, or started without writing to ClickHouse. The
+  (`6380`), a managed Postgres or a ClickHouse on a port of its own: the
+  server could not start, or started without writing to ClickHouse. The
   allowed ports now follow `postgres.externalUrl`, `redis.externalUrl` and
   `clickhouse.externalUrl`: every port a URL names, and the client's default
   for its scheme where it names none. `networkPolicy.extraEgress` adds egress
   rules as written, for ports no URL names (Redis Cluster nodes announcing
   other ports, an upstream or MCP server on a port other than `443`). The
   chart's README describes both. Port `9000`, ClickHouse's native protocol,
-  is no longer allowed: the server reaches ClickHouse over HTTP only. An S3
-  endpoint on `9000` (RustFS, MinIO) configured outside the chart needs a
-  rule in `networkPolicy.extraEgress`.
+  is no longer allowed: the server reaches ClickHouse over plain HTTP only
+  (an `http://` URL; HTTPS is not supported). An S3 endpoint on `9000`
+  (RustFS, MinIO) configured outside the chart needs a rule in
+  `networkPolicy.extraEgress`.
 
 ## [3.1.0] — 2026-10-05
 

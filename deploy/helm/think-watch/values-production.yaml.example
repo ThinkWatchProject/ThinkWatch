@@ -35,7 +35,8 @@ config:
   rustLog: "info,think_watch=info"
 
 # Swap any of these to bundled: false + externalUrl to point at a managed
-# service (RDS, ElastiCache, ClickHouse Cloud). Bundled=true gives you a
+# service (RDS, ElastiCache; ClickHouse over plain http:// only, as the
+# server does not support HTTPS to it). Bundled=true gives you a
 # single-replica in-cluster StatefulSet — fine for small prod, not for HA.
 
 postgres:

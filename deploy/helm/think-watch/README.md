@@ -175,10 +175,11 @@ ClickHouse on the ports the server connects to them on:
 - A URL without a port: the client's default for the scheme, which is
   `5432` for `postgres://`, `6379` for `redis://` and `rediss://` (TLS
   does not change it), `26379` for a Sentinel and `6379` for the primary it
-  points to, `80` for `http://` and `443` for `https://`.
+  points to, and `80` for ClickHouse's `http://`.
 
-The server talks to ClickHouse over HTTP only, so ClickHouse's native port
-(`9000`) is not allowed.
+The server talks to ClickHouse over plain HTTP only, so ClickHouse's
+native port (`9000`) is not allowed. HTTPS to ClickHouse is not supported:
+`clickhouse.externalUrl` must be an `http://` URL.
 
 What no URL names goes in `networkPolicy.extraEgress`, rules added to the
 server's egress as written: Redis Cluster nodes that announce ports the
