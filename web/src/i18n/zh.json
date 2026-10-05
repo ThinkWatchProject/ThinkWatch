@@ -300,6 +300,7 @@
     },
     "check": {
       "credential-to-network": "凭据发往本机和其服务商以外的主机",
+      "thinkwatch-data": "路径或命令指向 ThinkWatch 的数据目录；只是提到不算",
       "file-to-network": "本地文件上传到外部主机"
     },
     "cardNetwork": {
@@ -399,6 +400,10 @@
       "secret-to-unknown-host": {
         "name": "发送凭据到陌生主机",
         "why": "将凭据发送到本机和该凭据所属服务商以外的主机"
+      },
+      "thinkwatch-data": {
+        "name": "读写 ThinkWatch 自己的数据",
+        "why": "读写 ThinkWatch 的数据目录，其中以明文保存全部上游密钥和这几项防护的设置"
       },
       "write-startup-item": {
         "name": "写入启动项",

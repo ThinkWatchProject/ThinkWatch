@@ -11,6 +11,44 @@ target.
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-10-05
+
+The thinkwatch-core crates move from v0.59.0 to v0.62.0. Two changes reach
+the gateway: tool-call inspection gains a built-in rule for ThinkWatch's own
+data directory, and an upstream whose base URL already ends in an API
+version is no longer sent a second one.
+
+### Read before upgrading
+
+- The new tool-call rule `thinkwatch-data` is on and set to cut off, like
+  the other high-risk built-in rules. A deployment whose tool-call
+  inspection is in enforce mode starts cutting off answers whose tool call
+  reads or changes one of the paths below; one in observe mode only records
+  them. Set the rule to record, or switch it off, on the security page to
+  keep the previous behaviour.
+
+### Added
+
+- **Tool-call inspection: `thinkwatch-data` (Read or change ThinkWatch's own
+  data).** A tool call whose path or command points into ThinkWatch's data
+  directory (`~/.thinkwatch`, `%APPDATA%\ThinkWatch`, `/var/lib/thinkwatch`,
+  `/etc/thinkwatch`) — where the desktop gateway keeps every upstream key and
+  its own protection settings. Text that only mentions the directory, such as
+  a document being edited, does not count. The security page lists it with
+  the other built-in rules.
+
+### Fixed
+
+- **Upstream base URLs that end in their own API version** (`…/api/paas/v4`,
+  `…/api/v3`) now receive requests under that version instead of a second
+  `/v1` appended to it, which returned 404. Requests and connection tests
+  both use it.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.59.0 → v0.62.0.
+
 ## [3.0.0] — 2026-10-03
 
 The request guards — outbound redaction, tool-call inspection and the
@@ -1142,7 +1180,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.1.0
 [3.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.0.0
 [2.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.2.0
 [2.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.1.0
