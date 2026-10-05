@@ -94,6 +94,7 @@ The gateway (port `3000`) is the only part that clients need to reach. The conso
 **Limits and budgets**
 - Every limit and budget is checked before the request, against what earlier requests used; tokens are counted after the response, so one request can cross a token limit or a budget before the next is refused. A refused request counts against nothing, and its `429` says in `Retry-After` when the limit frees.
 - A limit set on an API key applies on top of its owner's, on a counter of its own.
+- Redis can be a single node or a Redis Cluster.
 - If Redis is unavailable, limits fail open by default. Setting `security.rate_limit_fail_closed` refuses requests instead.
 - Budget alerts fire once per period at 50%, 80%, 95% and 100%.
 

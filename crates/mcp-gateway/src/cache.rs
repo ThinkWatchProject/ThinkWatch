@@ -254,40 +254,23 @@ impl McpResponseCache {
         user_id: Option<Uuid>,
         server_id: &Uuid,
     ) {
-        let mut cursor: String = "0".to_string();
-        let mut deleted: usize = 0;
-        loop {
-            let page: Result<(String, Vec<String>), _> = self
-                .redis
-                .scan_page(
-                    cursor.clone(),
-                    pattern.clone(),
-                    Some(256),
-                    Some(ScanType::String),
-                )
-                .await;
-            let (next, keys) = match page {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        server = %server_id, user = ?user_id, scope, error = %e,
-                        "MCP cache invalidate: SCAN failed; some stale entries may persist"
-                    );
-                    return;
-                }
-            };
-            if !keys.is_empty() {
-                let n: Result<u64, _> = self.redis.del(keys.clone()).await;
-                match n {
-                    Ok(n) => deleted += n as usize,
-                    Err(e) => tracing::warn!(error = %e, scope, "MCP cache invalidate: DEL failed"),
-                }
+        // On every node, slot by slot, when Redis is a cluster.
+        let deleted = match think_watch_common::redis_keys::delete_matching(
+            &self.redis,
+            &pattern,
+            Some(ScanType::String),
+        )
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    server = %server_id, user = ?user_id, scope, error = %e,
+                    "MCP cache invalidate failed; some stale entries may persist"
+                );
+                return;
             }
-            if next == "0" {
-                break;
-            }
-            cursor = next;
-        }
+        };
         if deleted > 0 {
             tracing::info!(
                 server = %server_id,

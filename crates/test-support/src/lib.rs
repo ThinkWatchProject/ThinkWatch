@@ -86,6 +86,10 @@ pub struct SpawnOptions {
     /// to exercise the offload path inject an in-memory store here
     /// without standing up a real S3 backend.
     pub blob_store: Option<std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>>,
+    /// Boot against this Redis instead of `TEST_REDIS_URL`'s per-slot
+    /// logical DB — e.g. a `redis-cluster://` URL. Nothing is flushed:
+    /// the test must use keys no other test touches.
+    pub redis_url: Option<String>,
 }
 
 /// An SSRF guard that lets a `wiremock` on `127.0.0.1` through and still
@@ -152,7 +156,11 @@ impl TestApp {
         let redis_url = std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| {
             "redis://:225b3facaf55212ff86ad6595e6d6471@localhost:6379/1".into()
         });
-        let redis_url = redis_url_for_slot(&redis_url)?;
+        let shared_redis = opts.redis_url.is_some();
+        let redis_url = match &opts.redis_url {
+            Some(url) => url.clone(),
+            None => redis_url_for_slot(&redis_url)?,
+        };
 
         // Per-test database with migrations applied.
         let db_owner = IsolatedDatabase::create(&base_url)
@@ -171,7 +179,7 @@ impl TestApp {
         // fred 10 doesn't expose FLUSHDB directly (only FLUSHALL),
         // and we don't want to nuke the dev DB. Send the raw
         // command so we only clear the test logical DB.
-        {
+        if !shared_redis {
             use fred::interfaces::ClientLike;
             use fred::types::{ClusterHash, CustomCommand};
             let cmd = CustomCommand::new("FLUSHDB", ClusterHash::FirstKey, false);

@@ -94,6 +94,7 @@ cd web && pnpm install && pnpm dev
 **限流与预算**
 - 所有限流与预算都在请求发出前按此前的用量检查；Token 在响应返回后计入，因此单个请求可能越过 Token 限制或预算，此后的请求才会被拒绝。被拒绝的请求不计入任何限制，其 `429` 响应以 `Retry-After` 说明限制何时解除。
 - 设置在 API Key 上的限制叠加在其所属用户的限制之上，单独计数。
+- Redis 可以是单节点，也可以是 Redis Cluster。
 - Redis 不可用时，限流默认放行；设置 `security.rate_limit_fail_closed` 后改为拒绝请求。
 - 预算提醒在每个周期内于 50%、80%、95% 和 100% 各触发一次。
 

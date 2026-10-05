@@ -95,7 +95,9 @@ impl RateLimiter {
         let now_ms = chrono::Utc::now().timestamp_millis() as f64;
         let window_start = now_ms - 60_000.0;
         let member_id = uuid::Uuid::new_v4().to_string();
-        let rpm_key = format!("ratelimit:rpm:{key}");
+        // `{<key>}` is a Redis Cluster hash tag: the combined script
+        // declares both keys, which a cluster runs only in one slot.
+        let rpm_key = format!("ratelimit:rpm:{{{key}}}");
         let reset_at = chrono::Utc::now().timestamp() + 60; // window resets in ~60s
 
         // When BOTH RPM and TPM are configured, evaluate them atomically
@@ -106,7 +108,7 @@ impl RateLimiter {
         if let (Some(tpm_limit), Some(tokens)) = (tpm_limit, estimated_tokens)
             && tokens > 0
         {
-            let tpm_key = format!("ratelimit:tpm:{key}");
+            let tpm_key = format!("ratelimit:tpm:{{{key}}}");
             let member_with_tokens = format!("{member_id}:{tokens}");
             let result: Vec<i64> = self
                 .redis

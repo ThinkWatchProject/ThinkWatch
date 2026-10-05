@@ -18,6 +18,11 @@ target.
   the counts from before the upgrade are not carried over: every window starts
   empty and fills from the first request after the upgrade. The old keys
   expire by themselves within two window lengths. Budget counters are kept.
+- **Route health starts fresh.** A route's samples, circuit breaker and
+  lifetime request count move to new keys for the same reason, so every route
+  starts closed with nothing counted. The old lifetime counters never expire;
+  `redis-cli --scan --pattern 'route_health:[0-9a-f]*' | xargs redis-cli del`
+  removes them (the new keys start `route_health:{`).
 - **A key's limits no longer replace its owner's.** A rate limit or budget set
   on an API key used to take the place of the owner's limit for the same
   window or period. Both now apply, each on its own counter: a key's limits can
@@ -52,6 +57,14 @@ target.
   (the next midnight, Monday or 1st of the month, UTC). A spent budget also
   sends `x-should-retry: false`, so the OpenAI and Anthropic SDKs don't retry it
   by themselves. The body stays in the caller's API format.
+- **Redis Cluster.** The rate-limit, route-health and quota scripts touched
+  keys of several hash slots, which a Redis Cluster refuses: on a cluster, rate
+  limits silently stopped applying (or refused every request with
+  `security.rate_limit_fail_closed`), circuit breakers never tripped, and cache
+  invalidation reached one node only. Every key a script touches now shares a
+  hash tag, pattern deletes scan every node, and the Helm chart's README
+  describes a `redis-cluster://` URL.
+
 ## [3.1.0] — 2026-10-05
 
 The thinkwatch-core crates move from v0.59.0 to v0.62.0. Two changes reach

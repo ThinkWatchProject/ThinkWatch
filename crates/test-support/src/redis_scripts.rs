@@ -1,4 +1,6 @@
-//! The rate-limit scripts, run against whatever Redis a test hands in.
+//! The rate-limit scripts, run against whatever Redis a test hands in —
+//! one node in `tests/limits.rs`, a Redis Cluster in
+//! `tests/redis_cluster.rs`.
 
 use uuid::Uuid;
 

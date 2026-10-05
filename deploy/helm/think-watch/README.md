@@ -72,6 +72,31 @@ helm upgrade --install thinkwatch deploy/helm/think-watch \
 When `bundled=false` and `externalUrl` is empty the chart fails at
 install-time with an explicit message — no silent broken Secret.
 
+### Redis Cluster
+
+The external Redis can be a Redis Cluster. Give its URL the
+`redis-cluster://` scheme and name one node or more; the server finds the
+rest of the cluster from them:
+
+```yaml
+redis:
+  bundled: false
+  externalUrl: redis-cluster://:pass@redis-0.redis:6379?node=redis-1.redis:6379&node=redis-2.redis:6379
+```
+
+- Every node must be reachable from the server pods at the address it
+  announces to the cluster (`cluster-announce-ip` / `-port`): the server
+  follows the cluster's redirects to it.
+- A cluster has only database 0, so the URL names no `/<db>`.
+- Nothing else is needed. Every script the server runs keeps its keys in
+  one hash slot — the counters of one user's request share the tag
+  `{user:<id>}`, a route's health keys `{<route_id>}` — and pattern
+  deletes (cache invalidation) scan every primary.
+
+Rate limits, budgets, route health, caches and the config change
+notices between instances are tested against a three-primary Redis 8
+cluster (`crates/test-support/tests/redis_cluster.rs`).
+
 ## Rotating secrets
 
 `<release>-secrets` is kept on `helm uninstall`. To rotate passwords:
