@@ -300,6 +300,7 @@
     },
     "check": {
       "credential-to-network": "A credential sent to a host other than this machine and the credential's own provider",
+      "thinkwatch-data": "A path or command that points into ThinkWatch's data directory; a mention does not count",
       "file-to-network": "A local file uploaded to an external host"
     },
     "cardNetwork": {
@@ -399,6 +400,10 @@
       "secret-to-unknown-host": {
         "name": "Send a credential to an unknown host",
         "why": "Sends a credential to a host that is neither local nor the credential's own provider"
+      },
+      "thinkwatch-data": {
+        "name": "Read or change ThinkWatch's own data",
+        "why": "Reads or changes ThinkWatch's data directory, which holds every upstream key in plain text and the settings of these protections"
       },
       "write-startup-item": {
         "name": "Write a startup item",
