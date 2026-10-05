@@ -46,8 +46,7 @@ async fn instance_b_picks_up_instance_a_setting_change_via_pubsub() {
             .await
             .expect("instance B DynamicConfig::load"),
     );
-    let sub_cfg = fred::types::config::Config::from_url(&app.state.config.redis_url)
-        .expect("parse redis_url");
+    let sub_cfg = app.state.config.redis_config().expect("parse redis_url");
     let subscriber: fred::clients::SubscriberClient = fred::types::Builder::from_config(sub_cfg)
         .build_subscriber_client()
         .expect("build_subscriber_client");

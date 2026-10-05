@@ -23,12 +23,16 @@
 //! ```
 //!
 //! Keys carry fresh UUIDs, so nothing is flushed and runs don't collide.
+//!
+//! A TLS cluster (`rediss-cluster://`) works the same way, with
+//! `TEST_REDIS_CA_CERT` naming the CA of its certificates; see
+//! `tests/redis_tls.rs` for how to start one.
 
 use fred::clients::Client;
 use fred::interfaces::{ClientLike, KeysInterface};
 use fred::types::Builder;
-use fred::types::config::Config;
 use think_watch_test_support::prelude::*;
+use think_watch_test_support::test_redis_config;
 
 fn cluster_url() -> Option<String> {
     let url = std::env::var("TEST_REDIS_CLUSTER_URL").ok();
@@ -39,7 +43,7 @@ fn cluster_url() -> Option<String> {
 }
 
 async fn cluster(url: &str) -> Client {
-    let client = Builder::from_config(Config::from_url(url).unwrap())
+    let client = Builder::from_config(test_redis_config(url))
         .build()
         .unwrap();
     client.init().await.unwrap();
@@ -263,20 +267,8 @@ async fn the_gateway_enforces_limits_on_a_cluster() {
 async fn config_change_notices_reach_a_subscriber_on_a_cluster() {
     // What `init::spawn_config_subscriber` does with the same URL: a
     // subscriber on one node hears a publish sent through another.
-    use fred::interfaces::{EventInterface, PubsubInterface};
     let Some(url) = cluster_url() else { return };
     let publisher = cluster(&url).await;
-    let subscriber = Builder::from_config(Config::from_url(&url).unwrap())
-        .build_subscriber_client()
-        .unwrap();
-    subscriber.init().await.unwrap();
-    let mut rx = subscriber.message_rx();
-    subscriber.subscribe("config:changed").await.unwrap();
-
-    think_watch_common::dynamic_config::notify_config_changed(&publisher).await;
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("a notice within 5 s")
-        .unwrap();
-    assert_eq!(msg.channel, "config:changed");
+    think_watch_test_support::assert_config_notice_arrives(test_redis_config(&url), &publisher)
+        .await;
 }
