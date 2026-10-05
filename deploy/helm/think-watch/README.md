@@ -151,8 +151,7 @@ and authenticate with the password.
 ## Network policy
 
 `networkPolicy.enabled` limits what the server pods may reach: DNS, port
-`443` (upstreams, the OIDC provider), `9000` (ClickHouse's native
-protocol), and PostgreSQL, Redis and
+`443` (upstreams, the OIDC provider), and PostgreSQL, Redis and
 ClickHouse on the ports the server connects to them on:
 
 - A bundled database: its service port (`5432`, `6379`, `8123`).
@@ -165,10 +164,14 @@ ClickHouse on the ports the server connects to them on:
   does not change it), `26379` for a Sentinel and `6379` for the primary it
   points to, `80` for `http://` and `443` for `https://`.
 
+The server talks to ClickHouse over HTTP only, so ClickHouse's native port
+(`9000`) is not allowed.
+
 What no URL names goes in `networkPolicy.extraEgress`, rules added to the
 server's egress as written: Redis Cluster nodes that announce ports the
 URL doesn't list, a Sentinel's primary on a port other than `6379`, an
-upstream or MCP server on a port other than `443`.
+upstream, MCP server or S3 endpoint on a port other than `443` (RustFS and
+MinIO listen on `9000`).
 
 ```yaml
 networkPolicy:

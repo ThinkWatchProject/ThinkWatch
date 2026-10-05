@@ -147,8 +147,9 @@ networkPolicy:
   #
   # Egress rules added as written, for ports that no URL names: Redis
   # Cluster nodes announcing ports the URL doesn't list, a Sentinel's
-  # primary on a port other than 6379, an upstream or MCP server on a port
-  # other than 443.
+  # primary on a port other than 6379, an upstream, MCP server or S3
+  # endpoint on a port other than 443 (RustFS and MinIO: 9000). ClickHouse
+  # is reached over HTTP only, so its native port 9000 is not allowed.
   extraEgress: []
   #  - ports:
   #      - port: 7000

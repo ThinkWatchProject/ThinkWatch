@@ -111,7 +111,10 @@ target.
   for its scheme where it names none. `networkPolicy.extraEgress` adds egress
   rules as written, for ports no URL names (Redis Cluster nodes announcing
   other ports, an upstream or MCP server on a port other than `443`). The
-  chart's README describes both.
+  chart's README describes both. Port `9000`, ClickHouse's native protocol,
+  is no longer allowed: the server reaches ClickHouse over HTTP only. An S3
+  endpoint on `9000` (RustFS, MinIO) configured outside the chart needs a
+  rule in `networkPolicy.extraEgress`.
 
 ## [3.1.0] — 2026-10-05
 

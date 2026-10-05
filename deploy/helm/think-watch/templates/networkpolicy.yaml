@@ -48,10 +48,6 @@ spec:
           protocol: TCP
         {{- end }}
     {{- end }}
-    # ClickHouse native
-    - ports:
-        - port: 9000
-          protocol: TCP
     # OIDC provider (HTTPS)
     - ports:
         - port: 443
