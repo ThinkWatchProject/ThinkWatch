@@ -42,14 +42,16 @@
 //! **Once, in one transaction, safe to run again.** The old keys and the
 //! old column go in the same transaction that writes what replaces them,
 //! so the next boot finds nothing to convert, and a failure leaves
-//! everything as it was. An advisory lock keeps two replicas booting at
-//! once from both converting.
+//! everything as it was. Two replicas booting at once don't both convert:
+//! it runs under the schema lock [`crate::db::run_migrations`] holds, and
+//! under a lock of its own, which an instance of a version from before
+//! the schema lock takes too.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection};
 use tw_guard::policy::{
     ContentAction, ContentMatch, ContentPolicy, CustomContentRule, CustomRedactRule,
     CustomToolRule, DEFAULT_LABEL, Guard, LABEL_MAX, Mode, RedactPolicy, ToolAction, ToolPolicy,
@@ -94,8 +96,8 @@ pub const MARKER: &str = "security.legacy_converted";
 /// a rollback, or an old replica restarting, whose seeds write their
 /// defaults back. Converting them would overwrite the policies in force
 /// with those defaults, so they are only removed, with a warning.
-pub async fn upgrade(pool: &PgPool) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
+pub async fn upgrade(conn: &mut PgConnection) -> anyhow::Result<()> {
+    let mut tx = conn.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(LOCK)
         .execute(&mut *tx)

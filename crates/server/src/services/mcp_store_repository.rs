@@ -21,6 +21,9 @@ use uuid::Uuid;
 /// Reserved advisory lock keys (keep this list current):
 ///   * `MCP_STORE_INSTALL_LOCK_KEY` (here): template-install
 ///     serialization in `create_server` when `template_slug` is set.
+///   * `think_watch_common::db::SCHEMA_LOCK` ("twschema") and
+///     `CLICKHOUSE_SETUP_LOCK` ("twchinit"): one instance at a time
+///     through the start-up schema setup.
 const MCP_STORE_INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
 
 /// A category and how many templates are in it.

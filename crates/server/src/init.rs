@@ -18,6 +18,7 @@ use sqlx::PgPool;
 use think_watch_auth::oidc::OidcManager;
 use think_watch_common::audit::{self, AuditConfig, AuditLogger};
 use think_watch_common::config::AppConfig;
+use think_watch_common::db;
 use think_watch_common::dynamic_config::{self, DynamicConfig};
 use think_watch_common::tasks::supervise;
 
@@ -43,33 +44,8 @@ pub async fn init_state(
         .await
         .context("persisted rate-limit / weight rows fail validation")?;
 
-    // ClickHouse tables. Same bounded retry as production but without
-    // the metrics counter (recorder is not installed in tests).
-    if ch_client.is_some() {
-        let mut attempt = 0u32;
-        loop {
-            match audit::ensure_clickhouse_tables(&ch_client).await {
-                Ok(()) => break,
-                Err(e) if attempt < 4 => {
-                    let backoff_ms = 1_500u64 * 2u64.pow(attempt);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        backoff_ms,
-                        "ClickHouse table init failed, retrying: {e}"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    attempt += 1;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "ClickHouse table init failed after {} attempts: {e}",
-                        attempt + 1
-                    );
-                    break;
-                }
-            }
-        }
-    }
+    // ClickHouse tables, when ClickHouse is configured.
+    ensure_clickhouse_schema(&pool, &ch_client).await?;
 
     let dynamic_config = Arc::new(DynamicConfig::load(pool.clone()).await?);
 
@@ -172,6 +148,57 @@ pub async fn init_state(
     };
 
     Ok(state)
+}
+
+/// Create or bring up to date the ClickHouse tables, and backfill the
+/// rollups that are still empty. Retried with a backoff; a ClickHouse
+/// that stays unreachable is logged, not fatal.
+///
+/// One instance at a time, under [`db::CLICKHOUSE_SETUP_LOCK`] in
+/// Postgres: a rollup is backfilled when it is found empty, and two
+/// instances starting together both found it empty and each copied the
+/// whole log into it, counting every request twice. The lock is held for
+/// an attempt, not across the backoff, so that instances starting while
+/// ClickHouse is down don't wait out each other's retries — longer than
+/// the chart's startup probe allows.
+pub async fn ensure_clickhouse_schema(
+    pool: &PgPool,
+    ch_client: &Option<clickhouse::Client>,
+) -> anyhow::Result<()> {
+    if ch_client.is_none() {
+        return Ok(());
+    }
+    let mut attempt = 0u32;
+    loop {
+        let lock = db::StartupLock::acquire(
+            pool,
+            db::CLICKHOUSE_SETUP_LOCK,
+            "setting up the ClickHouse tables",
+        )
+        .await?;
+        let result = audit::ensure_clickhouse_tables(ch_client).await;
+        lock.release().await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < 4 => {
+                let backoff_ms = 1_500u64 * 2u64.pow(attempt);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    backoff_ms,
+                    "ClickHouse table init failed, retrying: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                attempt += 1;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "ClickHouse table init failed after {} attempts: {e}",
+                    attempt + 1
+                );
+                return Ok(());
+            }
+        }
+    }
 }
 
 fn audit_config(config: &AppConfig) -> AuditConfig {

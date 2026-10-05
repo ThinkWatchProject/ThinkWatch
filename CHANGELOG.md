@@ -75,6 +75,20 @@ target.
   file with that CA, which is then trusted alone; the Helm chart sets it
   from a Secret given in `redis.caSecret`. The chart's README describes
   both.
+- **Several instances starting at once.** Server instances starting together
+  against one database — a Helm `replicaCount` above 1, a rolling upgrade, an
+  autoscaler adding pods — applied the schema side by side, and all but one
+  could exit with `Database migration failed: apply db/schema.sql: … deadlock
+  detected` (on an empty database: `duplicate key value violates unique
+  constraint "pg_extension_name_index"`). With ClickHouse, the rollups that an
+  instance fills from the logs when it finds them empty (`cost_rollup_hourly`,
+  `provider_health_5m`, `mcp_server_call_counts`) could be filled by each of
+  them, counting every request once per instance on the cost pages, the
+  dashboard and the MCP server list. Instances now set up Postgres and
+  ClickHouse one at a time, under Postgres advisory locks: the others wait,
+  logging `Another instance is setting up the database schema; waiting for it
+  to finish`, then find it done. An instance that dies holding a lock releases
+  it with its connection.
 
 ## [3.1.0] — 2026-10-05
 
