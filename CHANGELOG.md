@@ -11,6 +11,16 @@ target.
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-10-05
+
+Redis Cluster and Redis over TLS now work, so managed Redis services can be
+used. Usage limits work as documented: token limits refuse, an API key's
+limits count on that key, and a refused request counts against nothing.
+Server instances can start together against one database, a restart no
+longer clears captured bodies older than 30 days, and the Helm network
+policy allows the ports the database URLs name. The thinkwatch-core crates
+stay at v0.62.0.
+
 ### Read before upgrading
 
 - **Rate-limit windows start empty.** Rate-limit counters move to new Redis
@@ -120,7 +130,10 @@ target.
   ClickHouse one at a time, under Postgres advisory locks: the others wait,
   logging `Another instance is setting up the database schema; waiting for it
   to finish`, then find it done. An instance that dies holding a lock releases
-  it with its connection.
+  it with its connection. The Helm chart's startup probe allows a pod 125 s
+  to start instead of 35 s, set in `startupProbe` (the chart's README says
+  when to raise it), and an attempt to reach a ClickHouse that doesn't answer
+  gives up after 5 s instead of the system's TCP timeout.
 - **Captured bodies kept as long as configured.** With ClickHouse and
   `audit.body_retention_days` above 30, every server start could clear the
   captured request and response bodies older than 30 days
@@ -1318,7 +1331,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.0
 [3.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.1.0
 [3.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.0.0
 [2.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.2.0
