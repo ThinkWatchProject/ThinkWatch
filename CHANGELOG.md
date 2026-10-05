@@ -17,18 +17,42 @@ target.
   keys (one hash per counter, tagged so that Redis Cluster can run them), and
   the counts from before the upgrade are not carried over: every window starts
   empty and fills from the first request after the upgrade. The old keys
-  expire by themselves within two window lengths. Budget counters are kept.
+  expire by themselves within two window lengths. Users' budget counters are
+  kept; API keys' are not (see below).
 - **Route health starts fresh.** A route's samples, circuit breaker and
   lifetime request count move to new keys for the same reason, so every route
   starts closed with nothing counted. The old lifetime counters never expire;
   `redis-cli --scan --pattern 'route_health:[0-9a-f]*' | xargs redis-cli del`
   removes them (the new keys start `route_health:{`).
+- **An API key's own budgets start again.** 3.1.0 counted a key's budget on
+  its owner's counter (`budget:user:<user id>:…`); 3.2.0 counts it on the
+  key's own (`budget:api_key_lineage:<lineage id>:…`), which starts at zero.
+  A key with a monthly budget of its own can spend all of it again in the
+  rest of the month.
+- **Limits are looser while the rollout runs.** Pods of 3.1.0 and 3.2.0
+  count rate limits and route health on different keys, so each sees only
+  its own version's requests: limits let more through, and circuit breakers
+  can disagree, until the last 3.1.0 pod is gone.
+- **Token limits start refusing.** A `tokens` rate limit never refused a
+  request before. It now does once its window is full, so a deployment with
+  token limits will see `429`s where it saw none.
 - **A key's limits no longer replace its owner's.** A rate limit or budget set
   on an API key used to take the place of the owner's limit for the same
   window or period. Both now apply, each on its own counter: a key's limits can
   narrow what its owner may do through that key, never widen it. A key given a
   higher limit than its owner to give it more room needs the owner's limit
   raised instead.
+- **`rediss://` connects over TLS.** 3.1.0 connected to a `rediss://` URL
+  over plain TCP. A `rediss://` URL pointing at a port without TLS now fails
+  at start: point it at the TLS port, or write `redis://`.
+  - The certificate must name the host in a subjectAltName. One that names
+    it only in its CN, which `redis-cli` accepts, is refused.
+  - Cluster nodes that announce IP addresses their certificates don't name
+    can't be reached.
+- **`budget_unavailable` in dashboards.** With Redis down and
+  `security.rate_limit_fail_closed` on, a request that has a budget is
+  refused as `budget_unavailable`, not `rate_limiter_unavailable`: budgets
+  are checked first.
 - **Upgrade with an ordinary rollout.** Earlier versions don't take the lock
   that now makes instances set up the schema one at a time, so don't restart
   instances of the old version while the first one of this version starts.

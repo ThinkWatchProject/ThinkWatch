@@ -137,7 +137,9 @@ redis:
 - The server checks the Redis certificate against the public CAs, the
   same roots it trusts for upstream HTTPS, and against the host name in
   the URL. Use the endpoint name the service gives, not an IP address,
-  unless the certificate names that address.
+  unless the certificate names that address. The name must be in the
+  certificate's subjectAltName: a certificate that names the host only in
+  its CN, which `redis-cli` accepts, is refused.
 - In a cluster, each node is reached at the address it announces, and
   its certificate must name that address — the host name, or the IP
   address when the node announces one. A cluster whose nodes announce
