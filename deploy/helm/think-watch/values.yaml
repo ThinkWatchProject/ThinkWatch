@@ -76,7 +76,9 @@ postgres:
   image: postgres:18-alpine
   user: thinkwatch
   database: think_watch
-  # Used only when bundled=false; e.g. postgres://user:pass@host:5432/db
+  # Used only when bundled=false; e.g. postgres://user:pass@host:5432/db.
+  # Postgres itself or a pooler in session mode, never transaction mode
+  # (see README.md, "PostgreSQL behind a connection pooler").
   externalUrl: ""
   storage: 10Gi
   storageClassName: ""
@@ -91,8 +93,18 @@ postgres:
 redis:
   bundled: true
   image: redis:8-alpine
-  # Used only when bundled=false; e.g. redis://:pass@host:6379
+  # Used only when bundled=false; e.g. redis://:pass@host:6379, or
+  # rediss://:pass@host:6379 for a Redis that requires TLS (see README.md)
   externalUrl: ""
+  # For a rediss:// externalUrl whose certificate a private CA signed:
+  # an existing Secret in the release namespace holding that CA's PEM
+  # certificate(s) under `key` (cert-manager keeps it under `ca.crt`;
+  # required when `name` is set).
+  # The server then trusts only those certificates for Redis. Empty =
+  # the public CAs, which is what managed services need.
+  caSecret:
+    name: ""
+    key: ca.crt
   storage: 2Gi
   storageClassName: ""
   resources:
@@ -108,7 +120,8 @@ clickhouse:
   image: clickhouse/clickhouse-server:26.3-alpine
   user: thinkwatch
   database: think_watch
-  # Used only when bundled=false; e.g. http://host:8123
+  # Used only when bundled=false; e.g. http://host:8123. Plain HTTP only:
+  # the server does not connect to ClickHouse over HTTPS (https:// URLs).
   externalUrl: ""
   storage: 20Gi
   storageClassName: ""
@@ -126,6 +139,26 @@ clickhouse:
 
 networkPolicy:
   enabled: false
+  # The server may reach PostgreSQL, Redis and ClickHouse on the ports it
+  # connects to them on: a bundled service's port, or every port its
+  # externalUrl names (each host, each `node=` of a Redis Cluster or
+  # Sentinel URL, a Postgres `port=`). Where the URL names no port, the
+  # client's default for its scheme: postgres:// 5432; redis:// and
+  # rediss:// 6379; a Sentinel 26379, plus 6379 for the primary it points
+  # to; ClickHouse's http:// 80. A database on another port, such as Azure
+  # Cache for Redis over TLS (rediss://...:6380), needs nothing more than
+  # the port in its URL.
+  #
+  # Egress rules added as written, for ports that no URL names: Redis
+  # Cluster nodes announcing ports the URL doesn't list, a Sentinel's
+  # primary on a port other than 6379, an upstream, MCP server or S3
+  # endpoint on a port other than 443 (RustFS and MinIO: 9000). ClickHouse
+  # is reached over plain HTTP only, so its native port 9000 is not allowed.
+  extraEgress: []
+  #  - ports:
+  #      - port: 7000
+  #        endPort: 7005
+  #        protocol: TCP
 
 autoscaling:
   enabled: false
@@ -138,6 +171,18 @@ podDisruptionBudget:
   minAvailable: 1
 
 terminationGracePeriodSeconds: 30
+
+# The server pod's startup probe. The server answers it once it has set up
+# the database schema, which instances do one at a time: with several
+# replicas starting together (an install, a rollout, an autoscaler adding
+# pods), each waits for those before it, and with ClickHouse unreachable
+# each retries it for up to about a minute. The defaults give a pod
+# 5 + 3 × 40 = 125 s before the kubelet restarts it; raise
+# failureThreshold for more replicas than that covers.
+startupProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 3
+  failureThreshold: 40
 
 podAntiAffinity:
   enabled: true

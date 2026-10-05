@@ -10,7 +10,7 @@
 //
 // And the corresponding submodules in this folder:
 //
-//   sliding              — bucketed Lua check_and_record over Redis
+//   sliding              — bucketed Lua admit (before) / record (after) over Redis
 //   budget               — natural-period add_weighted_tokens / check_cap
 //   weight               — model_id → weighted token converter (LRU cached)
 //
@@ -31,14 +31,22 @@
 // Role- and team-level constraints are NOT their own subjects — they live
 // in `rbac_roles.policy_document` (and, if ever added, the analogous field
 // on teams) and fold into each member's merged policy at request time,
-// materializing as `subject = User` rules. Redis counters therefore stay
-// user-scoped and grouping membership never becomes a shared pool.
+// materializing as `subject = User` rules. Grouping membership therefore
+// never becomes a shared pool.
 //
-// At request time the proxy resolves which subjects apply (user +
-// api_key, plus the merged role/team constraint set attributed to that
-// same user) and runs every matching enabled rule through
-// `sliding::check_and_record`. Any single failure rejects the request —
-// Lua handles the all-or-nothing INCR.
+// At request time the proxy builds a [`RequestLimits`]: the user's rules
+// and caps (role defaults with the user's overrides) on the user's
+// counters, and the calling key's own rules and caps on the key
+// lineage's counters. Both sets apply — a key's limits narrow what its
+// owner may do through that key, they never widen the owner's. Every
+// rule goes through one `sliding::admit` call, so a request refused by
+// any of them charges none.
+//
+// Redis Cluster: every rate-limit counter of a request carries the hash
+// tag `{user:<user_id>}` (see `sliding::counter_key`), so the user's and
+// the key's counters share a slot and one script can check them all.
+// Budget counters are read and written one key per command and need no
+// tag.
 //
 // See `plan.md` (limits chapter) for the full design.
 // ============================================================================
@@ -1139,6 +1147,104 @@ fn apply_block_overrides(target: &mut Option<SurfaceBlock>, overrides: Option<Su
 }
 
 // ----------------------------------------------------------------------------
+// What one request is held to
+// ----------------------------------------------------------------------------
+
+/// The rate-limit rules and budget caps one request is held to on one
+/// surface, built in memory from the constraints the auth middleware
+/// resolved. Rule and cap ids are nil: they are not rows.
+#[derive(Debug, Clone, Default)]
+pub struct RequestLimits {
+    /// The user the request runs as. Every rate-limit counter below
+    /// carries their Redis Cluster hash tag (`sliding::counter_key`).
+    pub owner: Uuid,
+    pub rules: Vec<RateLimitRule>,
+    pub caps: Vec<BudgetCap>,
+}
+
+impl RequestLimits {
+    /// `user` is the owner's constraints — role defaults with the user's
+    /// overrides — and counts on the user's counters. `key`, when the
+    /// request came with an API key that has limits of its own, is the
+    /// key's lineage id and those limits; they count on the lineage's
+    /// counters. Both apply: a key's limits narrow its owner's, never
+    /// widen them.
+    pub fn for_request(
+        surface: Surface,
+        owner: Uuid,
+        user: &SurfaceConstraints,
+        key: Option<(Uuid, &SurfaceConstraints)>,
+    ) -> Self {
+        let mut out = Self {
+            owner,
+            ..Self::default()
+        };
+        out.add(surface, RateLimitSubject::User, owner, user);
+        if let Some((lineage, constraints)) = key {
+            out.add(
+                surface,
+                RateLimitSubject::ApiKeyLineage,
+                lineage,
+                constraints,
+            );
+        }
+        out
+    }
+
+    fn add(
+        &mut self,
+        surface: Surface,
+        subject_kind: RateLimitSubject,
+        subject_id: Uuid,
+        constraints: &SurfaceConstraints,
+    ) {
+        let Some(block) = constraints.block(surface) else {
+            return;
+        };
+        let budget_kind = match subject_kind {
+            RateLimitSubject::User => BudgetSubject::User,
+            RateLimitSubject::ApiKeyLineage => BudgetSubject::ApiKeyLineage,
+        };
+        self.rules.extend(
+            block
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .map(|r| RateLimitRule {
+                    id: Uuid::nil(),
+                    subject_kind,
+                    subject_id,
+                    surface,
+                    metric: r.metric,
+                    window_secs: r.window_secs,
+                    max_count: r.max_count,
+                    enabled: true,
+                    expires_at: None,
+                    reason: None,
+                    created_by: None,
+                }),
+        );
+        self.caps.extend(
+            block
+                .budgets
+                .iter()
+                .filter(|b| b.enabled)
+                .map(|b| BudgetCap {
+                    id: Uuid::nil(),
+                    subject_kind: budget_kind,
+                    subject_id,
+                    period: b.period,
+                    limit_tokens: b.limit_tokens,
+                    enabled: true,
+                    expires_at: None,
+                    reason: None,
+                    created_by: None,
+                }),
+        );
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Cache-invalidation pubsub
 //
 // Same shape as `dynamic_config::notify_config_changed`, but on its
@@ -1581,6 +1687,67 @@ mod tests {
         assert_eq!(
             out.mcp_gateway.as_ref().unwrap().budgets[0].limit_tokens,
             42
+        );
+    }
+
+    #[test]
+    fn a_request_is_held_to_its_users_limits_and_its_keys_each_on_their_own_counter() {
+        let user = Uuid::new_v4();
+        let lineage = Uuid::new_v4();
+        let block = |max: i64, budget: i64| SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: max,
+                    enabled: true,
+                }],
+                budgets: vec![SurfaceBudget {
+                    period: BudgetPeriod::Daily,
+                    limit_tokens: budget,
+                    enabled: true,
+                }],
+            }),
+            mcp_gateway: None,
+        };
+        let limits = RequestLimits::for_request(
+            Surface::AiGateway,
+            user,
+            &block(1, 100),
+            Some((lineage, &block(5, 500))),
+        );
+        assert_eq!(limits.owner, user);
+        // The key's rule of the same window does not replace the user's:
+        // both are checked.
+        let rules: Vec<_> = limits
+            .rules
+            .iter()
+            .map(|r| (r.subject_kind, r.subject_id, r.max_count))
+            .collect();
+        assert_eq!(
+            rules,
+            vec![
+                (RateLimitSubject::User, user, 1),
+                (RateLimitSubject::ApiKeyLineage, lineage, 5),
+            ]
+        );
+        let caps: Vec<_> = limits
+            .caps
+            .iter()
+            .map(|c| (c.subject_kind, c.subject_id, c.limit_tokens))
+            .collect();
+        assert_eq!(
+            caps,
+            vec![
+                (BudgetSubject::User, user, 100),
+                (BudgetSubject::ApiKeyLineage, lineage, 500),
+            ]
+        );
+        // Another surface's block is not this request's.
+        assert!(
+            RequestLimits::for_request(Surface::McpGateway, user, &block(1, 100), None)
+                .rules
+                .is_empty()
         );
     }
 

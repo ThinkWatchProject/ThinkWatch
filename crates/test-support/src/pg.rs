@@ -24,6 +24,17 @@ impl IsolatedDatabase {
     /// including) the database name — e.g.
     /// `postgres://user:pwd@localhost:5432`.
     pub async fn create(base_url: &str) -> anyhow::Result<Self> {
+        let db = Self::create_empty(base_url).await?;
+        // Use the workspace migrator from common so the schema stays
+        // in lockstep with production.
+        think_watch_common::db::run_migrations(db.pool())
+            .await
+            .context("run migrations into per-test DB")?;
+        Ok(db)
+    }
+
+    /// A fresh database with nothing in it: what a first start finds.
+    pub async fn create_empty(base_url: &str) -> anyhow::Result<Self> {
         let admin_url = format!("{}/postgres", base_url.trim_end_matches('/'));
         let name = format!("test_tw_{}", Uuid::new_v4().simple());
 
@@ -44,12 +55,6 @@ impl IsolatedDatabase {
             .connect(&url)
             .await
             .context("connect to per-test DB")?;
-
-        // Use the workspace migrator from common so the schema stays
-        // in lockstep with production.
-        think_watch_common::db::run_migrations(&pool)
-            .await
-            .context("run migrations into per-test DB")?;
 
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),

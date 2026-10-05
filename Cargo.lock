@@ -1335,9 +1335,12 @@ dependencies = [
  "parking_lot",
  "rand 0.8.5",
  "redis-protocol",
+ "rustls",
+ "rustls-native-certs",
  "semver",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "url",
@@ -3220,6 +3223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4034,7 +4038,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "think-watch-auth"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4064,7 +4068,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-common"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4077,13 +4081,17 @@ dependencies = [
  "clickhouse",
  "dotenvy",
  "fred",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "http 1.4.0",
+ "hyper-util",
  "metrics",
  "rand 0.10.0",
  "reqwest 0.13.2",
  "rust_decimal",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -4103,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-gateway"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4142,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-mcp-gateway"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4171,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-server"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4222,7 +4230,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-test-support"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-stream",

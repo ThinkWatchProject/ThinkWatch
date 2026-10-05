@@ -40,7 +40,12 @@ pub struct RequestContext<'a> {
     pub user_id: Uuid,
     pub user_email: &'a str,
     pub client_session_id: &'a str,
+    /// The user's limits, counted on the user's counters.
     pub surface_constraints: &'a SurfaceConstraints,
+    /// The calling key's lineage and its own limits, counted on the
+    /// lineage's counters on top of the user's.
+    pub api_key_lineage_id: Option<Uuid>,
+    pub key_constraints: &'a SurfaceConstraints,
     pub allowed_mcp_tools: Option<&'a [String]>,
     pub trace_id: &'a str,
     /// Per-server MCP account override JSON from the calling API key
@@ -586,7 +591,12 @@ impl McpProxy {
         // stays identical to the pre-migration version. We bind
         // the `request.id` onto the response after the fact
         // because the stage doesn't know the wire-level id.
-        let rules = crate::lifecycle::rate_limit_rules(surface_constraints, user_id);
+        let limits = crate::lifecycle::rate_limits(
+            user_id,
+            surface_constraints,
+            ctx.api_key_lineage_id
+                .map(|lineage| (lineage, ctx.key_constraints)),
+        );
         let fail_closed = self.dynamic_config.rate_limit_fail_closed().await;
         let raw = think_watch_common::lifecycle::state::Raw::<crate::lifecycle::McpSurface>::new(
             crate::lifecycle::McpIdentity {
@@ -601,7 +611,14 @@ impl McpProxy {
         );
         let limits_checked = match think_watch_common::lifecycle::stages::check_limits::<
             crate::lifecycle::McpSurface,
-        >(raw, &rules, &self.redis, fail_closed, &self.audit)
+        >(
+            raw,
+            &limits.rules,
+            limits.owner,
+            &self.redis,
+            fail_closed,
+            &self.audit,
+        )
         .await
         {
             Ok(s) => s,

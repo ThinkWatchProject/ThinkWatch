@@ -14,8 +14,8 @@
 // premium. Unset cache weights follow the input weight — see
 // `Weights::resolve` for the ratios.
 //
-// Used by the gateway hot path to feed `sliding::check_and_record`
-// (tokens metric) and `budget::add_weighted_tokens`. The weights
+// Used by the gateway hot path to feed `sliding::record` (tokens
+// metric) and `budget::add_weighted_tokens`. The weights
 // are loaded from PG into a process-local cache the first time we
 // see a given model_id; subsequent calls hit the cache directly.
 //

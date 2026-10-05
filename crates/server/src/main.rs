@@ -50,14 +50,19 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let redis_config = Config::from_url(&config.redis_url).map_err(|e| {
-        tracing::error!("Invalid REDIS_URL: {e}");
-        anyhow::anyhow!("Invalid REDIS_URL")
-    })?;
+    let redis_config = match config.redis_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Invalid Redis configuration: {e:#}");
+            std::process::exit(1);
+        }
+    };
     let redis = Builder::from_config(redis_config).build()?;
     if let Err(e) = redis.init().await {
         tracing::error!("Failed to connect to Redis: {e}");
-        tracing::error!("Check REDIS_URL and ensure Redis is running");
+        tracing::error!(
+            "Check REDIS_URL (and REDIS_CA_CERT for a rediss:// URL) and ensure Redis is running"
+        );
         std::process::exit(1);
     }
     tracing::info!("Redis connected");

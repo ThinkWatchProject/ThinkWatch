@@ -10,6 +10,8 @@ tw-bedrock = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 fred = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -30,7 +32,11 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 metrics = { workspace = true }
 clickhouse = { workspace = true }
+# The ClickHouse client's HTTP connector, built here to give it a connect
+# timeout (`clickhouse_client.rs`).
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 bytes = { workspace = true }
+futures = { workspace = true }
 url = { workspace = true }
 # S3-compatible body offload (matches the same SigV4 + reqwest pattern
 # the Bedrock provider uses — no aws-sdk-s3 dependency, so the build

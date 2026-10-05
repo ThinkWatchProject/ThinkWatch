@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 # Pin the MSRV to the first stable rustc that ships edition 2024 (1.85,
 # released 2025-02-20). Without this, contributors on older toolchains
@@ -90,7 +90,14 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 clickhouse = { version = "0.13", features = ["time", "chrono"] }
 
 # Redis
-fred = { version = "10", features = ["subscriber-client", "i-scripts"] }
+# `enable-rustls` gives fred its rustls connector, for `rediss://` URLs.
+# The connector itself is built in `think_watch_common::redis_config`
+# with the same TLS stack the HTTP client uses (below): rustls on
+# aws-lc-rs, the platform's roots through rustls-platform-verifier. No
+# OpenSSL anywhere, so the static musl image needs nothing new.
+fred = { version = "10", features = ["subscriber-client", "i-scripts", "enable-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = "0.6"
 
 # Auth
 # Crypto-critical crates are pinned with `=` so a silent minor-release

@@ -12,7 +12,7 @@
 //! Plus [`LogCtx::new`] (in `log_ctx.rs`) builds the audit context in
 //! one call instead of 12-field literals at every site.
 
-use super::identity::{budgets_for_ai_gateway, rules_for_ai_gateway};
+use super::identity::limits_for_ai_gateway;
 use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
 
 use super::shaper::StreamShaper;
@@ -24,19 +24,20 @@ use think_watch_common::lifecycle::stages::{
     check_access, check_budget, check_limits, run_post_invoke,
 };
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord, Raw};
-use think_watch_common::limits::{BudgetCap, RateLimitRule};
+use think_watch_common::limits::RequestLimits;
 use tw_dialect::ir::Dialect;
 
 /// Pre-flight result threaded through to `ChatPostInvokeDeps` later
 /// in the handler. Computed once by [`run_preflight_stages`] so the
 /// caller doesn't have to re-derive the rule/cap lists from identity.
 pub(super) struct Preflight {
-    pub(super) request_rules: Vec<RateLimitRule>,
-    pub(super) budget_caps: Vec<BudgetCap>,
+    pub(super) limits: RequestLimits,
 }
 
-/// Run the three shared pre-flight stages — `check_limits` →
-/// `check_budget` → `check_access` — that each AI surface gates on.
+/// Run the three shared pre-flight stages — `check_budget` →
+/// `check_limits` → `check_access` — that each AI surface gates on.
+/// The budget peek goes first because it charges nothing: a request a
+/// spent budget refuses must not have used up a request limit.
 ///
 /// Returns the resolved rule + cap lists so the caller can feed them
 /// into [`ChatPostInvokeDeps`] without re-walking the identity.
@@ -50,8 +51,7 @@ pub(super) async fn run_preflight_stages(
     trace_id: &str,
     model: &str,
 ) -> Result<Preflight, GatewayErrorResponse> {
-    let request_rules = rules_for_ai_gateway(identity);
-    let budget_caps = budgets_for_ai_gateway(identity);
+    let limits = limits_for_ai_gateway(identity);
     let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
 
     let raw = Raw::<ChatCompletionSurface>::new(
@@ -59,18 +59,19 @@ pub(super) async fn run_preflight_stages(
         trace_id.to_string(),
         identity.ip_address.clone(),
     );
-    let limits_checked = check_limits::<ChatCompletionSurface>(
+    let raw = check_budget::<ChatCompletionSurface>(
         raw,
-        &request_rules,
+        &limits.caps,
         &state.redis,
         fail_closed,
         &state.audit,
     )
     .await
     .map_err(short_circuit_to_response)?;
-    let limits_checked = check_budget::<ChatCompletionSurface>(
-        limits_checked,
-        &budget_caps,
+    let limits_checked = check_limits::<ChatCompletionSurface>(
+        raw,
+        &limits.rules,
+        limits.owner,
         &state.redis,
         fail_closed,
         &state.audit,
@@ -81,10 +82,7 @@ pub(super) async fn run_preflight_stages(
         .await
         .map_err(short_circuit_to_response)?;
 
-    Ok(Preflight {
-        request_rules,
-        budget_caps,
-    })
+    Ok(Preflight { limits })
 }
 
 fn short_circuit_to_response(outcome: ChatCompletionOutcome) -> GatewayErrorResponse {

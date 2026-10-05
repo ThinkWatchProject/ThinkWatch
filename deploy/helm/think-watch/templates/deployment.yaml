@@ -95,13 +95,24 @@ spec:
                 name: {{ .Release.Name }}-config
             - secretRef:
                 name: {{ .Release.Name }}-secrets
+          {{- with .Values.redis.caSecret }}
+          {{- if .name }}
+          env:
+            - name: REDIS_CA_CERT
+              value: {{ printf "/etc/thinkwatch/redis-ca/%s" (required "redis.caSecret.key: name the key of Secret redis.caSecret.name that holds the CA certificate (e.g. ca.crt)" .key) | quote }}
+          volumeMounts:
+            - name: redis-ca
+              mountPath: /etc/thinkwatch/redis-ca
+              readOnly: true
+          {{- end }}
+          {{- end }}
           startupProbe:
             httpGet:
               path: /health/live
               port: gateway
-            initialDelaySeconds: 5
-            periodSeconds: 3
-            failureThreshold: 10
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health/live
@@ -118,6 +129,17 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources.server | nindent 12 }}
+      {{- with .Values.redis.caSecret }}
+      {{- if .name }}
+      volumes:
+        - name: redis-ca
+          secret:
+            secretName: {{ .name | quote }}
+            items:
+              - key: {{ .key | quote }}
+                path: {{ .key | quote }}
+      {{- end }}
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

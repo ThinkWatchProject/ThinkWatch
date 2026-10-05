@@ -5,7 +5,10 @@
 -- in place when the schema changes; the application calls
 -- `sqlx::raw_sql(include_str!("../../../db/schema.sql"))` on every
 -- boot, and every statement here is wrapped in `IF NOT EXISTS` /
--- `OR REPLACE` so a re-run is a no-op on an up-to-date DB.
+-- `OR REPLACE` so a re-run is a no-op on an up-to-date DB. Replicas
+-- starting together apply it one at a time, under an advisory lock
+-- (crates/common/src/db.rs::run_migrations): run side by side, its DDL
+-- deadlocks.
 --
 -- Limits of declarative apply:
 --   * column rename, type narrowing, or DROP COLUMN need an explicit
@@ -90,7 +93,10 @@ CREATE TABLE IF NOT EXISTS teams (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL UNIQUE,
     description     TEXT,
-    -- Budget caps live in `budget_caps` (subject_kind = 'team').
+    -- Teams carry no limits or budgets of their own: `budget_caps` and
+    -- `rate_limit_rules` attach to users and API keys only (see the
+    -- note above `rate_limit_rules`). A team's members are limited
+    -- through the roles the team grants.
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

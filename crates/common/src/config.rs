@@ -4,6 +4,11 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub database_url: String,
     pub redis_url: String,
+    /// `REDIS_CA_CERT`: a PEM file with the CA certificate(s) to trust
+    /// for a `rediss://` `REDIS_URL`, in place of the system's roots —
+    /// for a Redis whose certificate a private CA signed. See
+    /// [`crate::redis_config`].
+    pub redis_ca_cert: Option<std::path::PathBuf>,
     pub jwt_secret: String,
     pub encryption_key: String,
     pub server_host: String,
@@ -51,6 +56,9 @@ impl AppConfig {
                 .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?,
             redis_url: std::env::var("REDIS_URL")
                 .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable is required"))?,
+            redis_ca_cert: std::env::var_os("REDIS_CA_CERT")
+                .filter(|s| !s.is_empty())
+                .map(Into::into),
             jwt_secret: std::env::var("JWT_SECRET")
                 .map_err(|_| anyhow::anyhow!("JWT_SECRET environment variable is required"))?,
             encryption_key: std::env::var("ENCRYPTION_KEY")
@@ -134,6 +142,13 @@ impl AppConfig {
             }
         }
 
+        if self.redis_ca_cert.is_some() && !crate::redis_config::uses_tls(&self.redis_url) {
+            tracing::warn!(
+                "REDIS_CA_CERT is set, but REDIS_URL does not use TLS — the connection is \
+                 unencrypted and the certificate unused; use a rediss:// URL"
+            );
+        }
+
         // ClickHouse auth warning
         if self.clickhouse_url.is_some() && self.clickhouse_password.is_none() {
             tracing::warn!(
@@ -142,6 +157,13 @@ impl AppConfig {
         }
 
         Ok(())
+    }
+
+    /// The fred config every Redis client of the server is built from:
+    /// `REDIS_URL`, with TLS when its scheme is `rediss` and
+    /// `REDIS_CA_CERT`'s roots when set.
+    pub fn redis_config(&self) -> anyhow::Result<fred::types::config::Config> {
+        crate::redis_config::client_config(&self.redis_url, self.redis_ca_cert.as_deref())
     }
 
     pub fn gateway_addr(&self) -> String {
@@ -157,6 +179,7 @@ impl AppConfig {
         Self {
             database_url: "postgres://test".into(),
             redis_url: "redis://test".into(),
+            redis_ca_cert: None,
             jwt_secret: jwt_secret.into(),
             encryption_key: encryption_key.into(),
             server_host: "0.0.0.0".into(),

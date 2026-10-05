@@ -1,6 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 # Server pod: allow ingress on gateway (3000) and console (3001) ports,
-# and egress to PostgreSQL, Redis, ClickHouse, and DNS.
+# and egress to PostgreSQL, Redis, ClickHouse, DNS, HTTPS and
+# networkPolicy.extraEgress.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -37,26 +38,24 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # PostgreSQL
+    # PostgreSQL, Redis and ClickHouse (HTTP), on the ports the server
+    # connects to them on (tw.<db>.ports in _helpers.tpl)
+    {{- range $db := list "postgres" "redis" "clickhouse" }}
+    # {{ $db }}
     - ports:
-        - port: 5432
+        {{- range splitList " " (include (printf "tw.%s.ports" $db) $) }}
+        - port: {{ . }}
           protocol: TCP
-    # Redis
-    - ports:
-        - port: 6379
-          protocol: TCP
-    # ClickHouse HTTP
-    - ports:
-        - port: 8123
-          protocol: TCP
-    # ClickHouse native
-    - ports:
-        - port: 9000
-          protocol: TCP
+        {{- end }}
+    {{- end }}
     # OIDC provider (HTTPS)
     - ports:
         - port: 443
           protocol: TCP
+    {{- with .Values.networkPolicy.extraEgress }}
+    # networkPolicy.extraEgress
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 ---
 # Web pod: allow ingress on port 80, egress only to server console port and DNS.
 apiVersion: networking.k8s.io/v1
