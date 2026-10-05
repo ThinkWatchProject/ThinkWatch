@@ -85,6 +85,16 @@ instance is done with it, and every later start waits for it for good.
 The server runs its schema setup on the connections of `DATABASE_URL`;
 there is no separate URL for it.
 
+### Several replicas starting together
+
+Instances set up the schema one at a time, so with several replicas
+starting together each one waits for those before it, and with ClickHouse
+unreachable each one also retries it for up to about a minute. The server
+answers its startup probe only after that. The probe gives a pod
+`5 + 3 × 40 = 125` seconds by default (`startupProbe.initialDelaySeconds`,
+`periodSeconds`, `failureThreshold`); raise `startupProbe.failureThreshold`
+when pods are restarted before they finish starting.
+
 ### Redis Cluster
 
 The external Redis can be a Redis Cluster. Give its URL the

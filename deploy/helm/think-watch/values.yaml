@@ -171,6 +171,18 @@ podDisruptionBudget:
 
 terminationGracePeriodSeconds: 30
 
+# The server pod's startup probe. The server answers it once it has set up
+# the database schema, which instances do one at a time: with several
+# replicas starting together (an install, a rollout, an autoscaler adding
+# pods), each waits for those before it, and with ClickHouse unreachable
+# each retries it for up to about a minute. The defaults give a pod
+# 5 + 3 × 40 = 125 s before the kubelet restarts it; raise
+# failureThreshold for more replicas than that covers.
+startupProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 3
+  failureThreshold: 40
+
 podAntiAffinity:
   enabled: true
   type: preferred
