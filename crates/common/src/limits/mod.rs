@@ -10,7 +10,7 @@
 //
 // And the corresponding submodules in this folder:
 //
-//   sliding              — bucketed Lua check_and_record over Redis
+//   sliding              — bucketed Lua admit (before) / record (after) over Redis
 //   budget               — natural-period add_weighted_tokens / check_cap
 //   weight               — model_id → weighted token converter (LRU cached)
 //

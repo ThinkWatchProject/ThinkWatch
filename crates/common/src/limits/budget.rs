@@ -214,7 +214,7 @@ pub async fn current_spend(
 /// On Redis error this logs and returns `Ok(empty)` so the gateway
 /// keeps running with broken accounting (surfaced via the
 /// `gateway_budget_fail_open_total` metric). Same fail-open posture
-/// as `sliding::check_and_record`.
+/// as `sliding::admit` with `fail_open` set.
 pub async fn add_weighted_tokens(
     redis: &Client,
     caps: &[BudgetCap],
