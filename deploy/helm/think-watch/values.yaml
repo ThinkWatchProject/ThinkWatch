@@ -76,7 +76,9 @@ postgres:
   image: postgres:18-alpine
   user: thinkwatch
   database: think_watch
-  # Used only when bundled=false; e.g. postgres://user:pass@host:5432/db
+  # Used only when bundled=false; e.g. postgres://user:pass@host:5432/db.
+  # Postgres itself or a pooler in session mode, never transaction mode
+  # (see README.md, "PostgreSQL behind a connection pooler").
   externalUrl: ""
   storage: 10Gi
   storageClassName: ""

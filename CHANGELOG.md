@@ -29,6 +29,14 @@ target.
   narrow what its owner may do through that key, never widen it. A key given a
   higher limit than its owner to give it more room needs the owner's limit
   raised instead.
+- **Upgrade with an ordinary rollout.** Earlier versions don't take the lock
+  that now makes instances set up the schema one at a time, so don't restart
+  instances of the old version while the first one of this version starts.
+- **No transaction-mode pooler in front of Postgres.** Schema setup now holds a
+  Postgres session-level advisory lock, which a pooler in transaction mode
+  (PgBouncer `pool_mode = transaction`) can leave held, and every later start
+  then waits for it: point `DATABASE_URL` at Postgres itself or at a pooler in
+  session mode (the Helm chart's README has the details).
 
 ### Fixed
 

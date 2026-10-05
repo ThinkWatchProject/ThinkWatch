@@ -72,6 +72,19 @@ helm upgrade --install thinkwatch deploy/helm/think-watch \
 When `bundled=false` and `externalUrl` is empty the chart fails at
 install-time with an explicit message — no silent broken Secret.
 
+### PostgreSQL behind a connection pooler
+
+Each server instance sets up the schema when it starts, holding a
+Postgres session-level advisory lock so that instances starting together
+take turns. The lock belongs to one Postgres session, so `externalUrl`
+must reach Postgres directly or through a pooler in session mode, never
+one in transaction mode (PgBouncer `pool_mode = transaction`, or the
+transaction-mode port of a managed pooler such as Supabase's): there,
+the lock can stay held on a server connection the pooler keeps after the
+instance is done with it, and every later start waits for it for good.
+The server runs its schema setup on the connections of `DATABASE_URL`;
+there is no separate URL for it.
+
 ### Redis Cluster
 
 The external Redis can be a Redis Cluster. Give its URL the
