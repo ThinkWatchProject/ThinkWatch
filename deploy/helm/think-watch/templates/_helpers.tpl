@@ -77,9 +77,10 @@ would mean 443).
 {{- else -}}
 {{- $url := .Values.redis.externalUrl -}}
 {{- $sentinel := or (regexMatch "^[A-Za-z]+-sentinel://" $url) (contains "sentinelServiceName=" $url) -}}
-{{- include "tw.urlPorts" (dict "url" $url "default" (ternary 26379 6379 $sentinel)) -}}
+{{- $ports := splitList " " (include "tw.urlPorts" (dict "url" $url "default" (ternary 26379 6379 $sentinel))) -}}
 {{- /* The primary a Sentinel points to: the URL can't say where. */ -}}
-{{- if $sentinel }} 6379{{ end -}}
+{{- if $sentinel -}}{{- $ports = append $ports "6379" -}}{{- end -}}
+{{- $ports | uniq | join " " -}}
 {{- end -}}
 {{- end -}}
 

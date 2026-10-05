@@ -98,7 +98,8 @@ redis:
   externalUrl: ""
   # For a rediss:// externalUrl whose certificate a private CA signed:
   # an existing Secret in the release namespace holding that CA's PEM
-  # certificate(s) under `key` (cert-manager keeps it under `ca.crt`).
+  # certificate(s) under `key` (cert-manager keeps it under `ca.crt`;
+  # required when `name` is set).
   # The server then trusts only those certificates for Redis. Empty =
   # the public CAs, which is what managed services need.
   caSecret:
