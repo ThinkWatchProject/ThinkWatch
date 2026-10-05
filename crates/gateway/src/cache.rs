@@ -154,8 +154,8 @@ impl ResponseCache {
             think_watch_common::redis_keys::delete_matching(&self.redis, "llm_cache:*", None)
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!("Cache invalidation failed: {e}");
-                    0
+                    tracing::warn!("Cache invalidation incomplete: {e}");
+                    e.deleted
                 });
         metrics::counter!("gateway_cache_invalidations_total").increment(1);
         tracing::info!(deleted, "Cache invalidated");
