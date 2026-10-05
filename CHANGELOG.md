@@ -11,24 +11,58 @@ target.
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-10-05
+
+Redis Cluster and Redis over TLS now work, so managed Redis services can be
+used. Usage limits work as documented: token limits refuse, an API key's
+limits count on that key, and a refused request counts against nothing.
+Server instances can start together against one database, a restart no
+longer clears captured bodies older than 30 days, and the Helm network
+policy allows the ports the database URLs name. The thinkwatch-core crates
+stay at v0.62.0.
+
 ### Read before upgrading
 
 - **Rate-limit windows start empty.** Rate-limit counters move to new Redis
   keys (one hash per counter, tagged so that Redis Cluster can run them), and
   the counts from before the upgrade are not carried over: every window starts
   empty and fills from the first request after the upgrade. The old keys
-  expire by themselves within two window lengths. Budget counters are kept.
+  expire by themselves within two window lengths. Users' budget counters are
+  kept; API keys' are not (see below).
 - **Route health starts fresh.** A route's samples, circuit breaker and
   lifetime request count move to new keys for the same reason, so every route
   starts closed with nothing counted. The old lifetime counters never expire;
   `redis-cli --scan --pattern 'route_health:[0-9a-f]*' | xargs redis-cli del`
   removes them (the new keys start `route_health:{`).
+- **An API key's own budgets start again.** 3.1.0 counted a key's budget on
+  its owner's counter (`budget:user:<user id>:…`); 3.2.0 counts it on the
+  key's own (`budget:api_key_lineage:<lineage id>:…`), which starts at zero.
+  A key with a monthly budget of its own can spend all of it again in the
+  rest of the month.
+- **Limits are looser while the rollout runs.** Pods of 3.1.0 and 3.2.0
+  count rate limits and route health on different keys, so each sees only
+  its own version's requests: limits let more through, and circuit breakers
+  can disagree, until the last 3.1.0 pod is gone.
+- **Token limits start refusing.** A `tokens` rate limit never refused a
+  request before. It now does once its window is full, so a deployment with
+  token limits will see `429`s where it saw none.
 - **A key's limits no longer replace its owner's.** A rate limit or budget set
   on an API key used to take the place of the owner's limit for the same
   window or period. Both now apply, each on its own counter: a key's limits can
   narrow what its owner may do through that key, never widen it. A key given a
   higher limit than its owner to give it more room needs the owner's limit
   raised instead.
+- **`rediss://` connects over TLS.** 3.1.0 connected to a `rediss://` URL
+  over plain TCP. A `rediss://` URL pointing at a port without TLS now fails
+  at start: point it at the TLS port, or write `redis://`.
+  - The certificate must name the host in a subjectAltName. One that names
+    it only in its CN, which `redis-cli` accepts, is refused.
+  - Cluster nodes that announce IP addresses their certificates don't name
+    can't be reached.
+- **`budget_unavailable` in dashboards.** With Redis down and
+  `security.rate_limit_fail_closed` on, a request that has a budget is
+  refused as `budget_unavailable`, not `rate_limiter_unavailable`: budgets
+  are checked first.
 - **Upgrade with an ordinary rollout.** Earlier versions don't take the lock
   that now makes instances set up the schema one at a time, so don't restart
   instances of the old version while the first one of this version starts.
@@ -96,7 +130,10 @@ target.
   ClickHouse one at a time, under Postgres advisory locks: the others wait,
   logging `Another instance is setting up the database schema; waiting for it
   to finish`, then find it done. An instance that dies holding a lock releases
-  it with its connection.
+  it with its connection. The Helm chart's startup probe allows a pod 125 s
+  to start instead of 35 s, set in `startupProbe` (the chart's README says
+  when to raise it), and an attempt to reach a ClickHouse that doesn't answer
+  gives up after 5 s instead of the system's TCP timeout.
 - **Captured bodies kept as long as configured.** With ClickHouse and
   `audit.body_retention_days` above 30, every server start could clear the
   captured request and response bodies older than 30 days
@@ -112,17 +149,18 @@ target.
   `networkPolicy.enabled`, the server could reach PostgreSQL only on `5432`,
   Redis on `6379` and ClickHouse on `8123`, whatever their `externalUrl` said,
   so a database on another port was blocked — Azure Cache for Redis over TLS
-  (`6380`), ClickHouse Cloud (`8443`), a managed Postgres on a port of its own:
-  the server could not start, or started without writing to ClickHouse. The
+  (`6380`), a managed Postgres or a ClickHouse on a port of its own: the
+  server could not start, or started without writing to ClickHouse. The
   allowed ports now follow `postgres.externalUrl`, `redis.externalUrl` and
   `clickhouse.externalUrl`: every port a URL names, and the client's default
   for its scheme where it names none. `networkPolicy.extraEgress` adds egress
   rules as written, for ports no URL names (Redis Cluster nodes announcing
   other ports, an upstream or MCP server on a port other than `443`). The
   chart's README describes both. Port `9000`, ClickHouse's native protocol,
-  is no longer allowed: the server reaches ClickHouse over HTTP only. An S3
-  endpoint on `9000` (RustFS, MinIO) configured outside the chart needs a
-  rule in `networkPolicy.extraEgress`.
+  is no longer allowed: the server reaches ClickHouse over plain HTTP only
+  (an `http://` URL; HTTPS is not supported). An S3 endpoint on `9000`
+  (RustFS, MinIO) configured outside the chart needs a rule in
+  `networkPolicy.extraEgress`.
 
 ## [3.1.0] — 2026-10-05
 
@@ -1293,7 +1331,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.0
 [3.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.1.0
 [3.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.0.0
 [2.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v2.2.0

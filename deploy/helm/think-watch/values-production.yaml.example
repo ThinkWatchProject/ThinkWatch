@@ -35,7 +35,8 @@ config:
   rustLog: "info,think_watch=info"
 
 # Swap any of these to bundled: false + externalUrl to point at a managed
-# service (RDS, ElastiCache, ClickHouse Cloud). Bundled=true gives you a
+# service (RDS, ElastiCache; ClickHouse over plain http:// only, as the
+# server does not support HTTPS to it). Bundled=true gives you a
 # single-replica in-cluster StatefulSet — fine for small prod, not for HA.
 
 postgres:
@@ -45,6 +46,13 @@ postgres:
 redis:
   bundled: false
   externalUrl: "redis://:REDACTED@redis.internal:6379"
+  # A Redis that requires TLS: rediss:// (rediss-cluster:// for a cluster).
+  # externalUrl: "rediss://:REDACTED@redis.internal:6380"
+  # Its certificate signed by a private CA: a Secret holding the CA's PEM
+  # certificate under `key`, then trusted alone for Redis (see README.md).
+  # caSecret:
+  #   name: redis-ca
+  #   key: ca.crt
 
 clickhouse:
   bundled: false
@@ -64,6 +72,18 @@ podDisruptionBudget:
 
 networkPolicy:
   enabled: true
+  # Egress for ports no externalUrl names: Redis Cluster nodes announcing
+  # other ports, an upstream, MCP server or S3 endpoint off port 443.
+  # extraEgress:
+  #   - ports:
+  #       - port: 7000
+  #         endPort: 7005
+  #         protocol: TCP
+
+# Room for replicas that start together and set up the schema in turn:
+# 5 + 3 × failureThreshold seconds (see values.yaml).
+# startupProbe:
+#   failureThreshold: 60
 
 topologySpreadConstraints:
   enabled: true
@@ -77,5 +97,7 @@ resources:
 
 # SSO/OIDC is configured at runtime via Admin > Settings > SSO in the
 # web console (no env vars / Helm values needed).
-secrets:
-  # jwtSecret and encryptionKey left empty → auto-generated.
+# jwtSecret and encryptionKey left out → auto-generated.
+# secrets:
+#   jwtSecret: ""
+#   encryptionKey: ""

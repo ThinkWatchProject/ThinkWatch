@@ -98,7 +98,8 @@ redis:
   externalUrl: ""
   # For a rediss:// externalUrl whose certificate a private CA signed:
   # an existing Secret in the release namespace holding that CA's PEM
-  # certificate(s) under `key` (cert-manager keeps it under `ca.crt`).
+  # certificate(s) under `key` (cert-manager keeps it under `ca.crt`;
+  # required when `name` is set).
   # The server then trusts only those certificates for Redis. Empty =
   # the public CAs, which is what managed services need.
   caSecret:
@@ -119,7 +120,8 @@ clickhouse:
   image: clickhouse/clickhouse-server:26.3-alpine
   user: thinkwatch
   database: think_watch
-  # Used only when bundled=false; e.g. http://host:8123
+  # Used only when bundled=false; e.g. http://host:8123. Plain HTTP only:
+  # the server does not connect to ClickHouse over HTTPS (https:// URLs).
   externalUrl: ""
   storage: 20Gi
   storageClassName: ""
@@ -143,7 +145,7 @@ networkPolicy:
   # Sentinel URL, a Postgres `port=`). Where the URL names no port, the
   # client's default for its scheme: postgres:// 5432; redis:// and
   # rediss:// 6379; a Sentinel 26379, plus 6379 for the primary it points
-  # to; http:// 80; https:// 443. A database on another port, such as Azure
+  # to; ClickHouse's http:// 80. A database on another port, such as Azure
   # Cache for Redis over TLS (rediss://...:6380), needs nothing more than
   # the port in its URL.
   #
@@ -151,7 +153,7 @@ networkPolicy:
   # Cluster nodes announcing ports the URL doesn't list, a Sentinel's
   # primary on a port other than 6379, an upstream, MCP server or S3
   # endpoint on a port other than 443 (RustFS and MinIO: 9000). ClickHouse
-  # is reached over HTTP only, so its native port 9000 is not allowed.
+  # is reached over plain HTTP only, so its native port 9000 is not allowed.
   extraEgress: []
   #  - ports:
   #      - port: 7000
@@ -169,6 +171,18 @@ podDisruptionBudget:
   minAvailable: 1
 
 terminationGracePeriodSeconds: 30
+
+# The server pod's startup probe. The server answers it once it has set up
+# the database schema, which instances do one at a time: with several
+# replicas starting together (an install, a rollout, an autoscaler adding
+# pods), each waits for those before it, and with ClickHouse unreachable
+# each retries it for up to about a minute. The defaults give a pod
+# 5 + 3 × 40 = 125 s before the kubelet restarts it; raise
+# failureThreshold for more replicas than that covers.
+startupProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 3
+  failureThreshold: 40
 
 podAntiAffinity:
   enabled: true

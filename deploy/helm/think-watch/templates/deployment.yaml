@@ -99,7 +99,7 @@ spec:
           {{- if .name }}
           env:
             - name: REDIS_CA_CERT
-              value: /etc/thinkwatch/redis-ca/{{ .key }}
+              value: {{ printf "/etc/thinkwatch/redis-ca/%s" (required "redis.caSecret.key: name the key of Secret redis.caSecret.name that holds the CA certificate (e.g. ca.crt)" .key) | quote }}
           volumeMounts:
             - name: redis-ca
               mountPath: /etc/thinkwatch/redis-ca
@@ -110,9 +110,9 @@ spec:
             httpGet:
               path: /health/live
               port: gateway
-            initialDelaySeconds: 5
-            periodSeconds: 3
-            failureThreshold: 10
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health/live
@@ -134,10 +134,10 @@ spec:
       volumes:
         - name: redis-ca
           secret:
-            secretName: {{ .name }}
+            secretName: {{ .name | quote }}
             items:
-              - key: {{ .key }}
-                path: {{ .key }}
+              - key: {{ .key | quote }}
+                path: {{ .key | quote }}
       {{- end }}
       {{- end }}
 ---

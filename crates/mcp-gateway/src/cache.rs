@@ -266,9 +266,9 @@ impl McpResponseCache {
             Err(e) => {
                 tracing::warn!(
                     server = %server_id, user = ?user_id, scope, error = %e,
-                    "MCP cache invalidate failed; some stale entries may persist"
+                    "MCP cache invalidate incomplete; some stale entries may persist"
                 );
-                return;
+                e.deleted
             }
         };
         if deleted > 0 {

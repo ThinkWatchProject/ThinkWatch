@@ -85,6 +85,16 @@ instance is done with it, and every later start waits for it for good.
 The server runs its schema setup on the connections of `DATABASE_URL`;
 there is no separate URL for it.
 
+### Several replicas starting together
+
+Instances set up the schema one at a time, so with several replicas
+starting together each one waits for those before it, and with ClickHouse
+unreachable each one also retries it for up to about a minute. The server
+answers its startup probe only after that. The probe gives a pod
+`5 + 3 × 40 = 125` seconds by default (`startupProbe.initialDelaySeconds`,
+`periodSeconds`, `failureThreshold`); raise `startupProbe.failureThreshold`
+when pods are restarted before they finish starting.
+
 ### Redis Cluster
 
 The external Redis can be a Redis Cluster. Give its URL the
@@ -127,7 +137,9 @@ redis:
 - The server checks the Redis certificate against the public CAs, the
   same roots it trusts for upstream HTTPS, and against the host name in
   the URL. Use the endpoint name the service gives, not an IP address,
-  unless the certificate names that address.
+  unless the certificate names that address. The name must be in the
+  certificate's subjectAltName: a certificate that names the host only in
+  its CN, which `redis-cli` accepts, is refused.
 - In a cluster, each node is reached at the address it announces, and
   its certificate must name that address — the host name, or the IP
   address when the node announces one. A cluster whose nodes announce
@@ -175,10 +187,11 @@ ClickHouse on the ports the server connects to them on:
 - A URL without a port: the client's default for the scheme, which is
   `5432` for `postgres://`, `6379` for `redis://` and `rediss://` (TLS
   does not change it), `26379` for a Sentinel and `6379` for the primary it
-  points to, `80` for `http://` and `443` for `https://`.
+  points to, and `80` for ClickHouse's `http://`.
 
-The server talks to ClickHouse over HTTP only, so ClickHouse's native port
-(`9000`) is not allowed.
+The server talks to ClickHouse over plain HTTP only, so ClickHouse's
+native port (`9000`) is not allowed. HTTPS to ClickHouse is not supported:
+`clickhouse.externalUrl` must be an `http://` URL.
 
 What no URL names goes in `networkPolicy.extraEgress`, rules added to the
 server's egress as written: Redis Cluster nodes that announce ports the

@@ -32,6 +32,9 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 metrics = { workspace = true }
 clickhouse = { workspace = true }
+# The ClickHouse client's HTTP connector, built here to give it a connect
+# timeout (`clickhouse_client.rs`).
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 bytes = { workspace = true }
 futures = { workspace = true }
 url = { workspace = true }
