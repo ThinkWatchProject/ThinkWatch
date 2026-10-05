@@ -20,6 +20,7 @@ pub mod client;
 pub mod fixtures;
 pub mod mock_provider;
 pub mod pg;
+pub mod redis_scripts;
 
 use std::sync::Arc;
 

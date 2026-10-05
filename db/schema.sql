@@ -90,7 +90,10 @@ CREATE TABLE IF NOT EXISTS teams (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL UNIQUE,
     description     TEXT,
-    -- Budget caps live in `budget_caps` (subject_kind = 'team').
+    -- Teams carry no limits or budgets of their own: `budget_caps` and
+    -- `rate_limit_rules` attach to users and API keys only (see the
+    -- note above `rate_limit_rules`). A team's members are limited
+    -- through the roles the team grants.
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -92,7 +92,8 @@ The gateway (port `3000`) is the only part that clients need to reach. The conso
 - A model's maximum output tokens, set on the Models page, caps `max_tokens` on every request to that model; it replaces the old output length guardrail.
 
 **Limits and budgets**
-- Request-count limits are checked before the request; token limits and budgets are counted after the response, so one request can cross a budget before the next is refused.
+- Every limit and budget is checked before the request, against what earlier requests used; tokens are counted after the response, so one request can cross a token limit or a budget before the next is refused. A refused request counts against nothing, and its `429` says in `Retry-After` when the limit frees.
+- A limit set on an API key applies on top of its owner's, on a counter of its own.
 - If Redis is unavailable, limits fail open by default. Setting `security.rate_limit_fail_closed` refuses requests instead.
 - Budget alerts fire once per period at 50%, 80%, 95% and 100%.
 

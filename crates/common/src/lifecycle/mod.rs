@@ -8,8 +8,8 @@
 //!
 //! ```text
 //! Raw<S>
-//!   → check_limits      (rate-limit gate)
-//!   → check_budget      (pre-call budget peek)
+//!   → check_budget      (pre-call budget peek; charges nothing)
+//!   → check_limits      (rate-limit gate; charges only when it passes)
 //!   → check_access      (allowed_models / allowed_tools)
 //!   → surface-specific  (cache lookup, breaker, credential resolution,
 //!                        invoke_upstream → Invocation<S>)

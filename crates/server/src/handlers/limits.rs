@@ -675,21 +675,27 @@ pub async fn get_usage(
     let rate_subject = parse_rate_subject(&kind)?;
     let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
     let rules = limits::list_rules(&state.db, rate_subject, storage_id).await?;
+    // The counters the gateway writes carry the requesting user's hash
+    // tag: for a key, its owner. A key without one has never been
+    // let through, so it has counted nothing.
+    let owner = match rate_subject {
+        RateLimitSubject::User => Some(subject_id),
+        RateLimitSubject::ApiKeyLineage => {
+            sqlx::query_scalar::<_, Option<Uuid>>("SELECT user_id FROM api_keys WHERE id = $1")
+                .bind(subject_id)
+                .fetch_optional(&state.db)
+                .await?
+                .flatten()
+        }
+    };
     let mut rule_usage: Vec<RuleUsage> = Vec::with_capacity(rules.len());
     for r in &rules {
-        let resolved = sliding::ResolvedRule {
-            id: r.id,
-            base_key: sliding::build_base_key(
-                r.surface.as_str(),
-                r.subject_kind.as_str(),
-                r.subject_id,
-                r.metric,
-                r.window_secs,
-            ),
-            bucket_secs: sliding::bucket_secs(r.window_secs),
-            max_count: r.max_count,
+        let current = match owner {
+            Some(owner) => {
+                sliding::current_count(&state.redis, &sliding::ResolvedRule::new(r, owner)).await
+            }
+            None => 0,
         };
-        let current = sliding::current_count(&state.redis, &resolved).await;
         rule_usage.push(RuleUsage {
             rule_id: r.id,
             current,

@@ -30,6 +30,7 @@ pub enum TestResponse {
     Ok,
     RateLimited {
         label: String,
+        retry_after_secs: u64,
     },
     RateLimiterUnavailable,
     AccessDenied {
@@ -37,6 +38,7 @@ pub enum TestResponse {
     },
     BudgetExceeded {
         label: String,
+        retry_after_secs: u64,
     },
     BudgetUnavailable,
 }
@@ -133,9 +135,10 @@ impl Surface for TestSurface {
         .audit(action)
     }
 
-    fn rate_limited_response(label: &str) -> Self::Response {
+    fn rate_limited_response(label: &str, retry_after_secs: u64) -> Self::Response {
         TestResponse::RateLimited {
             label: label.to_owned(),
+            retry_after_secs,
         }
     }
 
@@ -156,9 +159,10 @@ impl Surface for TestSurface {
         }
     }
 
-    fn budget_exceeded_response(label: &str) -> Self::Response {
+    fn budget_exceeded_response(label: &str, retry_after_secs: u64) -> Self::Response {
         TestResponse::BudgetExceeded {
             label: label.to_owned(),
+            retry_after_secs,
         }
     }
 

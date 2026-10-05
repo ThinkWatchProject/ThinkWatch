@@ -249,9 +249,8 @@ async fn rate_limit_window_validation_rejects_off_grid_seconds() {
 async fn api_key_scope_rate_limit_isolates_from_other_keys() {
     // Per-key rate-limit rules MUST fire on the gateway hot path —
     // schema supports `subject_kind='api_key_lineage'` and the auth
-    // middleware passes `api_key_id` through
-    // `compute_effective_surface_constraints`, which resolves it to
-    // `lineage_id` before binding. Two keys for the same user: one
+    // middleware loads the key lineage's rules through
+    // `compute_key_surface_constraints`. Two keys for the same user: one
     // carries a max_count=1 rule keyed on its lineage_id, the other
     // carries nothing. Each key must behave independently.
     let app = TestApp::spawn().await;
@@ -444,4 +443,498 @@ async fn api_key_rate_limit_survives_rotation_via_lineage_id() {
         "gen-2 must inherit gen-1's exhausted lineage counter; got {}",
         r.status
     );
+}
+
+// ----------------------------------------------------------------------------
+// Enforcement: token limits, key counters, refusals that charge nothing,
+// and the Retry-After a refusal carries.
+// ----------------------------------------------------------------------------
+
+fn chat() -> Json {
+    json!({"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]})
+}
+
+/// `current` for every rule and cap on a subject, from the console's
+/// usage endpoint — what an operator sees.
+async fn usage(con: &TestClient, kind: &str, id: Uuid) -> (Vec<i64>, Vec<i64>) {
+    let r = con
+        .get(&format!("/api/admin/limits/{kind}/{id}/usage"))
+        .await
+        .unwrap();
+    r.assert_ok();
+    let v: Json = r.json().unwrap();
+    let currents = |field: &str| -> Vec<i64> {
+        v[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["current"].as_i64().unwrap())
+            .collect()
+    };
+    (currents("rules"), currents("caps"))
+}
+
+fn retry_after(r: &think_watch_test_support::client::TestResponse) -> u64 {
+    r.headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("a 429 carries Retry-After, headers: {:?}", r.headers))
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_token_limit_refuses_once_the_window_is_used_up() {
+    // A request costs ~10 weighted tokens against the mock. A limit of 5
+    // lets the first request through (nothing was used yet), records all
+    // of what it used even though that overshoots, and refuses the next.
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "tokens", 60, 5)
+        .await
+        .unwrap();
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+
+    let (rules, _) = usage(&con, "user", user_id).await;
+    assert!(
+        rules[0] > 5,
+        "the whole use is recorded, past the limit; got {rules:?}"
+    );
+
+    let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+    let secs = retry_after(&r);
+    assert!((1..=60).contains(&secs), "Retry-After {secs}");
+    assert_eq!(
+        usage(&con, "user", user_id).await.0,
+        rules,
+        "a refused request records nothing"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn every_request_limit_applies_when_there_are_several() {
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 2)
+        .await
+        .unwrap();
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 300, 5)
+        .await
+        .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    for _ in 0..2 {
+        gw.post("/v1/chat/completions", chat())
+            .await
+            .unwrap()
+            .assert_ok();
+    }
+    let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+}
+
+/// A key and its owner, each with limits of their own.
+async fn second_key(app: &TestApp, user_id: Uuid) -> fixtures::SeededApiKey {
+    fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("limit-key"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_keys_limits_count_on_the_key_not_on_its_owner() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = seed_runtime(&app).await;
+    let key_a = second_key(&app, user_id).await;
+    let key_b = second_key(&app, user_id).await;
+    for key in [&key_a, &key_b] {
+        fixtures::create_rate_limit_rule(
+            &app.db,
+            "api_key_lineage",
+            key.row.lineage_id,
+            "ai_gateway",
+            "requests",
+            60,
+            1,
+        )
+        .await
+        .unwrap();
+    }
+    let con = admin_session(&app).await;
+    let gw = app.gateway_client();
+
+    gw.set_bearer(&key_a.plaintext);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    // Key B has a counter of its own: A's request does not use it up.
+    gw.set_bearer(&key_b.plaintext);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    gw.set_bearer(&key_a.plaintext);
+    let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+
+    // The console reads the counter the gateway writes.
+    assert_eq!(usage(&con, "api_key", key_a.row.id).await.0, vec![1]);
+    assert_eq!(usage(&con, "api_key", key_b.row.id).await.0, vec![1]);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_key_limit_does_not_lift_its_owners() {
+    // The owner may make one request a minute; the key's own limit of
+    // five does not raise that.
+    let app = TestApp::spawn().await;
+    let (_, user_id) = seed_runtime(&app).await;
+    let key = second_key(&app, user_id).await;
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 1)
+        .await
+        .unwrap();
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key.row.lineage_id,
+        "ai_gateway",
+        "requests",
+        60,
+        5,
+    )
+    .await
+    .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_key_budget_counts_on_the_key() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = seed_runtime(&app).await;
+    let key = second_key(&app, user_id).await;
+    fixtures::create_budget_cap(
+        &app.db,
+        "api_key_lineage",
+        key.row.lineage_id,
+        "daily",
+        1_000_000,
+    )
+    .await
+    .unwrap();
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    let (_, caps) = usage(&con, "api_key", key.row.id).await;
+    assert!(
+        caps[0] > 0,
+        "the key's budget counted the request: {caps:?}"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_request_refused_by_a_budget_charges_no_request_limit() {
+    use fred::interfaces::KeysInterface;
+    use think_watch_common::limits::budget;
+
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 2)
+        .await
+        .unwrap();
+    fixtures::create_budget_cap(&app.db, "user", user_id, "daily", 100)
+        .await
+        .unwrap();
+    let spent = budget::build_key("user", user_id, "daily", chrono::Utc::now());
+    let _: () = app
+        .state
+        .redis
+        .set(&spent, 105, None, None, false)
+        .await
+        .unwrap();
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    for _ in 0..3 {
+        let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+        assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+    }
+    assert_eq!(usage(&con, "user", user_id).await.0, vec![0]);
+
+    // With the budget freed, both requests the limit allows go through.
+    let _: () = app.state.redis.del(&spent).await.unwrap();
+    for _ in 0..2 {
+        gw.post("/v1/chat/completions", chat())
+            .await
+            .unwrap()
+            .assert_ok();
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_request_refused_by_a_token_limit_charges_no_request_limit() {
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    let requests =
+        fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 5)
+            .await
+            .unwrap();
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "tokens", 300, 1)
+        .await
+        .unwrap();
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    for _ in 0..3 {
+        let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+        assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+    }
+
+    let r: Json = con
+        .get(&format!("/api/admin/limits/user/{user_id}/usage"))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let requests_used = r["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["rule_id"] == json!(requests))
+        .map(|x| x["current"].as_i64().unwrap());
+    assert_eq!(requests_used, Some(1), "usage: {r}");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_rate_limit_says_when_its_window_frees() {
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 300, 1)
+        .await
+        .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    assert_eq!(r.status.as_u16(), 429);
+    // The one request leaves the five-minute window in under five
+    // minutes, and not before the window has nearly run its course.
+    let secs = retry_after(&r);
+    assert!((290..=300).contains(&secs), "Retry-After {secs}");
+    assert!(
+        r.headers.get("x-should-retry").is_none(),
+        "a window frees by itself; SDK retries are welcome"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_spent_budget_says_when_its_period_ends_and_not_to_retry() {
+    use chrono::{Datelike, TimeZone, Utc};
+    use fred::interfaces::KeysInterface;
+    use think_watch_common::limits::budget;
+
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    fixtures::create_budget_cap(&app.db, "user", user_id, "monthly", 100)
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let spent = budget::build_key("user", user_id, "monthly", now);
+    let _: () = app
+        .state
+        .redis
+        .set(&spent, 100, None, None, false)
+        .await
+        .unwrap();
+    let (y, m) = if now.month() == 12 {
+        (now.year() + 1, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+    let next_month = Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0).unwrap();
+    let expected = (next_month - now).num_seconds();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    // The Anthropic surface, to see the refusal in the caller's format.
+    let r = gw
+        .post(
+            "/v1/messages",
+            json!({"model": "gpt-test", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "x"}]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+    let secs = retry_after(&r) as i64;
+    assert!(
+        (expected - 5..=expected + 5).contains(&secs),
+        "Retry-After {secs}, the month ends in {expected}"
+    );
+    assert_eq!(
+        r.headers
+            .get("x-should-retry")
+            .and_then(|v| v.to_str().ok()),
+        Some("false")
+    );
+    let body: Json = r.json().unwrap();
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["error"]["type"], "rate_limit_error", "{body}");
+}
+
+// ----------------------------------------------------------------------------
+// The scripts themselves, on a clock the test sets.
+// ----------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_limit_scripts_fill_free_and_record() {
+    let app = TestApp::spawn().await;
+    think_watch_test_support::redis_scripts::exercise_the_limit_scripts(&app.state.redis).await;
+}
+
+// ----------------------------------------------------------------------------
+// MCP: a key's limits count on the key there too.
+// ----------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_keys_mcp_limits_count_on_the_key_not_on_its_owner() {
+    use axum::{Json as AxumJson, Router, routing::post};
+
+    let app = TestApp::spawn().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+
+    let upstream = Router::new().route(
+        "/mcp",
+        post(|AxumJson(req): AxumJson<Json>| async move {
+            AxumJson(json!({"jsonrpc": "2.0", "id": req["id"], "result": {"content": []}}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+    let server_id = fixtures::create_mcp_server_with(
+        &app.db,
+        &unique_name("limits-mcp"),
+        "lim",
+        &format!("http://{addr}/mcp"),
+        fixtures::McpServerOpts::default(),
+    )
+    .await
+    .unwrap();
+    let row = sqlx::query_as::<_, think_watch_common::models::McpServer>(
+        "SELECT * FROM mcp_servers WHERE id = $1",
+    )
+    .bind(server_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    let registered = think_watch_server::mcp_runtime::build_registered_server(
+        &app.db,
+        &row,
+        &app.state.config.encryption_key,
+    )
+    .await
+    .unwrap();
+    app.state.mcp_registry.register(registered).await;
+
+    let mut keys = Vec::new();
+    for _ in 0..2 {
+        let key = fixtures::create_api_key(
+            &app.db,
+            user.user.id,
+            &unique_name("mcp-key"),
+            &["mcp_gateway"],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        fixtures::create_rate_limit_rule(
+            &app.db,
+            "api_key_lineage",
+            key.row.lineage_id,
+            "mcp_gateway",
+            "requests",
+            60,
+            1,
+        )
+        .await
+        .unwrap();
+        keys.push(key);
+    }
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    let call = |id: i64| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+               "params": {"name": "lim__anything", "arguments": {}}})
+    };
+    let mut answers = Vec::new();
+    for (id, key) in [(1, &keys[0]), (2, &keys[1]), (3, &keys[0])] {
+        gw.set_bearer(&key.plaintext);
+        let r = gw.post("/mcp", call(id)).await.unwrap();
+        r.assert_ok();
+        answers.push(r.json::<Json>().unwrap());
+    }
+    assert!(answers[0]["result"].is_object(), "{}", answers[0]);
+    assert!(
+        answers[1]["result"].is_object(),
+        "the second key has its own counter: {}",
+        answers[1]
+    );
+    assert_eq!(
+        answers[2]["error"]["message"], "Rate limited: api_key_lineage:requests/1m",
+        "{}",
+        answers[2]
+    );
+    assert_eq!(usage(&con, "api_key", keys[0].row.id).await.0, vec![1]);
 }

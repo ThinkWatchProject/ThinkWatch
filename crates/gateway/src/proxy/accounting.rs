@@ -1,12 +1,12 @@
 //! Post-flight accounting + token resolution for streaming responses.
 //!
-//! [`post_flight_account`] runs the token-metric sliding rules and
-//! budget caps against the token counts the upstream returned — or the
-//! estimate, when it returned none — with cache reads and writes
-//! weighted apart from plain input. Used from BOTH the non-streaming branch (called
-//! inline after the upstream future resolves) and the streaming branch
-//! (called from the post-invoke pipeline after the SSE stream is
-//! drained).
+//! [`post_flight_account`] adds what a request used to its token-metric
+//! sliding rules and budget caps, from the token counts the upstream
+//! returned — or the estimate, when it returned none — with cache reads
+//! and writes weighted apart from plain input. Used from BOTH the
+//! non-streaming branch (called inline after the upstream future
+//! resolves) and the streaming branch (called from the post-invoke
+//! pipeline after the SSE stream is drained).
 //!
 //! All errors are logged and swallowed — by the time we get here the
 //! caller has already received their response, so refusing to account
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use think_watch_common::dynamic_config::DynamicConfig;
-use think_watch_common::limits::{self, BudgetCap, RateMetric, sliding, weight};
+use think_watch_common::limits::{self, RateMetric, RequestLimits, sliding, weight};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn post_flight_account(
@@ -27,15 +27,11 @@ pub(crate) async fn post_flight_account(
     weight_cache: weight::WeightCache,
     model: String,
     tokens: weight::TokenCounts,
-    request_rules: Vec<limits::RateLimitRule>,
-    budget_caps: Vec<BudgetCap>,
+    request_limits: &RequestLimits,
     // Actor attribution for `budget.threshold_crossed` audit entries.
-    // Without these the crossing log carries only `cap_id`, and the
-    // cap's `subject_id` may be a team/role — operators investigating
-    // a 100 %-cross had to time-join against gateway_logs to find the
-    // user who pushed it over. Cloned in the streaming path (the
-    // tokio task moves owned values) and inlined in the non-streaming
-    // path; passing `Option<String>` keeps both call shapes flat.
+    // Without these the crossing log carries only `cap_id`, and
+    // operators investigating a 100 %-cross had to time-join against
+    // gateway_logs to find the user who pushed it over.
     actor_user_id: Option<String>,
     actor_user_email: Option<String>,
     actor_api_key_id: Option<String>,
@@ -48,27 +44,29 @@ pub(crate) async fn post_flight_account(
         return;
     }
 
-    // Token-metric sliding rules — same rule set the pre-flight
-    // loaded, filtered to tokens. Post-flight always runs fail-open
-    // because the response has already been delivered: refusing to
-    // record the spend would just hide it from analytics without
-    // recovering anything.
-    let resolved_token_rules = sliding::resolve_rules(&request_rules, RateMetric::Tokens);
-    if !resolved_token_rules.is_empty()
-        && let Err(e) =
-            sliding::check_and_record(&redis, &resolved_token_rules, weighted, true).await
+    // Token-metric sliding rules — the user's and the key's, the same
+    // rules the pre-flight checked. Recorded whatever they come to: a
+    // window this request overshoots refuses the next one. Post-flight
+    // always runs fail-open because the response has already been
+    // delivered: refusing to record the spend would just hide it from
+    // analytics without recovering anything.
+    if let Err(e) = sliding::record(
+        &redis,
+        &request_limits.rules,
+        request_limits.owner,
+        RateMetric::Tokens,
+        weighted,
+    )
+    .await
     {
         tracing::warn!("token rate-limit accounting failed: {e}");
     }
 
-    // Natural-period budget caps derived from the user's merged
-    // role-inline constraints. `db` is unused here — kept on the
-    // signature so future per-user overrides can fold in cleanly.
-    let _ = db;
-    if !budget_caps.is_empty() {
-        let caps = budget_caps;
+    // Natural-period budget caps — the user's and the key's.
+    if !request_limits.caps.is_empty() {
+        let caps = &request_limits.caps;
         {
-            match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
+            match limits::budget::add_weighted_tokens(&redis, caps, weighted).await {
                 Ok((_statuses, crossings)) if !crossings.is_empty() => {
                     // Emit one `budget.threshold_crossed` audit-log
                     // entry per crossing. The action is namespaced

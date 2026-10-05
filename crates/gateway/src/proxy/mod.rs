@@ -114,12 +114,17 @@ pub struct GatewayRequestIdentity {
     /// PG via `rotated_from_id`.
     pub api_key_lineage_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
-    /// Merged-across-roles inline limits (most restrictive per
-    /// surface+metric+window / surface+period). Computed once by the
-    /// auth middleware via `rbac::compute_user_surface_constraints`
-    /// and consumed directly here — no side-table lookups on the
-    /// hot path.
+    /// The user's limits: merged-across-roles inline limits (most
+    /// restrictive per surface+metric+window / surface+period) with the
+    /// user's own overrides on top. Computed once by the auth middleware
+    /// via `rbac::compute_user_surface_constraints` and consumed directly
+    /// here — no side-table lookups on the hot path. Counted on the
+    /// user's counters.
     pub surface_constraints: SurfaceConstraints,
+    /// The calling key's own limits (`rbac::compute_key_surface_constraints`),
+    /// counted on the key lineage's counters. They apply on top of
+    /// `surface_constraints`, never instead of them.
+    pub key_constraints: SurfaceConstraints,
     /// Resolved client IP (honours `client_ip_source` + `trusted_proxies`).
     /// Populated by the API-key middleware via `extract_client_ip` so
     /// every `gateway_logs` row carries it without each handler reading
@@ -190,14 +195,22 @@ impl IntoResponse for GatewayErrorResponse {
             body,
         )
             .into_response();
-        // Echo the upstream's Retry-After (or our local default) so
-        // well-behaved clients back off the right amount instead of
+        // Echo the upstream's Retry-After (or when our own limit frees)
+        // so well-behaved clients back off the right amount instead of
         // burning quota with tight 3× retries that all hit the same
         // open window.
         if let Some(secs) = self.error.retry_after_secs()
             && let Ok(v) = HeaderValue::from_str(&secs.to_string())
         {
             response.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        // A spent budget: the OpenAI and Anthropic SDKs retry a 429 by
+        // themselves unless told not to.
+        if self.error.should_retry() == Some(false) {
+            response.headers_mut().insert(
+                header::HeaderName::from_static("x-should-retry"),
+                HeaderValue::from_static("false"),
+            );
         }
         response
     }
@@ -239,7 +252,7 @@ mod helper_tests {
                 },
                 429,
             ),
-            (GatewayError::LocalRateLimited("rule".into()), 429),
+            (GatewayError::rate_limited("rule", 5), 429),
             (
                 GatewayError::UpstreamAuthError {
                     status: 401,
@@ -355,16 +368,37 @@ mod helper_tests {
             "no header when upstream didn't tell us — guessing would mislead clients"
         );
 
-        // Local limit — we set our own conservative default so SDKs
-        // see a number instead of immediately retrying.
-        let resp = GatewayErrorResponse::from(GatewayError::LocalRateLimited("budget".into()))
+        // Local limit — when the window has room again, and nothing
+        // that stops an SDK's own retries.
+        let resp = GatewayErrorResponse::from(GatewayError::rate_limited("user:requests/1m", 42))
             .into_response();
         assert_eq!(resp.status().as_u16(), 429);
-        assert!(
+        assert_eq!(
             resp.headers()
                 .get(axum::http::header::RETRY_AFTER)
-                .is_some(),
-            "local rate-limit must carry a Retry-After default"
+                .and_then(|v| v.to_str().ok()),
+            Some("42")
+        );
+        assert!(resp.headers().get("x-should-retry").is_none());
+
+        // A spent budget — the end of its period, and no retries.
+        let resp = GatewayErrorResponse::from(GatewayError::budget_exhausted(
+            "user:budget/monthly",
+            1_234_567,
+        ))
+        .into_response();
+        assert_eq!(resp.status().as_u16(), 429);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1234567")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("false")
         );
 
         // Non-429 responses must NOT carry Retry-After — would
@@ -384,10 +418,11 @@ mod helper_tests {
     async fn the_error_body_is_in_the_callers_format() {
         use tw_dialect::ir::Dialect;
         async fn body(d: Dialect) -> serde_json::Value {
-            let resp = GatewayErrorResponse::from(GatewayError::LocalRateLimited("rule".into()))
+            let resp = GatewayErrorResponse::from(GatewayError::budget_exhausted("rule", 60))
                 .in_dialect(d)
                 .into_response();
             assert_eq!(resp.status().as_u16(), 429);
+            assert_eq!(resp.headers()["x-should-retry"], "false");
             let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
                 .await
                 .unwrap();

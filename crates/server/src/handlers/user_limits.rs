@@ -217,9 +217,10 @@ async fn build_effective_rules(
             // shouldn't 500 the whole dashboard, just show 0.
             let resolved = sliding::ResolvedRule {
                 id: ov.map(|o| o.id).unwrap_or(Uuid::nil()),
-                base_key: sliding::build_base_key(
-                    surface.as_str(),
-                    "user",
+                key: sliding::counter_key(
+                    user_id,
+                    surface,
+                    RateLimitSubject::User,
                     user_id,
                     rule.metric,
                     rule.window_secs,
@@ -518,27 +519,22 @@ async fn reset_rule_counter(
         .window_secs
         .ok_or_else(|| AppError::BadRequest("window_secs is required for rule reset".into()))?;
 
-    let base_key = sliding::build_base_key(surface.as_str(), "user", user_id, metric, window_secs);
-    // Buckets are timestamp-derived (`now_secs / bucket_secs`). DEL the
-    // 60-window range plus a small safety margin in case a late write
-    // lands after we read the clock.
-    let bucket_secs = sliding::bucket_secs(window_secs) as i64;
-    if bucket_secs <= 0 {
-        return Ok(0);
-    }
-    let now = chrono::Utc::now().timestamp();
-    let current_bucket = now / bucket_secs;
-    let mut deleted = 0usize;
-    for b in 0..(sliding::BUCKETS_PER_WINDOW + 2) {
-        let key = format!("{}:{}", base_key, current_bucket - b);
-        match state.redis.del::<u64, _>(&key).await {
-            Ok(n) => deleted += n as usize,
-            Err(e) => {
-                tracing::warn!("reset_rule_counter DEL failed for {key}: {e}");
-            }
+    // One hash holds every bucket of the window.
+    let key = sliding::counter_key(
+        user_id,
+        surface,
+        RateLimitSubject::User,
+        user_id,
+        metric,
+        window_secs,
+    );
+    match state.redis.del::<u64, _>(&key).await {
+        Ok(n) => Ok(n as usize),
+        Err(e) => {
+            tracing::warn!("reset_rule_counter DEL failed for {key}: {e}");
+            Ok(0)
         }
     }
-    Ok(deleted)
 }
 
 async fn reset_cap_counter(

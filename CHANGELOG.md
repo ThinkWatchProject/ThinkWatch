@@ -11,6 +11,47 @@ target.
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **Rate-limit windows start empty.** Rate-limit counters move to new Redis
+  keys (one hash per counter, tagged so that Redis Cluster can run them), and
+  the counts from before the upgrade are not carried over: every window starts
+  empty and fills from the first request after the upgrade. The old keys
+  expire by themselves within two window lengths. Budget counters are kept.
+- **A key's limits no longer replace its owner's.** A rate limit or budget set
+  on an API key used to take the place of the owner's limit for the same
+  window or period. Both now apply, each on its own counter: a key's limits can
+  narrow what its owner may do through that key, never widen it. A key given a
+  higher limit than its owner to give it more room needs the owner's limit
+  raised instead.
+
+### Fixed
+
+- **Token limits refuse requests.** A `tokens` rate limit never refused
+  anything, and stopped counting once a request would have taken it past its
+  limit. A request is now refused once the window's recorded usage reaches the
+  limit, and every request's tokens are recorded after it, even past the limit
+  — a window can overshoot by what was in flight when it filled.
+- **Several request limits at once.** With two or more `requests` limits on a
+  user (per minute and per hour, say), every request that passed was counted
+  twice, and only one of the limits could refuse; with
+  `security.rate_limit_fail_closed` on, every request was refused as
+  `rate_limiter_unavailable`.
+- **An API key's limits count on that key.** They were counted on its owner's
+  counter, which every key of the owner shared, and the usage the console
+  reads for a key (`/api/admin/limits/api_key/{id}/usage`) was always 0. Each
+  key now has counters of its own, rate limits and budgets alike, for the
+  gateway and the MCP gateway, and its usage shows what it used.
+- **A refused request counts against nothing.** A request refused by a spent
+  budget, or by one rate limit after another had passed, was still counted
+  against the request limits. Budgets are now checked first and every rate
+  limit in one step, so a refused request leaves every counter as it was.
+- **`Retry-After` says when to retry.** A `429` from the gateway's own limits
+  said `Retry-After: 30` whatever the limit. It now gives the seconds until the
+  window has room for another request, or until a spent budget's period ends
+  (the next midnight, Monday or 1st of the month, UTC). A spent budget also
+  sends `x-should-retry: false`, so the OpenAI and Anthropic SDKs don't retry it
+  by themselves. The body stays in the caller's API format.
 ## [3.1.0] — 2026-10-05
 
 The thinkwatch-core crates move from v0.59.0 to v0.62.0. Two changes reach
