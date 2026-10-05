@@ -86,7 +86,9 @@ redis:
 
 - Every node must be reachable from the server pods at the address it
   announces to the cluster (`cluster-announce-ip` / `-port`): the server
-  follows the cluster's redirects to it.
+  follows the cluster's redirects to it. With `networkPolicy.enabled`,
+  ports the URL doesn't name go in `networkPolicy.extraEgress` (see
+  [Network policy](#network-policy)).
 - A cluster has only database 0, so the URL names no `/<db>`.
 - Nothing else is needed. Every script the server runs keeps its keys in
   one hash slot — the counters of one user's request share the tag
@@ -119,8 +121,8 @@ redis:
   IP addresses that their certificates do not name cannot be used over
   TLS.
 - The port is whatever the service uses for TLS (Azure Cache for Redis:
-  `6380`). With `networkPolicy.enabled`, the chart's egress rule lets
-  the server reach Redis on `6379` only.
+  `6380`). Write it in the URL: a `rediss://` URL without one means
+  `6379`, as `redis://` does.
 
 A self-hosted Redis whose certificate a private CA signed needs that
 CA. Put its PEM certificate in a Secret and name it; the server then
@@ -145,6 +147,38 @@ server pods after changing the Secret. Outside the chart, set
 `REDIS_CA_CERT` to the PEM file's path yourself. Client certificates
 (mutual TLS) are not supported: give such a Redis `tls-auth-clients no`
 and authenticate with the password.
+
+## Network policy
+
+`networkPolicy.enabled` limits what the server pods may reach: DNS, port
+`443` (upstreams, the OIDC provider), `9000` (ClickHouse's native
+protocol), and PostgreSQL, Redis and
+ClickHouse on the ports the server connects to them on:
+
+- A bundled database: its service port (`5432`, `6379`, `8123`).
+- An external one: every port its `externalUrl` names, so a database on
+  another port needs no setting of its own. That is the port of each host
+  in the URL, of each `node=` of a Redis Cluster or Sentinel URL, and a
+  Postgres `?port=`.
+- A URL without a port: the client's default for the scheme, which is
+  `5432` for `postgres://`, `6379` for `redis://` and `rediss://` (TLS
+  does not change it), `26379` for a Sentinel and `6379` for the primary it
+  points to, `80` for `http://` and `443` for `https://`.
+
+What no URL names goes in `networkPolicy.extraEgress`, rules added to the
+server's egress as written: Redis Cluster nodes that announce ports the
+URL doesn't list, a Sentinel's primary on a port other than `6379`, an
+upstream or MCP server on a port other than `443`.
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraEgress:
+    - ports:
+        - port: 7000
+          endPort: 7005
+          protocol: TCP
+```
 
 ## Rotating secrets
 

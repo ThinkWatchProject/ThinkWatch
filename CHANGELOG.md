@@ -89,6 +89,18 @@ target.
   logging `Another instance is setting up the database schema; waiting for it
   to finish`, then find it done. An instance that dies holding a lock releases
   it with its connection.
+- **Helm network policy and databases on other ports.** With
+  `networkPolicy.enabled`, the server could reach PostgreSQL only on `5432`,
+  Redis on `6379` and ClickHouse on `8123`, whatever their `externalUrl` said,
+  so a database on another port was blocked — Azure Cache for Redis over TLS
+  (`6380`), ClickHouse Cloud (`8443`), a managed Postgres on a port of its own:
+  the server could not start, or started without writing to ClickHouse. The
+  allowed ports now follow `postgres.externalUrl`, `redis.externalUrl` and
+  `clickhouse.externalUrl`: every port a URL names, and the client's default
+  for its scheme where it names none. `networkPolicy.extraEgress` adds egress
+  rules as written, for ports no URL names (Redis Cluster nodes announcing
+  other ports, an upstream or MCP server on a port other than `443`). The
+  chart's README describes both.
 
 ## [3.1.0] — 2026-10-05
 

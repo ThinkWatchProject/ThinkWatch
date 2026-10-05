@@ -135,6 +135,25 @@ clickhouse:
 
 networkPolicy:
   enabled: false
+  # The server may reach PostgreSQL, Redis and ClickHouse on the ports it
+  # connects to them on: a bundled service's port, or every port its
+  # externalUrl names (each host, each `node=` of a Redis Cluster or
+  # Sentinel URL, a Postgres `port=`). Where the URL names no port, the
+  # client's default for its scheme: postgres:// 5432; redis:// and
+  # rediss:// 6379; a Sentinel 26379, plus 6379 for the primary it points
+  # to; http:// 80; https:// 443. A database on another port, such as Azure
+  # Cache for Redis over TLS (rediss://...:6380), needs nothing more than
+  # the port in its URL.
+  #
+  # Egress rules added as written, for ports that no URL names: Redis
+  # Cluster nodes announcing ports the URL doesn't list, a Sentinel's
+  # primary on a port other than 6379, an upstream or MCP server on a port
+  # other than 443.
+  extraEgress: []
+  #  - ports:
+  #      - port: 7000
+  #        endPort: 7005
+  #        protocol: TCP
 
 autoscaling:
   enabled: false
