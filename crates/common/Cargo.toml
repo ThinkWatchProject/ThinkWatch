@@ -10,6 +10,8 @@ tw-bedrock = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 fred = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

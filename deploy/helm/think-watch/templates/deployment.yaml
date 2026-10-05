@@ -95,6 +95,17 @@ spec:
                 name: {{ .Release.Name }}-config
             - secretRef:
                 name: {{ .Release.Name }}-secrets
+          {{- with .Values.redis.caSecret }}
+          {{- if .name }}
+          env:
+            - name: REDIS_CA_CERT
+              value: /etc/thinkwatch/redis-ca/{{ .key }}
+          volumeMounts:
+            - name: redis-ca
+              mountPath: /etc/thinkwatch/redis-ca
+              readOnly: true
+          {{- end }}
+          {{- end }}
           startupProbe:
             httpGet:
               path: /health/live
@@ -118,6 +129,17 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources.server | nindent 12 }}
+      {{- with .Values.redis.caSecret }}
+      {{- if .name }}
+      volumes:
+        - name: redis-ca
+          secret:
+            secretName: {{ .name }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+      {{- end }}
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -8,6 +8,10 @@
 //! Required env (defaults match `make infra`):
 //! - `TEST_DATABASE_BASE_URL` (default `postgres://thinkwatch:thinkwatch@localhost:5432`)
 //! - `TEST_REDIS_URL` (default `redis://localhost:6379`)
+//! - `TEST_REDIS_CA_CERT` (optional): the PEM CA file for a `rediss://`
+//!   Redis whose certificate a private CA signed — `REDIS_CA_CERT` for
+//!   every Redis the tests reach (`TEST_REDIS_URL`, the cluster and TLS
+//!   test URLs)
 //!
 //! Tests run against the same Redis instance. Each `TestApp` FLUSHDBs
 //! its logical DB on spawn, so concurrent tests need separate DBs:
@@ -28,7 +32,6 @@ use anyhow::Context;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::ClientLike;
 use fred::types::Builder;
-use fred::types::config::Config as RedisConfig;
 use sqlx::PgPool;
 use think_watch_common::config::AppConfig;
 use think_watch_server::{app, init};
@@ -157,6 +160,7 @@ impl TestApp {
             "redis://:225b3facaf55212ff86ad6595e6d6471@localhost:6379/1".into()
         });
         let shared_redis = opts.redis_url.is_some();
+        let redis_ca_cert = test_redis_ca_cert();
         let redis_url = match &opts.redis_url {
             Some(url) => url.clone(),
             None => redis_url_for_slot(&redis_url)?,
@@ -175,7 +179,7 @@ impl TestApp {
         // Makefile target) or under nextest, where
         // `redis_url_for_slot` gives each concurrently running test
         // its own DB.
-        let redis = build_redis(&redis_url).await?;
+        let redis = build_redis(&redis_url, redis_ca_cert.as_deref()).await?;
         // fred 10 doesn't expose FLUSHDB directly (only FLUSHALL),
         // and we don't want to nuke the dev DB. Send the raw
         // command so we only clear the test logical DB.
@@ -220,6 +224,7 @@ impl TestApp {
         let config = AppConfig {
             database_url: db_owner.url().to_string(),
             redis_url,
+            redis_ca_cert,
             jwt_secret: "test-jwt-secret-with-enough-entropy-aaa".into(),
             // 64 hex chars = 32 bytes; valid for AES-256-GCM.
             encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -442,8 +447,62 @@ fn redis_url_for_slot(redis_url: &str) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
-async fn build_redis(redis_url: &str) -> anyhow::Result<RedisClient> {
-    let cfg = RedisConfig::from_url(redis_url).context("parse REDIS_URL")?;
+/// `TEST_REDIS_CA_CERT`, the CA file the tests trust for a `rediss://`
+/// Redis.
+pub fn test_redis_ca_cert() -> Option<std::path::PathBuf> {
+    std::env::var_os("TEST_REDIS_CA_CERT")
+        .filter(|s| !s.is_empty())
+        .map(Into::into)
+}
+
+/// The fred config for a test Redis URL, built the way the server builds
+/// its own (TLS included), with `TEST_REDIS_CA_CERT`'s roots.
+pub fn test_redis_config(redis_url: &str) -> fred::types::config::Config {
+    think_watch_common::redis_config::client_config(redis_url, test_redis_ca_cert().as_deref())
+        .expect("a usable test Redis URL")
+}
+
+/// Subscribe a fresh subscriber built from `config` to `config:changed`
+/// and wait until a notice sent through `publisher` reaches it — what a
+/// second instance's `init::spawn_config_subscriber` does.
+///
+/// The notice is sent again until it arrives: fred's `subscribe` can
+/// return while the subscription is still on its way to Redis (a
+/// `PUBLISH` right after it has been seen to reach 0 receivers), and a
+/// Pub/Sub message nobody is subscribed to yet is lost.
+pub async fn assert_config_notice_arrives(
+    config: fred::types::config::Config,
+    publisher: &RedisClient,
+) {
+    use fred::interfaces::{EventInterface, PubsubInterface};
+    use std::time::{Duration, Instant};
+
+    let subscriber = Builder::from_config(config)
+        .build_subscriber_client()
+        .expect("build_subscriber_client");
+    subscriber.init().await.expect("subscriber init");
+    let mut rx = subscriber.message_rx();
+    subscriber
+        .subscribe("config:changed")
+        .await
+        .expect("subscribe");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        think_watch_common::dynamic_config::notify_config_changed(publisher).await;
+        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            assert_eq!(msg.expect("message channel").channel, "config:changed");
+            return;
+        }
+        assert!(Instant::now() < deadline, "no config notice within 5 s");
+    }
+}
+
+async fn build_redis(
+    redis_url: &str,
+    ca_cert: Option<&std::path::Path>,
+) -> anyhow::Result<RedisClient> {
+    let cfg = think_watch_common::redis_config::client_config(redis_url, ca_cert)
+        .context("parse REDIS_URL")?;
     let client = Builder::from_config(cfg).build()?;
     client.init().await.context("redis init")?;
     Ok(client)

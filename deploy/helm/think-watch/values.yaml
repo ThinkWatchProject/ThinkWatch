@@ -91,8 +91,17 @@ postgres:
 redis:
   bundled: true
   image: redis:8-alpine
-  # Used only when bundled=false; e.g. redis://:pass@host:6379
+  # Used only when bundled=false; e.g. redis://:pass@host:6379, or
+  # rediss://:pass@host:6379 for a Redis that requires TLS (see README.md)
   externalUrl: ""
+  # For a rediss:// externalUrl whose certificate a private CA signed:
+  # an existing Secret in the release namespace holding that CA's PEM
+  # certificate(s) under `key` (cert-manager keeps it under `ca.crt`).
+  # The server then trusts only those certificates for Redis. Empty =
+  # the public CAs, which is what managed services need.
+  caSecret:
+    name: ""
+    key: ca.crt
   storage: 2Gi
   storageClassName: ""
   resources:

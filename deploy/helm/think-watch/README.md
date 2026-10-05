@@ -97,6 +97,55 @@ Rate limits, budgets, route health, caches and the config change
 notices between instances are tested against a three-primary Redis 8
 cluster (`crates/test-support/tests/redis_cluster.rs`).
 
+### Redis over TLS
+
+Managed Redis services usually require TLS: ElastiCache with in-transit
+encryption, Upstash, Azure Cache for Redis, Redis Cloud. Give the URL
+the `rediss://` scheme — `rediss-cluster://` for a cluster:
+
+```yaml
+redis:
+  bundled: false
+  externalUrl: rediss://:pass@master.my-cache.abc123.use1.cache.amazonaws.com:6379
+```
+
+- The server checks the Redis certificate against the public CAs, the
+  same roots it trusts for upstream HTTPS, and against the host name in
+  the URL. Use the endpoint name the service gives, not an IP address,
+  unless the certificate names that address.
+- In a cluster, each node is reached at the address it announces, and
+  its certificate must name that address — the host name, or the IP
+  address when the node announces one. A cluster whose nodes announce
+  IP addresses that their certificates do not name cannot be used over
+  TLS.
+- The port is whatever the service uses for TLS (Azure Cache for Redis:
+  `6380`). With `networkPolicy.enabled`, the chart's egress rule lets
+  the server reach Redis on `6379` only.
+
+A self-hosted Redis whose certificate a private CA signed needs that
+CA. Put its PEM certificate in a Secret and name it; the server then
+trusts only the certificates in it for Redis:
+
+```bash
+kubectl -n thinkwatch create secret generic redis-ca --from-file=ca.crt=./ca.crt
+```
+
+```yaml
+redis:
+  bundled: false
+  externalUrl: rediss://:pass@redis.internal:6379
+  caSecret:
+    name: redis-ca
+    key: ca.crt
+```
+
+The chart mounts the key at `/etc/thinkwatch/redis-ca/` and sets
+`REDIS_CA_CERT` to it. The server reads it at start, so restart the
+server pods after changing the Secret. Outside the chart, set
+`REDIS_CA_CERT` to the PEM file's path yourself. Client certificates
+(mutual TLS) are not supported: give such a Redis `tls-auth-clients no`
+and authenticate with the password.
+
 ## Rotating secrets
 
 `<release>-secrets` is kept on `helm uninstall`. To rotate passwords:

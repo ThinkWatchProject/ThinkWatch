@@ -221,14 +221,14 @@ pub fn install_cb_listener(state: &AppState) {
 /// pool whenever any instance flips a setting.
 pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     // Multi-instance config sync (`system_settings.value` updates → Pub/Sub).
-    let sub_main = fred::types::config::Config::from_url(&state.config.redis_url)?;
+    let sub_main = state.config.redis_config()?;
     let sub_main_redis: fred::clients::SubscriberClient =
         Builder::from_config(sub_main).build_subscriber_client()?;
     sub_main_redis.init().await?;
     dynamic_config::spawn_config_subscriber(sub_main_redis, state.dynamic_config.clone());
 
     // Hot-reload the per-state arc-swap handles on the same channel.
-    let sub_filters_cfg = fred::types::config::Config::from_url(&state.config.redis_url)?;
+    let sub_filters_cfg = state.config.redis_config()?;
     let sub_filters: fred::clients::SubscriberClient =
         Builder::from_config(sub_filters_cfg).build_subscriber_client()?;
     sub_filters.init().await?;
@@ -342,7 +342,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     // replica's subscriber rebuilds its local `ArcSwap<ModelRouter>`.
     // Without this, multi-instance deployments had per-replica stale
     // routers between CRUD time and the next process restart.
-    let sub_router_cfg = fred::types::config::Config::from_url(&state.config.redis_url)?;
+    let sub_router_cfg = state.config.redis_config()?;
     let sub_router: fred::clients::SubscriberClient =
         Builder::from_config(sub_router_cfg).build_subscriber_client()?;
     sub_router.init().await?;

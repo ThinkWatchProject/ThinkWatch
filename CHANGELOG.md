@@ -64,6 +64,17 @@ target.
   invalidation reached one node only. Every key a script touches now shares a
   hash tag, pattern deletes scan every node, and the Helm chart's README
   describes a `redis-cluster://` URL.
+- **Redis over TLS.** The server was built without TLS for Redis: a
+  `rediss://` URL was used as plain TCP, so against a Redis that requires
+  TLS — ElastiCache with in-transit encryption, Upstash, Azure Cache for
+  Redis and Redis Cloud among them — the server did not start
+  (`Failed to connect to Redis: Protocol Error: Expected string.`).
+  `rediss://` and `rediss-cluster://` URLs now connect over TLS and check
+  the certificate against the system's CAs, as upstream HTTPS does. For a
+  Redis whose certificate a private CA signed, `REDIS_CA_CERT` names a PEM
+  file with that CA, which is then trusted alone; the Helm chart sets it
+  from a Secret given in `redis.caSecret`. The chart's README describes
+  both.
 
 ## [3.1.0] — 2026-10-05
 
