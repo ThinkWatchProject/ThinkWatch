@@ -28,7 +28,7 @@ use rust_decimal::Decimal;
 use think_watch_common::audit::{AuditActor, AuditEntry, GatewayActor};
 use think_watch_common::lifecycle::Surface;
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord};
-use think_watch_common::limits::{BudgetCap, RateLimitRule};
+use think_watch_common::limits::RequestLimits;
 use tw_dialect::ir::Dialect;
 
 use crate::guards::Guards;
@@ -108,8 +108,7 @@ pub(crate) struct ChatRequestSnapshot {
 
 /// Pre-flight rule + cap lists, reused by the post-flight debit.
 pub(crate) struct ChatPreflightLists {
-    pub request_rules: Vec<RateLimitRule>,
-    pub budget_caps: Vec<BudgetCap>,
+    pub limits: RequestLimits,
 }
 
 /// The route that actually served the request.
@@ -472,20 +471,19 @@ impl Surface for ChatCompletionSurface {
         .audit(action)
     }
 
-    fn rate_limited_response(label: &str) -> Self::Response {
+    fn rate_limited_response(label: &str, retry_after_secs: u64) -> Self::Response {
         // `LocalRateLimited` so `status_code() == 429` on the wire.
-        // The label (`"<subject>:<metric>/<window>"`) is what the
-        // pre-migration `preflight_request_limits` already produced;
-        // keeping it intact lets clients diff exhausted windows.
-        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(label.to_owned()))
+        // The label (`"<subject>:<metric>/<window>"`) lets clients
+        // diff exhausted windows; `Retry-After` says when this one
+        // has room again.
+        ChatCompletionOutcome::ShortCircuit(GatewayError::rate_limited(label, retry_after_secs))
     }
 
     fn rate_limiter_unavailable_response() -> Self::Response {
-        // Matches the pre-migration `preflight_request_limits`
-        // fail-closed path — same `LocalRateLimited` variant with
-        // the sentinel label dashboards already filter on.
-        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(
-            "rate_limiter_unavailable".to_owned(),
+        // Same `LocalRateLimited` variant with the sentinel label
+        // dashboards already filter on.
+        ChatCompletionOutcome::ShortCircuit(GatewayError::limiter_unavailable(
+            "rate_limiter_unavailable",
         ))
     }
 
@@ -507,18 +505,16 @@ impl Surface for ChatCompletionSurface {
         )))
     }
 
-    fn budget_exceeded_response(label: &str) -> Self::Response {
-        // `LocalRateLimited` per its docstring's explicit budget
-        // coverage — wire status 429, label carries which cap fired
-        // (e.g. `"user:budget/monthly"`) so dashboards can split
-        // budget exhaustion from rate-limit hits.
-        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(label.to_owned()))
+    fn budget_exceeded_response(label: &str, retry_after_secs: u64) -> Self::Response {
+        // Wire status 429; the label carries which cap fired (e.g.
+        // `"user:budget/monthly"`) so dashboards can split budget
+        // exhaustion from rate-limit hits. `Retry-After` is the end of
+        // the cap's period, and SDKs are told not to retry by themselves.
+        ChatCompletionOutcome::ShortCircuit(GatewayError::budget_exhausted(label, retry_after_secs))
     }
 
     fn budget_unavailable_response() -> Self::Response {
-        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(
-            "budget_unavailable".to_owned(),
-        ))
+        ChatCompletionOutcome::ShortCircuit(GatewayError::limiter_unavailable("budget_unavailable"))
     }
 
     async fn record_outcome(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
@@ -574,8 +570,7 @@ impl Surface for ChatCompletionSurface {
             deps.state.weight_cache.clone(),
             deps.request.mapped_model.clone(),
             priced(&extract_usage(&invoked.view)),
-            deps.preflight.request_rules.clone(),
-            deps.preflight.budget_caps.clone(),
+            &deps.preflight.limits,
             deps.request.identity.user_id.clone(),
             deps.request.identity.user_email.clone(),
             deps.request.identity.api_key_id.clone(),

@@ -1,78 +1,87 @@
-//! Materialize merged surface constraints into rate-limit rule rows
-//! and budget caps keyed by the authenticated user id.
+//! Materialize the constraints the auth middleware resolved into the
+//! rate-limit rules and budget caps one request is held to.
 
 use uuid::Uuid;
 
 use super::GatewayRequestIdentity;
-use think_watch_common::limits::{
-    BudgetCap, BudgetSubject, RateLimitRule, RateLimitSubject, Surface,
-};
+use think_watch_common::limits::{RequestLimits, Surface};
 
-/// Materialize the merged surface constraints into `RateLimitRule`
-/// rows keyed by the authenticated user id. Redis counters now live
-/// at `ratelimit:<surface>:user:<user_id>:...` — one set per user
-/// regardless of how many roles they hold. Roles merged to empty
-/// (no user_id, or no rules) produce an empty list.
-pub(super) fn rules_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<RateLimitRule> {
-    let Some(user_id) = identity
-        .user_id
-        .as_deref()
-        .and_then(|s| Uuid::parse_str(s).ok())
-    else {
-        return Vec::new();
+/// The user's limits (role defaults with the user's overrides) on the
+/// user's counters, and the calling key's own limits on its lineage's
+/// counters — both apply. A request with no user (never past the auth
+/// middleware today) is held to nothing.
+pub(super) fn limits_for_ai_gateway(identity: &GatewayRequestIdentity) -> RequestLimits {
+    let parse = |s: &Option<String>| s.as_deref().and_then(|s| Uuid::parse_str(s).ok());
+    let Some(user_id) = parse(&identity.user_id) else {
+        return RequestLimits::default();
     };
-    let Some(block) = identity.surface_constraints.block(Surface::AiGateway) else {
-        return Vec::new();
-    };
-    block
-        .rules
-        .iter()
-        .filter(|r| r.enabled)
-        .map(|r| RateLimitRule {
-            // Synthetic id — stable across a single request so the
-            // exceeded_index in `CheckOutcome` maps back to the same
-            // rule without needing a persistence layer.
-            id: Uuid::nil(),
-            subject_kind: RateLimitSubject::User,
-            subject_id: user_id,
-            surface: Surface::AiGateway,
-            metric: r.metric,
-            window_secs: r.window_secs,
-            max_count: r.max_count,
-            enabled: true,
-            // In-memory synthesis — override metadata lives on persisted rows only.
-            expires_at: None,
-            reason: None,
-            created_by: None,
-        })
-        .collect()
+    let key =
+        parse(&identity.api_key_lineage_id).map(|lineage| (lineage, &identity.key_constraints));
+    RequestLimits::for_request(
+        Surface::AiGateway,
+        user_id,
+        &identity.surface_constraints,
+        key,
+    )
 }
 
-pub(super) fn budgets_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<BudgetCap> {
-    let Some(user_id) = identity
-        .user_id
-        .as_deref()
-        .and_then(|s| Uuid::parse_str(s).ok())
-    else {
-        return Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use think_watch_common::limits::{
+        RateLimitSubject, RateMetric, SurfaceBlock, SurfaceConstraints, SurfaceRule,
     };
-    let Some(block) = identity.surface_constraints.block(Surface::AiGateway) else {
-        return Vec::new();
-    };
-    block
-        .budgets
-        .iter()
-        .filter(|b| b.enabled)
-        .map(|b| BudgetCap {
-            id: Uuid::nil(),
-            subject_kind: BudgetSubject::User,
-            subject_id: user_id,
-            period: b.period,
-            limit_tokens: b.limit_tokens,
-            enabled: true,
-            expires_at: None,
-            reason: None,
-            created_by: None,
-        })
-        .collect()
+
+    fn one_rule(max_count: i64) -> SurfaceConstraints {
+        SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        }
+    }
+
+    #[test]
+    fn a_keys_rules_count_on_its_lineage_and_its_owners_on_the_user() {
+        let user = Uuid::new_v4();
+        let lineage = Uuid::new_v4();
+        let identity = GatewayRequestIdentity {
+            user_id: Some(user.to_string()),
+            api_key_id: Some(Uuid::new_v4().to_string()),
+            api_key_lineage_id: Some(lineage.to_string()),
+            surface_constraints: one_rule(10),
+            key_constraints: one_rule(2),
+            ..Default::default()
+        };
+        let limits = limits_for_ai_gateway(&identity);
+        assert_eq!(limits.owner, user);
+        let subjects: Vec<_> = limits
+            .rules
+            .iter()
+            .map(|r| (r.subject_kind, r.subject_id, r.max_count))
+            .collect();
+        assert_eq!(
+            subjects,
+            vec![
+                (RateLimitSubject::User, user, 10),
+                (RateLimitSubject::ApiKeyLineage, lineage, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_user_no_limits() {
+        let identity = GatewayRequestIdentity {
+            surface_constraints: one_rule(1),
+            ..Default::default()
+        };
+        let limits = limits_for_ai_gateway(&identity);
+        assert!(limits.rules.is_empty() && limits.caps.is_empty());
+    }
 }

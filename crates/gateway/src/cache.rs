@@ -147,34 +147,16 @@ impl ResponseCache {
         })
     }
 
-    /// Invalidate all cached responses by deleting keys matching the cache prefix.
-    /// Uses Lua script for atomic pattern deletion.
+    /// Invalidate all cached responses by deleting keys matching the
+    /// cache prefix — on every node, when Redis is a cluster.
     pub async fn invalidate_all(&self) {
-        use fred::interfaces::LuaInterface;
-        // Use Lua EVAL to scan and delete in batches server-side
-        const LUA_INVALIDATE: &str = r#"
-local cursor = '0'
-local total = 0
-repeat
-    local result = redis.call('SCAN', cursor, 'MATCH', ARGV[1], 'COUNT', 100)
-    cursor = result[1]
-    local keys = result[2]
-    if #keys > 0 then
-        redis.call('DEL', unpack(keys))
-        total = total + #keys
-    end
-until cursor == '0'
-return total
-"#;
-        let deleted: i64 = self
-            .redis
-            .eval(
-                LUA_INVALIDATE,
-                Vec::<String>::new(),
-                vec!["llm_cache:*".to_string()],
-            )
-            .await
-            .unwrap_or(0);
+        let deleted =
+            think_watch_common::redis_keys::delete_matching(&self.redis, "llm_cache:*", None)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Cache invalidation failed: {e}");
+                    0
+                });
         metrics::counter!("gateway_cache_invalidations_total").increment(1);
         tracing::info!(deleted, "Cache invalidated");
     }

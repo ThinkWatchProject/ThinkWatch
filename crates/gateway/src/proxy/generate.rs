@@ -849,8 +849,7 @@ async fn run(
             input_estimate,
         },
         preflight: crate::lifecycle::ChatPreflightLists {
-            request_rules: preflight.request_rules.clone(),
-            budget_caps: preflight.budget_caps.clone(),
+            limits: preflight.limits.clone(),
         },
         route: crate::lifecycle::ChatPickedRoute {
             provider_name: route.provider_name.clone(),

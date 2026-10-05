@@ -46,12 +46,22 @@ pub enum GatewayError {
     /// names the account and the IAM principal.
     #[error("Authentication failed with upstream")]
     UpstreamAuthError { status: u16, message: String },
-    /// Local rate limit / budget cap was hit. The String is the rule
-    /// label so the response body can tell the caller WHICH limit
-    /// fired (e.g. "user requests/5h", "api_key tokens/1d",
-    /// "monthly budget"). Maps to 429 in `IntoResponse`.
-    #[error("Rate limited: {0}")]
-    LocalRateLimited(String),
+    /// Local rate limit / budget cap was hit. `label` names the limit
+    /// so the response body can tell the caller WHICH one fired (e.g.
+    /// `user:requests/5h`, `api_key_lineage:tokens/1d`,
+    /// `user:budget/monthly`). Maps to 429 in `IntoResponse`, with
+    /// `Retry-After: retry_after_secs`. `retry` is false for a spent
+    /// budget: it frees only when its period ends, so SDKs that retry a
+    /// 429 by themselves are told not to (`x-should-retry: false`).
+    /// Build it with [`GatewayError::rate_limited`],
+    /// [`GatewayError::budget_exhausted`] or
+    /// [`GatewayError::limiter_unavailable`].
+    #[error("Rate limited: {label}")]
+    LocalRateLimited {
+        label: String,
+        retry_after_secs: u32,
+        retry: bool,
+    },
     /// Refused by the gateway's own policy — a content filter rule set to
     /// refuse matched what the caller sent, or a tool call the upstream
     /// returned matched a rule set to cut it. Not a malformed request (not
@@ -77,7 +87,7 @@ impl GatewayError {
             GatewayError::ProviderInvalidResponse(_) => 502,
             GatewayError::TransformError(_) => 400,
             GatewayError::NetworkError(_) => 502,
-            GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited(_) => 429,
+            GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited { .. } => 429,
             GatewayError::UpstreamAuthError { .. } => 401,
             GatewayError::PolicyBlocked(_) => 403,
         }
@@ -95,29 +105,75 @@ impl GatewayError {
             GatewayError::TransformError(_) => "TransformError",
             GatewayError::NetworkError(_) => "NetworkError",
             GatewayError::UpstreamRateLimited { .. } => "UpstreamRateLimited",
-            GatewayError::LocalRateLimited(_) => "LocalRateLimited",
+            GatewayError::LocalRateLimited { .. } => "LocalRateLimited",
             GatewayError::UpstreamAuthError { .. } => "UpstreamAuthError",
             GatewayError::PolicyBlocked(_) => "PolicyBlocked",
         }
     }
 
+    /// A rate-limit window is full. It has room again in
+    /// `retry_after_secs`, by itself.
+    pub fn rate_limited(label: impl Into<String>, retry_after_secs: u64) -> Self {
+        GatewayError::LocalRateLimited {
+            label: label.into(),
+            retry_after_secs: clamp_secs(retry_after_secs),
+            retry: true,
+        }
+    }
+
+    /// A budget is spent. It frees when its period ends, in
+    /// `retry_after_secs` — far too long for an SDK's automatic retries.
+    pub fn budget_exhausted(label: impl Into<String>, retry_after_secs: u64) -> Self {
+        GatewayError::LocalRateLimited {
+            label: label.into(),
+            retry_after_secs: clamp_secs(retry_after_secs),
+            retry: false,
+        }
+    }
+
+    /// The limit counters can't be read and the gateway fails closed.
+    /// Nothing says when they will be back; a short wait is a guess.
+    pub fn limiter_unavailable(label: impl Into<String>) -> Self {
+        const UNAVAILABLE_RETRY_SECS: u32 = 30;
+        GatewayError::LocalRateLimited {
+            label: label.into(),
+            retry_after_secs: UNAVAILABLE_RETRY_SECS,
+            retry: true,
+        }
+    }
+
     /// Hint, in seconds, for `Retry-After` on a 429 response. For
-    /// upstream limits we echo the upstream's own header when present;
-    /// for local limits we fall back to a conservative 30s so naive
-    /// clients don't spin into a tight retry loop while the bucket is
-    /// still refilling. Capped at one hour to keep the header sane
-    /// even when an upstream returns an absurd value.
+    /// upstream limits we echo the upstream's own header when present,
+    /// capped at one hour to keep the header sane even when an upstream
+    /// returns an absurd value. For local limits it is when the limit
+    /// lets a request through again — for a budget, the end of its
+    /// period, which can be weeks away.
     pub fn retry_after_secs(&self) -> Option<u32> {
         const HARD_CAP_SECS: u32 = 3600;
-        const LOCAL_DEFAULT_SECS: u32 = 30;
         match self {
             GatewayError::UpstreamRateLimited { retry_after_secs } => {
                 retry_after_secs.map(|s| s.min(HARD_CAP_SECS))
             }
-            GatewayError::LocalRateLimited(_) => Some(LOCAL_DEFAULT_SECS),
+            GatewayError::LocalRateLimited {
+                retry_after_secs, ..
+            } => Some(*retry_after_secs),
             _ => None,
         }
     }
+
+    /// `Some(false)` when the client must not retry on its own: sent as
+    /// `x-should-retry`, which the OpenAI and Anthropic SDKs read before
+    /// retrying a 429.
+    pub fn should_retry(&self) -> Option<bool> {
+        match self {
+            GatewayError::LocalRateLimited { retry: false, .. } => Some(false),
+            _ => None,
+        }
+    }
+}
+
+fn clamp_secs(secs: u64) -> u32 {
+    u32::try_from(secs).unwrap_or(u32::MAX).max(1)
 }
 
 /// Parse RFC 7231 `Retry-After` (delta-seconds form). HTTP-date is
@@ -140,5 +196,26 @@ mod tests {
         assert_eq!(e.status_code(), 403);
         assert_eq!(e.error_tag(), "PolicyBlocked");
         assert_eq!(e.retry_after_secs(), None);
+    }
+
+    #[test]
+    fn a_full_window_says_when_it_frees_and_a_spent_budget_says_not_to_retry() {
+        let window = GatewayError::rate_limited("user:requests/1m", 17);
+        assert_eq!(window.status_code(), 429);
+        assert_eq!(window.error_tag(), "LocalRateLimited");
+        assert_eq!(window.retry_after_secs(), Some(17));
+        assert_eq!(window.should_retry(), None);
+        assert_eq!(window.to_string(), "Rate limited: user:requests/1m");
+
+        // A month away is not capped like an upstream's hint.
+        let budget = GatewayError::budget_exhausted("user:budget/monthly", 2_000_000);
+        assert_eq!(budget.status_code(), 429);
+        assert_eq!(budget.error_tag(), "LocalRateLimited");
+        assert_eq!(budget.retry_after_secs(), Some(2_000_000));
+        assert_eq!(budget.should_retry(), Some(false));
+
+        let down = GatewayError::limiter_unavailable("rate_limiter_unavailable");
+        assert_eq!(down.retry_after_secs(), Some(30));
+        assert_eq!(down.should_retry(), None);
     }
 }

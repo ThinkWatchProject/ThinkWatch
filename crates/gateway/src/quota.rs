@@ -37,13 +37,16 @@ impl QuotaManager {
         chrono::Utc::now().format("%Y-%m").to_string()
     }
 
+    // `{<key>}` is a Redis Cluster hash tag: `consume` and
+    // `check_and_consume` declare both keys in one script, which a
+    // cluster runs only when they share a slot.
     fn limit_key(key: &str) -> String {
-        format!("quota:{key}:limit")
+        format!("quota:{{{key}}}:limit")
     }
 
     fn usage_key(key: &str) -> String {
         let month = Self::current_month();
-        format!("quota:{key}:used:{month}")
+        format!("quota:{{{key}}}:used:{month}")
     }
 
     /// Check if user/team has enough quota. Returns remaining tokens.
@@ -211,5 +214,24 @@ return limit - used - tokens
                 tracing::warn!("Quota set_limit failed: {e}");
                 AppError::Internal(anyhow::anyhow!("Failed to set quota limit"))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quotas_limit_and_usage_share_one_cluster_slot() {
+        for key in [
+            "8a7c0c1e-0000-0000-0000-000000000000:gpt-4o",
+            "k:{odd}:model",
+        ] {
+            assert_eq!(
+                fred::util::redis_keyslot(QuotaManager::limit_key(key).as_bytes()),
+                fred::util::redis_keyslot(QuotaManager::usage_key(key).as_bytes()),
+                "{key}"
+            );
+        }
     }
 }

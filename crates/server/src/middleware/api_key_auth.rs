@@ -292,24 +292,24 @@ pub fn require_api_key(
                 // can gate per-tool access without re-querying the DB, and
                 // the aggregated `surface_constraints` JSON so the gateway
                 // hot path has rate limits + budgets without further lookups.
-                let (role_limits, user_roles, surface_constraints) = if let Some(uid) = row.user_id {
+                let (role_limits, user_roles, surface_constraints, key_constraints) = if let Some(uid) = row.user_id {
                     let limits = rbac::compute_user_resource_limits(&state.db, uid)
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                     let names = rbac::load_user_role_names(&state.db, uid)
                         .await
                         .unwrap_or_default();
-                    // Use the api_key-aware variant so per-key
-                    // `rate_limit_rules` / `budget_caps` rows fire on the
-                    // gateway hot path. Falling back to the user-only
-                    // function would silently drop api_key-scope
-                    // overrides — the schema supports them but the
-                    // gateway would never see them.
-                    let constraints =
-                        rbac::compute_effective_surface_constraints(&state.db, uid, row.id)
+                    // The user's limits and the key's own, kept apart:
+                    // the gateway counts each on its own counters and
+                    // checks both.
+                    let constraints = rbac::compute_user_surface_constraints(&state.db, uid)
+                        .await
+                        .unwrap_or_default();
+                    let key_constraints =
+                        rbac::compute_key_surface_constraints(&state.db, row.lineage_id)
                             .await
                             .unwrap_or_default();
-                    (limits, names, constraints)
+                    (limits, names, constraints, key_constraints)
                 } else {
                     // A key without an owner (its user row was removed
                     // and `user_id` set NULL) has no roles to grant
@@ -319,6 +319,7 @@ pub fn require_api_key(
                     (
                         rbac::UserResourceLimits::none(),
                         Vec::new(),
+                        think_watch_common::limits::SurfaceConstraints::default(),
                         think_watch_common::limits::SurfaceConstraints::default(),
                     )
                 };
@@ -382,6 +383,7 @@ pub fn require_api_key(
                     api_key_lineage_id: Some(row.lineage_id.to_string()),
                     allowed_models: merged_models.clone(),
                     surface_constraints: surface_constraints.clone(),
+                    key_constraints: key_constraints.clone(),
                     ip_address: client_ip.clone(),
                 };
 
@@ -414,6 +416,8 @@ pub fn require_api_key(
                         user_email,
                         user_roles,
                         surface_constraints: surface_constraints.clone(),
+                        api_key_lineage_id: row.lineage_id,
+                        key_constraints,
                         allowed_mcp_tools: merged_mcp_tools.clone(),
                         mcp_account_overrides: row.mcp_account_overrides.clone(),
                         ip_address: client_ip.clone(),

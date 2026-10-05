@@ -18,7 +18,7 @@ use think_watch_common::lifecycle::Surface;
 use think_watch_common::lifecycle::state::{CapturedView, Invoked};
 use think_watch_common::lifecycle::streaming::StreamOutcome;
 use think_watch_common::limits::{
-    RateLimitRule, RateLimitSubject, Surface as LimitSurface, SurfaceConstraints,
+    RateMetric, RequestLimits, Surface as LimitSurface, SurfaceConstraints,
 };
 
 use crate::access_control::is_tool_allowed;
@@ -76,10 +76,10 @@ impl Surface for McpSurface {
         .audit(action)
     }
 
-    fn rate_limited_response(label: &str) -> Self::Response {
+    fn rate_limited_response(label: &str, _retry_after_secs: u64) -> Self::Response {
         // Bumps the existing operator-facing metric so dashboards
         // built around `mcp_rate_limited_total` keep working after
-        // the migration.
+        // the migration. A JSON-RPC error has no `Retry-After`.
         metrics::counter!("mcp_rate_limited_total").increment(1);
         err_response(None, INVALID_REQUEST, format!("Rate limited: {label}"))
     }
@@ -104,7 +104,7 @@ impl Surface for McpSurface {
         err_response(None, INVALID_REQUEST, "Access denied for this tool")
     }
 
-    fn budget_exceeded_response(label: &str) -> Self::Response {
+    fn budget_exceeded_response(label: &str, _retry_after_secs: u64) -> Self::Response {
         // MCP doesn't currently wire budget caps into
         // `handle_tools_call` (the AI gateway is the only consumer
         // of `check_budget` today). The factory exists so the
@@ -298,34 +298,18 @@ fn response_for_hooks(invoked: &Invoked<McpSurface>, deps: &McpPostInvokeDeps) -
     }
 }
 
-/// Build the MCP-surface `requests` rate-limit rules from a
-/// materialised [`SurfaceConstraints`]. Mirrors the inline
-/// extraction in the previous `handle_tools_call` — same shape,
-/// just lifted out so the surface stage gets a clean
-/// `&[RateLimitRule]` slice without re-implementing the
-/// extraction at every call site.
-pub fn rate_limit_rules(constraints: &SurfaceConstraints, user_id: Uuid) -> Vec<RateLimitRule> {
-    constraints
-        .block(LimitSurface::McpGateway)
-        .map(|block| {
-            block
-                .rules
-                .iter()
-                .filter(|r| r.enabled)
-                .map(|r| RateLimitRule {
-                    id: Uuid::nil(),
-                    subject_kind: RateLimitSubject::User,
-                    subject_id: user_id,
-                    surface: LimitSurface::McpGateway,
-                    metric: r.metric,
-                    window_secs: r.window_secs,
-                    max_count: r.max_count,
-                    enabled: true,
-                    expires_at: None,
-                    reason: None,
-                    created_by: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// The MCP-surface rate limits one `tools/call` is held to: the user's
+/// (role defaults with the user's overrides) on the user's counters, and
+/// the calling key's own on its lineage's — both apply. `requests` rules
+/// only: a tool call has no tokens to count, so a `tokens` rule on this
+/// surface would only ever read zero.
+pub fn rate_limits(
+    user_id: Uuid,
+    user: &SurfaceConstraints,
+    key: Option<(Uuid, &SurfaceConstraints)>,
+) -> RequestLimits {
+    let mut limits = RequestLimits::for_request(LimitSurface::McpGateway, user_id, user, key);
+    limits.rules.retain(|r| r.metric == RateMetric::Requests);
+    limits.caps.clear();
+    limits
 }

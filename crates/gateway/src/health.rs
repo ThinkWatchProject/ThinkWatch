@@ -27,6 +27,10 @@
 //!     express — operators tuning weights need to know whether a
 //!     route has actually carried any requests at all.
 //!
+//! The braces are literal: `{<route_id>}` is a Redis Cluster hash tag,
+//! so a route's three keys share a slot and one script (or one `DEL`)
+//! can touch them together.
+//!
 //! ### One round trip, two when the state changes
 //!
 //! Recording a completion is one Lua call: insert the sample, drop what
@@ -183,11 +187,14 @@ impl CircuitBreakerConfig {
     }
 }
 
+/// A route's samples, state and counters keys. `{<route_id>}` is a Redis
+/// Cluster hash tag: the scripts below declare two or three of them at
+/// once, which a cluster accepts only when they share a slot.
 fn keys(route_id: Uuid) -> (String, String, String) {
     (
-        format!("route_health:{route_id}:samples"),
-        format!("route_health:{route_id}:state"),
-        format!("route_health:{route_id}:counters"),
+        format!("route_health:{{{route_id}}}:samples"),
+        format!("route_health:{{{route_id}}}:state"),
+        format!("route_health:{{{route_id}}}:counters"),
     )
 }
 
@@ -401,9 +408,7 @@ impl HealthTracker {
     /// orphan keys after route churn. Best-effort: a Redis hiccup
     /// here is not worth failing the delete over.
     pub async fn forget(&self, route_id: Uuid) {
-        let samples_key = format!("route_health:{route_id}:samples");
-        let state_key = format!("route_health:{route_id}:state");
-        let counters_key = format!("route_health:{route_id}:counters");
+        let (samples_key, state_key, counters_key) = keys(route_id);
         if let Err(e) = self
             .redis
             .del::<i64, _>(vec![samples_key, state_key, counters_key])
@@ -417,6 +422,14 @@ impl HealthTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_routes_keys_share_one_cluster_slot() {
+        let (samples, state, counters) = keys(Uuid::new_v4());
+        let slot = fred::util::redis_keyslot(samples.as_bytes());
+        assert_eq!(fred::util::redis_keyslot(state.as_bytes()), slot);
+        assert_eq!(fred::util::redis_keyslot(counters.as_bytes()), slot);
+    }
 
     fn cfg() -> CircuitBreakerConfig {
         CircuitBreakerConfig {

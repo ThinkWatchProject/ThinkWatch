@@ -38,11 +38,17 @@ pub struct McpRequestIdentity {
     /// keys (no associated user) — those will be denied any tool
     /// that requires a role match.
     pub user_roles: Vec<String>,
-    /// Effective (most-restrictive across roles) rate-limit rules and
-    /// budget caps for this user. Materialized by the parent crate
-    /// once per request so the MCP proxy can apply them without a DB
-    /// round-trip.
+    /// Effective (most-restrictive across roles, with the user's own
+    /// overrides) rate-limit rules and budget caps for this user.
+    /// Materialized by the parent crate once per request so the MCP
+    /// proxy can apply them without a DB round-trip.
     pub surface_constraints: think_watch_common::limits::SurfaceConstraints,
+    /// The calling key's lineage id. Limits attached to the key live
+    /// on it so they survive rotation.
+    pub api_key_lineage_id: Uuid,
+    /// The calling key's own limits, counted on the lineage's counters
+    /// on top of the user's.
+    pub key_constraints: think_watch_common::limits::SurfaceConstraints,
     /// MCP tool access patterns from role union. `None` = unrestricted.
     pub allowed_mcp_tools: Option<Vec<String>>,
     /// Per-server account-label override map carried by the calling
@@ -134,6 +140,8 @@ pub async fn handle_post(
         user_email: &identity.user_email,
         client_session_id: &session_id,
         surface_constraints: &identity.surface_constraints,
+        api_key_lineage_id: Some(identity.api_key_lineage_id),
+        key_constraints: &identity.key_constraints,
         allowed_mcp_tools: identity.allowed_mcp_tools.as_deref(),
         trace_id: &trace_id,
         mcp_account_overrides: &identity.mcp_account_overrides,

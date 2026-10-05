@@ -70,8 +70,9 @@ pub trait Surface: Sized + Send + Sync + 'static {
     /// Render the surface's "you got rate limited" response. The
     /// `label` is a human string like `"user:requests/1m"` that
     /// the limit engine produces; the surface decides whether to
-    /// surface it verbatim or wrap it.
-    fn rate_limited_response(label: &str) -> Self::Response;
+    /// surface it verbatim or wrap it. `retry_after_secs` is how long
+    /// until that window has room again (HTTP `Retry-After`).
+    fn rate_limited_response(label: &str, retry_after_secs: u64) -> Self::Response;
 
     /// Render the surface's "rate-limiter unavailable, fail-closed"
     /// response. Distinct from `rate_limited_response` because the
@@ -99,11 +100,10 @@ pub trait Surface: Sized + Send + Sync + 'static {
     /// Render the surface's "budget cap exhausted" response. The
     /// label is `"<subject>:budget/<period>"` (e.g.
     /// `"user:budget/monthly"`) so clients can tell which cap fired
-    /// without parsing prose. Maps to 429 on the wire so existing
-    /// rate-limit retry semantics apply — `GatewayError::LocalRateLimited`'s
-    /// docstring explicitly covers both rate and budget under that
-    /// status family.
-    fn budget_exceeded_response(label: &str) -> Self::Response;
+    /// without parsing prose. `retry_after_secs` is how long until the
+    /// cap's period ends — a budget does not free before that, so the
+    /// AI gateway also tells SDKs not to retry on their own.
+    fn budget_exceeded_response(label: &str, retry_after_secs: u64) -> Self::Response;
 
     /// Render the surface's "budget read backend unavailable"
     /// response (Redis outage + `fail_closed` enabled). Same wire

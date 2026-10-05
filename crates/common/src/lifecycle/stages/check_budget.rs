@@ -16,26 +16,27 @@
 //! (request allowed) unless the caller passes `fail_closed = true`
 //! — matching the [`super::check_limits`] semantics.
 //!
-//! Ordering note: this stage runs AFTER `check_limits`. A request
-//! that hits the per-window requests counter via `check_limits` and
-//! then gets rejected here for being over-budget will have its
-//! `requests` counter incremented anyway — rate-limit counters
-//! measure "attempts", not "successes". Operators querying the
-//! rate-limit metric will see budget-rejected requests reflected
-//! there, by design.
+//! Ordering note: this stage runs BEFORE `check_limits`, on the
+//! [`Raw`] state. `check_limits` charges the `requests` counters, so
+//! running it first would charge a request this stage then refuses.
+//! Since this stage charges nothing, a request refused by either
+//! charges nothing.
 
+use chrono::Utc;
 use fred::clients::Client;
 
 use crate::audit::AuditLogger;
 use crate::limits::{BudgetCap, budget};
 
 use super::super::Surface;
-use super::super::state::LimitsChecked;
+use super::super::state::Raw;
 
 /// Run a read-only spend check against every supplied cap. On
 /// allow, returns the input state unchanged (passthrough — no
 /// extra type narrowing). On deny, emits a `"budget_exceeded"`
-/// audit row + short-circuits with `S::budget_exceeded_response`.
+/// audit row + short-circuits with `S::budget_exceeded_response`,
+/// naming the spent cap whose period ends last — the request can't
+/// succeed before then — and the seconds until it does.
 ///
 /// `fail_closed` controls behaviour on a Redis read error:
 /// - `false` (default): bumps `lifecycle_budget_fail_open_total`
@@ -47,12 +48,12 @@ use super::super::state::LimitsChecked;
     fields(trace_id = %state.trace_id, cap_count = caps.len()),
 )]
 pub async fn check_budget<S: Surface>(
-    state: LimitsChecked<S>,
+    state: Raw<S>,
     caps: &[BudgetCap],
     redis: &Client,
     fail_closed: bool,
     audit: &AuditLogger,
-) -> Result<LimitsChecked<S>, S::Response> {
+) -> Result<Raw<S>, S::Response> {
     if caps.is_empty() {
         return Ok(state);
     }
@@ -84,27 +85,34 @@ pub async fn check_budget<S: Surface>(
 
     // Walk caps + statuses in lockstep — `current_spend` preserves
     // input order so the pairing is positional.
-    for (cap, status) in caps.iter().zip(statuses.iter()) {
-        if status.current >= status.limit {
-            let label = budget_label(cap);
-            metrics::counter!("lifecycle_budget_exceeded_total").increment(1);
-            tracing::warn!(
-                trace_id = %state.trace_id,
-                cap = %label,
-                current = status.current,
-                limit = status.limit,
-                "budget cap exceeded"
-            );
-            let entry = S::audit_entry(&state.identity, "budget_exceeded")
-                .trace_id(state.trace_id.clone())
-                .detail(serde_json::json!({
-                    "limit": label,
-                    "current": status.current,
-                    "max": status.limit,
-                }));
-            audit.log(entry);
-            return Err(S::budget_exceeded_response(&label));
-        }
+    let now = Utc::now();
+    let spent = caps
+        .iter()
+        .zip(statuses.iter())
+        .filter(|(_, status)| status.current >= status.limit)
+        .map(|(cap, status)| (cap, status, budget::secs_until_period_end(cap.period, now)))
+        .max_by_key(|(_, _, wait)| *wait);
+    if let Some((cap, status, retry_after_secs)) = spent {
+        let label = budget_label(cap);
+        metrics::counter!("lifecycle_budget_exceeded_total").increment(1);
+        tracing::warn!(
+            trace_id = %state.trace_id,
+            cap = %label,
+            current = status.current,
+            limit = status.limit,
+            retry_after_secs,
+            "budget cap exceeded"
+        );
+        let entry = S::audit_entry(&state.identity, "budget_exceeded")
+            .trace_id(state.trace_id.clone())
+            .detail(serde_json::json!({
+                "limit": label,
+                "current": status.current,
+                "max": status.limit,
+                "retry_after_secs": retry_after_secs,
+            }));
+        audit.log(entry);
+        return Err(S::budget_exceeded_response(&label, retry_after_secs));
     }
 
     Ok(state)
@@ -125,7 +133,6 @@ fn budget_label(cap: &BudgetCap) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::state::{LimitCheckRecord, LimitsChecked};
     use super::super::super::test_surface::{TestResponse, TestSurface, make_raw};
     use super::*;
     use crate::limits::{BudgetPeriod, BudgetSubject};
@@ -142,26 +149,13 @@ mod tests {
         crate::audit::AuditLogger::test_drain()
     }
 
-    fn make_limits_checked(user_id: Uuid) -> LimitsChecked<TestSurface> {
-        let raw = make_raw(user_id);
-        LimitsChecked {
-            identity: raw.identity,
-            trace_id: raw.trace_id,
-            started_at: raw.started_at,
-            client_ip: raw.client_ip,
-            limit_check: LimitCheckRecord {
-                currents: Vec::new(),
-            },
-        }
-    }
-
     /// No caps configured → trivially pass through without touching
     /// Redis. The disconnected dummy client confirms the function
     /// never reached out.
     #[tokio::test]
     async fn passes_through_with_no_caps() {
         let user_id = Uuid::new_v4();
-        let state = make_limits_checked(user_id);
+        let state = make_raw(user_id);
         let trace_id = state.trace_id.clone();
         let started_at = state.started_at;
 
@@ -194,7 +188,7 @@ mod tests {
     /// short-circuit Response type to be propagated via `?`-style
     /// match — same shape `check_limits` uses.
     #[allow(dead_code)]
-    async fn type_state_compiles(state: LimitsChecked<TestSurface>) {
+    async fn type_state_compiles(state: Raw<TestSurface>) {
         let _ = check_budget::<TestSurface>(state, &[], &dummy_redis(), false, &dummy_audit())
             .await
             .map_err(|r| match r {

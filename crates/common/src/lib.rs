@@ -49,5 +49,6 @@ pub mod crypto; // AES-256-GCM envelope for secrets at rest
 pub mod fixed_window;
 pub mod json_secret; // `{"$enc": ...}` — a secret nested inside a JSONB column
 pub mod pii; // BlobRedactor — at-rest body redaction shared by gateway + mcp-gateway
+pub mod redis_keys; // pattern deletes that work on one node and on a Redis Cluster
 pub mod tasks; // supervised_spawn — panic-isolated background tasks
 pub mod validation;

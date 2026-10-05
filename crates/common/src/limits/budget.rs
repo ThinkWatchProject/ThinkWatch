@@ -24,18 +24,21 @@
 // Why a separate module from `sliding`:
 //   - Period semantics are different from window semantics — a 5h
 //     "today" budget would be confusing.
-//   - The check is post-hoc only (responses, not requests) so the
-//     all-or-nothing Lua dance is unnecessary; plain INCRBY +
-//     value-read is enough.
+//   - The pre-call check only reads (`current_spend`) and the debit
+//     comes after the response, so the all-or-nothing Lua dance is
+//     unnecessary; plain INCRBY + value-read is enough.
 //   - The Redis key namespace is intentionally separate to avoid
 //     collisions if a future migration changes one shape.
+//
+// Redis Cluster: every command here touches one key, so the counters
+// need no hash tag.
 // ============================================================================
 
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, Days, Months, NaiveTime, Utc};
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
 
-use super::{BudgetCap, BudgetSubject};
+use super::{BudgetCap, BudgetPeriod, BudgetSubject};
 
 // ----------------------------------------------------------------------------
 // Threshold alerting
@@ -105,6 +108,29 @@ pub fn bucket_id(period: &str, now: DateTime<Utc>) -> String {
         // bad input at insert time anyway.
         _ => now.format("%Y-%m").to_string(),
     }
+}
+
+/// When the period that contains `now` ends — and its counter stops
+/// counting: the next midnight (daily), the next Monday 00:00 (weekly,
+/// ISO weeks), the 1st of the next month 00:00 (monthly), all UTC like
+/// [`bucket_id`].
+pub fn period_end(period: BudgetPeriod, now: DateTime<Utc>) -> DateTime<Utc> {
+    let today = now.date_naive();
+    let first_day_after = match period {
+        BudgetPeriod::Daily => today + Days::new(1),
+        BudgetPeriod::Weekly => {
+            today + Days::new(7 - u64::from(today.weekday().num_days_from_monday()))
+        }
+        BudgetPeriod::Monthly => today.with_day(1).expect("every month has a 1st") + Months::new(1),
+    };
+    first_day_after.and_time(NaiveTime::MIN).and_utc()
+}
+
+/// Whole seconds from `now` until [`period_end`], rounded up and at least
+/// one: what a refused request's `Retry-After` says.
+pub fn secs_until_period_end(period: BudgetPeriod, now: DateTime<Utc>) -> u64 {
+    let ms = (period_end(period, now) - now).num_milliseconds();
+    super::sliding::retry_after_secs(ms)
 }
 
 /// TTL (in seconds) to set on the period counter when we INCRBY it.
@@ -298,6 +324,53 @@ mod tests {
         // ISO week — 2026-04-08 is week 15.
         let w = bucket_id("weekly", t);
         assert!(w.starts_with("2026-W"), "got {w}");
+    }
+
+    #[test]
+    fn a_period_ends_where_its_bucket_id_changes() {
+        // Wednesday 2026-04-08, mid-afternoon.
+        let t = Utc.with_ymd_and_hms(2026, 4, 8, 15, 30, 0).unwrap();
+        let at = |y, m, d| Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+        assert_eq!(period_end(BudgetPeriod::Daily, t), at(2026, 4, 9));
+        assert_eq!(period_end(BudgetPeriod::Weekly, t), at(2026, 4, 13));
+        assert_eq!(period_end(BudgetPeriod::Monthly, t), at(2026, 5, 1));
+        // Boundaries: a Monday at midnight is the start of a week, not
+        // its end; December rolls into the next year.
+        assert_eq!(
+            period_end(BudgetPeriod::Weekly, at(2026, 4, 13)),
+            at(2026, 4, 20)
+        );
+        assert_eq!(
+            period_end(BudgetPeriod::Monthly, at(2026, 12, 31)),
+            at(2027, 1, 1)
+        );
+        for p in [
+            BudgetPeriod::Daily,
+            BudgetPeriod::Weekly,
+            BudgetPeriod::Monthly,
+        ] {
+            let end = period_end(p, t);
+            assert_ne!(
+                bucket_id(p.as_str(), end - chrono::Duration::seconds(1)),
+                bucket_id(p.as_str(), end),
+                "{p:?}"
+            );
+            assert_eq!(
+                bucket_id(p.as_str(), end - chrono::Duration::seconds(1)),
+                bucket_id(p.as_str(), t),
+                "{p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spent_budget_waits_until_its_period_ends() {
+        let t = Utc.with_ymd_and_hms(2026, 4, 30, 23, 59, 59).unwrap()
+            + chrono::Duration::milliseconds(500);
+        assert_eq!(secs_until_period_end(BudgetPeriod::Daily, t), 1);
+        assert_eq!(secs_until_period_end(BudgetPeriod::Monthly, t), 1);
+        let t = Utc.with_ymd_and_hms(2026, 4, 30, 0, 0, 0).unwrap();
+        assert_eq!(secs_until_period_end(BudgetPeriod::Daily, t), 86_400);
     }
 
     #[test]
