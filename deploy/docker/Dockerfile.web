@@ -8,11 +8,14 @@
 # never exited — the CI job sat idle until GitHub's six-hour limit.
 FROM --platform=$BUILDPLATFORM node:24.21.0-alpine AS builder
 
-# Pin pnpm to a known-good 11.x. The workspace YAML's `allowBuilds`
-# field requires pnpm 11+ (see web/pnpm-workspace.yaml top comment).
-# Pinning the build avoids `latest` flipping under us on a future
-# image bake and producing a non-reproducible dist/.
-RUN corepack enable && corepack prepare pnpm@11.28.4 --activate
+# Pin pnpm to a known-good 12.x, matching `packageManager` in
+# web/package.json. The workspace YAML's `allowBuilds` field requires
+# pnpm 11+ (see web/pnpm-workspace.yaml top comment). Pinning the build
+# avoids `latest` flipping under us on a future image bake and producing
+# a non-reproducible dist/. pnpm 12 is a native binary: Corepack fetches
+# the `pnpm` wrapper, whose first run downloads the musl build from the
+# npm registry and checks it against npm's signature before running it.
+RUN corepack enable && corepack prepare pnpm@12.9.1 --activate
 
 WORKDIR /app
 # pnpm-workspace.yaml carries the install-script allowlist (see its

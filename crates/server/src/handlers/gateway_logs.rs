@@ -402,7 +402,7 @@ pub async fn get_gateway_log_body(
     let row: Option<GatewayLogBodyRow> = ch
         .query(
             "SELECT id, trace_id, user_id, model_id, \
-                    formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                    formatDateTime(created_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS created_at, \
                     request_body, response_body, request_body_bytes, \
                     response_body_bytes, body_capture_status \
              FROM gateway_logs WHERE id = ? LIMIT 1",

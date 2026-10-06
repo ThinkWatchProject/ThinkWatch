@@ -1304,7 +1304,7 @@ pub async fn get_route_history(
     // provisioned yet, we fall back to an empty response — the
     // sparkline is a hint, not load-bearing.
     let sql = format!(
-        "SELECT toUnixTimestamp(toStartOfMinute(created_at)) AS bucket_ts, \
+        "SELECT toInt64(toUnixTimestamp(toStartOfMinute(created_at))) AS bucket_ts, \
                 quantile(0.50)(latency_ms)                 AS p50, \
                 quantile(0.95)(latency_ms)                 AS p95, \
                 count()                                     AS requests, \
@@ -1318,11 +1318,13 @@ pub async fn get_route_history(
          ORDER BY bucket_ts"
     );
 
+    // `latency_ms` is Nullable, so its quantiles are too: NULL for a
+    // minute whose requests all failed before a latency was recorded.
     #[derive(Debug, clickhouse::Row, serde::Deserialize)]
     struct Row {
         bucket_ts: i64,
-        p50: f64,
-        p95: f64,
+        p50: Option<f64>,
+        p95: Option<f64>,
         requests: u64,
         errors: u64,
     }
@@ -1348,8 +1350,8 @@ pub async fn get_route_history(
         .into_iter()
         .map(|r| RouteHistoryBucket {
             ts: r.bucket_ts,
-            p50_ms: if r.p50.is_finite() { Some(r.p50) } else { None },
-            p95_ms: if r.p95.is_finite() { Some(r.p95) } else { None },
+            p50_ms: r.p50.filter(|v| v.is_finite()),
+            p95_ms: r.p95.filter(|v| v.is_finite()),
             requests: r.requests,
             errors: r.errors,
         })

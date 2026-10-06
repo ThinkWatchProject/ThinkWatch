@@ -43,14 +43,18 @@ impl IsolatedClickHouseDatabase {
             .await
             .context("CREATE DATABASE on test ClickHouse")?;
 
-        // Test client targets the new DB.
-        let mut client = client_for(url).with_database(&name);
-        if let Some(u) = user {
-            client = client.with_user(u);
-        }
-        if let Some(p) = password {
-            client = client.with_password(p);
-        }
+        // The application's own client, pointed at the new DB: the same
+        // settings, row validation and connector as production, so a
+        // query that would fail there fails here.
+        let client = think_watch_common::clickhouse_client::create_client(
+            &think_watch_common::audit::AuditConfig {
+                clickhouse_url: Some(url.to_string()),
+                clickhouse_db: name.clone(),
+                clickhouse_user: user.map(String::from),
+                clickhouse_password: password.map(String::from),
+            },
+        )
+        .context("build the ClickHouse client")?;
 
         // Load the production schema into the per-test DB. The
         // bundled init SQL contains a `CREATE DATABASE IF NOT EXISTS
