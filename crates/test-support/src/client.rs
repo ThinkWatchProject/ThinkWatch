@@ -455,13 +455,8 @@ impl SignedKey {
 
     /// Public key as the JWK shape the `register-key` handler expects.
     pub fn public_jwk(&self) -> Value {
-        let public = self.signing.verifying_key();
-        // `to_public_key_der` → SPKI; we want the raw EC point. p256
-        // exposes `to_jwk_string` on `PublicKey` directly.
-        let pk: p256::PublicKey = public.into();
-        let jwk_str = pk.to_jwk_string();
-        let jwk: Value = serde_json::from_str(&jwk_str).expect("p256 jwk valid JSON");
-        jwk
+        let pk: p256::PublicKey = self.signing.verifying_key().into();
+        think_watch_server::middleware::verify_signature::p256_public_key_to_jwk(&pk)
     }
 
     /// SPKI DER — handy if a future test wants to verify the key

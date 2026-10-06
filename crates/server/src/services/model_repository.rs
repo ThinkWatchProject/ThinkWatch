@@ -7,7 +7,7 @@
 
 use rust_decimal::Decimal;
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Model;
 use uuid::Uuid;
@@ -161,12 +161,12 @@ pub async fn list(
            LIMIT $3 OFFSET $4"#,
     );
 
-    let total: Option<i64> = sqlx::query_scalar(&total_sql)
+    let total: Option<i64> = sqlx::query_scalar(AssertSqlSafe(total_sql))
         .bind(search)
         .bind(&search_pattern)
         .fetch_one(pool)
         .await?;
-    let rows = sqlx::query_as::<_, ModelRow>(&list_sql)
+    let rows = sqlx::query_as::<_, ModelRow>(AssertSqlSafe(list_sql))
         .bind(search)
         .bind(&search_pattern)
         .bind(limit)
@@ -200,7 +200,7 @@ pub async fn insert(pool: &PgPool, model_id: &str, f: &ModelFields<'_>) -> Resul
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            RETURNING {MODEL_COLUMNS}"#
     );
-    Ok(sqlx::query_as::<_, Model>(&sql)
+    Ok(sqlx::query_as::<_, Model>(AssertSqlSafe(sql))
         .bind(model_id)
         .bind(f.display_name)
         .bind(f.input_weight)
@@ -219,7 +219,7 @@ pub async fn insert(pool: &PgPool, model_id: &str, f: &ModelFields<'_>) -> Resul
 
 pub async fn find(pool: &PgPool, id: Uuid) -> Result<Option<Model>, AppError> {
     let sql = format!("SELECT {MODEL_COLUMNS} FROM models WHERE id = $1");
-    Ok(sqlx::query_as::<_, Model>(&sql)
+    Ok(sqlx::query_as::<_, Model>(AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(pool)
         .await?)
@@ -249,7 +249,7 @@ pub async fn update(
            WHERE id = $1
            RETURNING {MODEL_COLUMNS}"#
     );
-    Ok(sqlx::query_as::<_, Model>(&sql)
+    Ok(sqlx::query_as::<_, Model>(AssertSqlSafe(sql))
         .bind(id)
         .bind(f.display_name)
         .bind(f.input_weight)

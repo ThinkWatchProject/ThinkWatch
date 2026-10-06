@@ -85,7 +85,7 @@ async fn flush_app(
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) -> Result<(), clickhouse::error::Error> {
-    let mut insert = client.insert::<ChAppLogRow>(table)?;
+    let mut insert = client.insert::<ChAppLogRow>(table).await?;
     for entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
         insert
@@ -108,7 +108,7 @@ async fn flush_access(
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) -> Result<(), clickhouse::error::Error> {
-    let mut insert = client.insert::<ChAccessRow>(table)?;
+    let mut insert = client.insert::<ChAccessRow>(table).await?;
     for entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
         insert
@@ -135,7 +135,7 @@ async fn flush_audit(
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) -> Result<(), clickhouse::error::Error> {
-    let mut insert = client.insert::<ChAuditRow>(table)?;
+    let mut insert = client.insert::<ChAuditRow>(table).await?;
     for mut entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
         insert
@@ -164,7 +164,7 @@ async fn flush_gateway(
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) -> Result<(), clickhouse::error::Error> {
-    let mut insert = client.insert::<ChGatewayRow>(table)?;
+    let mut insert = client.insert::<ChGatewayRow>(table).await?;
     for mut entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
         // Sanitise first, then measure — so the bytes column reflects
@@ -216,7 +216,7 @@ async fn flush_mcp(
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) -> Result<(), clickhouse::error::Error> {
-    let mut insert = client.insert::<ChMcpRow>(table)?;
+    let mut insert = client.insert::<ChMcpRow>(table).await?;
     for mut entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
         // Same sanitise-then-measure ordering as flush_gateway so

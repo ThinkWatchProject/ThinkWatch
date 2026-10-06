@@ -198,6 +198,12 @@ async fn slo_snapshot_returns_full_envelope() {
             "{k} must be present and numeric in: {body}"
         );
     }
+    // Latencies are whole milliseconds, so are their exact percentiles.
+    // A fraction means the Int64 column was decoded as a float.
+    for k in ["p50_ms", "p95_ms", "p99_ms"] {
+        let v = body[k].as_f64().unwrap();
+        assert!(v.fract() == 0.0, "{k} must be whole milliseconds, got {v}");
+    }
     // p50 ≤ p95 ≤ p99 — a CH quantile regression that swaps fields
     // is otherwise silent.
     let (p50, p95, p99) = (

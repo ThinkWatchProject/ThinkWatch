@@ -20,6 +20,13 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 /// since), so the client never reuses a socket the server has closed.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The block compression the `clickhouse` crate reads back: LZ4. The crate
+/// asks for compressed answers with `compress=1` and leaves the method to
+/// the server, whose default turned from LZ4 to ZSTD in ClickHouse 26.9;
+/// the crate then fails every read with "incorrect magic number". Naming
+/// the method on every query works with every server version.
+pub const NETWORK_COMPRESSION_METHOD: (&str, &str) = ("network_compression_method", "lz4");
+
 /// Create a `clickhouse::Client` from our config. Returns `None` if ClickHouse
 /// is not configured (no URL).
 ///
@@ -38,7 +45,14 @@ pub fn create_client(config: &AuditConfig) -> Option<clickhouse::Client> {
     let mut client = clickhouse::Client::with_http_client(http)
         .with_url(url)
         .with_database(&config.clickhouse_db)
-        .with_product_info("think-watch", env!("CARGO_PKG_VERSION"));
+        .with_product_info("think-watch", env!("CARGO_PKG_VERSION"))
+        .with_setting(NETWORK_COMPRESSION_METHOD.0, NETWORK_COMPRESSION_METHOD.1)
+        // Plain `RowBinary`, as before clickhouse 0.14. Validation reads
+        // results as `RowBinaryWithNamesAndTypes` and fails a query whose
+        // row struct differs from the column types at all, i64 against
+        // UInt64 included. Not every query has been checked against
+        // that yet; until they have, it stays off.
+        .with_validation(false);
 
     if let Some(ref user) = config.clickhouse_user {
         client = client.with_user(user);

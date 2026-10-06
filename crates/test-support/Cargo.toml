@@ -47,7 +47,7 @@ url = { workspace = true }
 clickhouse = { workspace = true }
 once_cell = "1"
 wiremock = "0.6"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 futures = { workspace = true }
 async-stream = { workspace = true }
 bytes = { workspace = true }

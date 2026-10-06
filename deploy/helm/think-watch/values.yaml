@@ -117,7 +117,7 @@ redis:
 
 clickhouse:
   bundled: true
-  image: clickhouse/clickhouse-server:26.3-alpine
+  image: clickhouse/clickhouse-server:26.8-alpine
   user: thinkwatch
   database: think_watch
   # Used only when bundled=false; e.g. http://host:8123. Plain HTTP only:

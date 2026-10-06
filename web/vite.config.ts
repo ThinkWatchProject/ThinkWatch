@@ -10,7 +10,7 @@ import { readFileSync } from 'fs'
 // lockstep with the Rust crates without a manual bump.
 function readWorkspaceVersion(): string {
   try {
-    const toml = readFileSync(path.resolve(__dirname, '../Cargo.toml'), 'utf8')
+    const toml = readFileSync(path.resolve(import.meta.dirname, '../Cargo.toml'), 'utf8')
     const m = toml.match(/^\s*version\s*=\s*"([^"]+)"/m)
     return m?.[1] ?? '0.0.0'
   } catch {
@@ -38,7 +38,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   build: {

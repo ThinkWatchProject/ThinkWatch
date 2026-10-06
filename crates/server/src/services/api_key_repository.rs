@@ -6,7 +6,7 @@
 //! `handlers::api_keys`.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::ApiKey;
 use uuid::Uuid;
@@ -56,9 +56,9 @@ fn visibility_clause(archived: bool) -> &'static str {
 /// How many keys the list shows, across every user.
 pub async fn count_all(pool: &PgPool, archived: bool) -> Result<i64, AppError> {
     let visibility_clause = visibility_clause(archived);
-    Ok(sqlx::query_scalar(&format!(
+    Ok(sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM api_keys WHERE {visibility_clause}"
-    ))
+    )))
     .fetch_one(pool)
     .await?)
 }
@@ -71,10 +71,10 @@ pub async fn list_all_page(
     offset: i64,
 ) -> Result<Vec<ApiKey>, AppError> {
     let visibility_clause = visibility_clause(archived);
-    Ok(sqlx::query_as::<_, ApiKey>(&format!(
+    Ok(sqlx::query_as::<_, ApiKey>(AssertSqlSafe(format!(
         "SELECT * FROM api_keys WHERE {visibility_clause} \
              ORDER BY created_at DESC LIMIT $1 OFFSET $2"
-    ))
+    )))
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
@@ -84,9 +84,9 @@ pub async fn list_all_page(
 /// How many of one user's keys the list shows.
 pub async fn count_for_user(pool: &PgPool, archived: bool, user_id: Uuid) -> Result<i64, AppError> {
     let visibility_clause = visibility_clause(archived);
-    Ok(sqlx::query_scalar(&format!(
+    Ok(sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM api_keys WHERE {visibility_clause} AND user_id = $1"
-    ))
+    )))
     .bind(user_id)
     .fetch_one(pool)
     .await?)
@@ -101,10 +101,10 @@ pub async fn list_for_user_page(
     offset: i64,
 ) -> Result<Vec<ApiKey>, AppError> {
     let visibility_clause = visibility_clause(archived);
-    Ok(sqlx::query_as::<_, ApiKey>(&format!(
+    Ok(sqlx::query_as::<_, ApiKey>(AssertSqlSafe(format!(
         "SELECT * FROM api_keys WHERE {visibility_clause} AND user_id = $1 \
              ORDER BY created_at DESC LIMIT $2 OFFSET $3"
-    ))
+    )))
     .bind(user_id)
     .bind(limit)
     .bind(offset)
