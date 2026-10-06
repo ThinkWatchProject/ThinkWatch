@@ -1,26 +1,26 @@
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret, Totp};
 
 const ISSUER: &str = "ThinkWatch";
-const DIGITS: usize = 6;
+const DIGITS: u8 = 6;
 const STEP: u64 = 30;
-const SKEW: u8 = 1;
+const SKEW: u16 = 1;
 
 /// Generate a new random TOTP secret (base32-encoded).
 pub fn generate_secret() -> String {
-    let secret = Secret::generate_secret();
-    secret.to_encoded().to_string()
+    Secret::generate().to_base32()
 }
 
 /// Build an otpauth:// URI for QR code generation.
 pub fn otpauth_uri(secret_base32: &str, email: &str) -> anyhow::Result<String> {
     let totp = build_totp(secret_base32, email)?;
-    Ok(totp.get_url())
+    totp.to_url()
+        .map_err(|e| anyhow::anyhow!("TOTP URI failed: {e}"))
 }
 
 /// Verify a 6-digit TOTP code against the secret.
 pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bool> {
     let totp = build_totp(secret_base32, email)?;
-    Ok(totp.check_current(code).unwrap_or(false))
+    Ok(totp.check_current(code).is_some())
 }
 
 /// Compute the current 6-digit TOTP code for the given secret +
@@ -29,8 +29,7 @@ pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bo
 /// authenticator app.
 pub fn current_code(secret_base32: &str, email: &str) -> anyhow::Result<String> {
     let totp = build_totp(secret_base32, email)?;
-    totp.generate_current()
-        .map_err(|e| anyhow::anyhow!("TOTP generate failed: {e}"))
+    Ok(totp.generate_current().to_string())
 }
 
 /// Generate a set of one-time recovery codes (80-bit entropy each).
@@ -104,34 +103,53 @@ pub fn decrypt_secret(encrypted_hex: &str, key: &[u8; 32]) -> anyhow::Result<Str
     String::from_utf8(decrypted).map_err(|e| anyhow::anyhow!("Invalid UTF-8: {e}"))
 }
 
-fn build_totp(secret_base32: &str, email: &str) -> anyhow::Result<TOTP> {
-    let secret = Secret::Encoded(secret_base32.to_string())
-        .to_bytes()
+fn build_totp(secret_base32: &str, email: &str) -> anyhow::Result<Totp> {
+    let secret = Secret::try_from_base32(secret_base32)
         .map_err(|e| anyhow::anyhow!("Invalid TOTP secret: {e}"))?;
 
-    TOTP::new(
-        Algorithm::SHA1,
-        DIGITS,
-        SKEW,
-        STEP,
-        secret,
-        Some(ISSUER.to_string()),
-        email.to_string(),
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to create TOTP: {e}"))
+    Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(DIGITS)
+        .with_skew(SKEW)
+        .with_step_duration(STEP)
+        .with_secret(secret)
+        .with_issuer(Some(ISSUER))
+        .with_account_name(email)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create TOTP: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// RFC 6238 appendix B, SHA-1 secret "12345678901234567890", truncated
+    /// to our six digits. Enrolled authenticators keep the codes they
+    /// produce today, so a library upgrade must not change them.
+    const RFC6238_SECRET_B32: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    #[test]
+    fn rfc6238_vectors() {
+        let totp = build_totp(RFC6238_SECRET_B32, "kat@example.com").unwrap();
+        for (time, code) in [
+            (59, "287082"),
+            (1_111_111_109, "081804"),
+            (1_234_567_890, "005924"),
+            (2_000_000_000, "279037"),
+        ] {
+            assert_eq!(totp.generate(time).to_string(), code, "t={time}");
+            assert!(totp.check(code, time).is_some());
+        }
+        // One step of skew either side, not two.
+        assert!(totp.check("081804", 1_111_111_109 + 30).is_some());
+        assert!(totp.check("081804", 1_111_111_109 + 60).is_none());
+    }
+
     #[test]
     fn generate_and_verify() {
         let secret = generate_secret();
         let totp = build_totp(&secret, "test@example.com").unwrap();
-        let code = totp
-            .generate_current()
-            .expect("should generate current code");
+        let code = totp.generate_current().to_string();
         assert!(verify(&secret, &code, "test@example.com").unwrap());
         assert!(!verify(&secret, "000000", "test@example.com").unwrap());
     }

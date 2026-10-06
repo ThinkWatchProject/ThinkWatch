@@ -929,8 +929,8 @@ pub async fn register_key(
         return Err(AppError::RateLimited);
     }
 
-    // Web Crypto JWK includes extra fields (key_ops, ext) that the p256 crate
-    // doesn't understand. Extract only the fields p256 needs: kty, crv, x, y.
+    // Web Crypto JWK includes extra fields (key_ops, ext) that we don't
+    // store. Keep only the public-key fields: kty, crv, x, y.
     let jwk = &req.public_key;
     let minimal_jwk = serde_json::json!({
         "kty": jwk.get("kty").cloned().unwrap_or(serde_json::Value::Null),
@@ -942,7 +942,7 @@ pub async fn register_key(
         .map_err(|e| AppError::BadRequest(format!("Invalid public key JSON: {e}")))?;
 
     // Validate that this is a valid P-256 public key
-    p256::PublicKey::from_jwk_str(&pubkey_json)
+    crate::middleware::verify_signature::p256_public_key_from_jwk(&pubkey_json)
         .map_err(|e| AppError::BadRequest(format!("Invalid ECDSA P-256 public key JWK: {e}")))?;
 
     // The signature verification middleware fails-closed if a request

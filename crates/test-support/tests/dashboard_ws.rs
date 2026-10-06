@@ -83,8 +83,8 @@ async fn ws_first_push_carries_full_dashboardlive_envelope() {
         .expect("WS frame error");
 
     let text = match msg {
-        Message::Text(t) => t,
-        Message::Binary(b) => String::from_utf8(b).expect("binary frame is UTF-8 JSON"),
+        Message::Text(t) => t.to_string(),
+        Message::Binary(b) => String::from_utf8(b.to_vec()).expect("binary frame is UTF-8 JSON"),
         other => panic!("unexpected WS frame: {other:?}"),
     };
 

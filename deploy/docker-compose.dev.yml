@@ -82,7 +82,7 @@ services:
 
   # --- ClickHouse (log storage & search) ---
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3-alpine
+    image: clickhouse/clickhouse-server:26.8-alpine
     command: ["--", "--listen_host=0.0.0.0"]
     ports:
       - "8123:8123"   # HTTP interface
@@ -112,7 +112,7 @@ services:
 
   # --- Zitadel (OIDC / SSO provider for development) ---
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v4.13.1
+    image: ghcr.io/zitadel/zitadel:v4.19.4
     command: start-from-init --masterkeyFromEnv --tlsMode disabled
     environment:
       ZITADEL_MASTERKEY: "${ZITADEL_MASTERKEY:?ZITADEL_MASTERKEY is required (32 chars)}"

@@ -6,13 +6,13 @@
 # `pnpm install` and `pnpm build` under QEMU: the build alone took 260s
 # against 23s natively, and when Node crashed there with SIGILL the step
 # never exited — the CI job sat idle until GitHub's six-hour limit.
-FROM --platform=$BUILDPLATFORM node:24-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:24.21.0-alpine AS builder
 
 # Pin pnpm to a known-good 11.x. The workspace YAML's `allowBuilds`
 # field requires pnpm 11+ (see web/pnpm-workspace.yaml top comment).
 # Pinning the build avoids `latest` flipping under us on a future
 # image bake and producing a non-reproducible dist/.
-RUN corepack enable && corepack prepare pnpm@11.0.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.28.4 --activate
 
 WORKDIR /app
 # pnpm-workspace.yaml carries the install-script allowlist (see its
@@ -25,7 +25,7 @@ COPY web/ .
 RUN pnpm build
 
 # Stage 2: Serve with Nginx
-FROM nginx:1.29-alpine
+FROM nginx:1.31-alpine
 
 # Not conf.d: files under /etc/nginx/templates are run through
 # envsubst by the image's entrypoint at container start, which is how

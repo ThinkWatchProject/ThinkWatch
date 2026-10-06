@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use sqlx::AssertSqlSafe;
 use think_watch_auth::{api_key, jwt::Claims, rbac};
 use think_watch_common::audit::AuditEntry;
 use think_watch_common::errors::AppError;
@@ -401,9 +402,9 @@ impl AuthUser {
                 } else {
                     "lineage_id"
                 };
-                let owner: Option<Option<uuid::Uuid>> = sqlx::query_scalar(&format!(
+                let owner: Option<Option<uuid::Uuid>> = sqlx::query_scalar(AssertSqlSafe(format!(
                     "SELECT user_id FROM api_keys WHERE {column} = $1 LIMIT 1"
-                ))
+                )))
                 .bind(subject_id)
                 .fetch_optional(pool)
                 .await

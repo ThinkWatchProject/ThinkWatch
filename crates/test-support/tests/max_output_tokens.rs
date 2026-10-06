@@ -221,7 +221,8 @@ async fn a_websocket_turn_is_capped_too() {
         .send(Message::Text(
             json!({"type": "response.create", "model": "cap-ws", "input": "ping",
                    "max_output_tokens": 100000})
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();

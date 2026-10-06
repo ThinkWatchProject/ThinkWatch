@@ -173,7 +173,7 @@ export function DateTimeRangePicker({ from, to, onFromChange, onToChange, classN
               onSelect={handleRangeSelect}
               numberOfMonths={2}
               locale={locale}
-              initialFocus
+              autoFocus
             />
             <div className="border-t px-3 py-2 flex items-center gap-4">
               <div className="flex items-center gap-1.5">

@@ -95,15 +95,18 @@ pub async fn get_slo_snapshot(
 
     // quantileExact rather than the tuple-returning quantilesExact —
     // single-column results decode cleanly into the row struct without
-    // chasing the clickhouse-rs Tuple binding.
+    // chasing the clickhouse-rs Tuple binding. `quantileExact` keeps the
+    // column's type, Int64: without `toFloat64` the eight bytes of each
+    // integer were read as an f64, and every percentile came out as a
+    // denormal next to zero.
     let row: Row = ch
         .query(&format!(
             "SELECT \
-                count()                                AS total, \
-                countIf(status_code >= 400)            AS errors, \
-                quantileExact(0.5)(latency_ms)         AS p50, \
-                quantileExact(0.95)(latency_ms)        AS p95, \
-                quantileExact(0.99)(latency_ms)        AS p99 \
+                count()                                    AS total, \
+                countIf(status_code >= 400)                AS errors, \
+                toFloat64(quantileExact(0.5)(latency_ms))  AS p50, \
+                toFloat64(quantileExact(0.95)(latency_ms)) AS p95, \
+                toFloat64(quantileExact(0.99)(latency_ms)) AS p99 \
               FROM gateway_logs \
               PREWHERE created_at >= now() - INTERVAL {hours} HOUR \
                 AND latency_ms IS NOT NULL"

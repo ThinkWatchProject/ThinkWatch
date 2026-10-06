@@ -394,28 +394,21 @@ pub async fn verify_signature(
     // Compute string-to-sign (same format as before)
     let string_to_sign = format!("{method}\n{path}\n{timestamp_str}\n{nonce}\n{body_hash}");
 
-    // Parse public key from JWK and verify ECDSA P-256 signature
-    use p256::PublicKey;
-    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-
-    let public_key = PublicKey::from_jwk_str(&pubkey_json).map_err(|e| {
-        tracing::error!("Failed to parse public key JWK for user {user_id}: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let verifying_key = VerifyingKey::from(&public_key);
-
-    // ECDSA P-256 signatures are 64 bytes (r || s) in raw/fixed format
-    let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
-        tracing::warn!("Invalid ECDSA signature format for user {user_id}: {e}");
-        StatusCode::BAD_REQUEST
-    })?;
-
-    verifying_key
-        .verify(string_to_sign.as_bytes(), &signature)
-        .map_err(|_| {
+    match verify_p256_jwk(&pubkey_json, string_to_sign.as_bytes(), &sig_bytes) {
+        Ok(()) => {}
+        Err(SignatureCheck::BadKey(e)) => {
+            tracing::error!("Failed to parse public key JWK for user {user_id}: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Err(SignatureCheck::BadSignature(e)) => {
+            tracing::warn!("Invalid ECDSA signature format for user {user_id}: {e}");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Err(SignatureCheck::Mismatch) => {
             tracing::warn!("ECDSA signature verification failed for user {user_id}");
-            StatusCode::UNAUTHORIZED
-        })?;
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
 
     // Refresh the pubkey TTL on every successful verify — active
     // sessions extend the key alongside their refresh-token usage.
@@ -442,9 +435,152 @@ pub async fn verify_signature(
     Ok(next.run(request).await)
 }
 
+/// Why an ECDSA P-256 signature check failed.
+enum SignatureCheck {
+    /// The stored JWK is not a P-256 public key.
+    BadKey(String),
+    /// The signature is not 64 bytes of `r || s`.
+    BadSignature(String),
+    /// Well-formed, but does not verify.
+    Mismatch,
+}
+
+/// Parse a P-256 public key from an EC JWK (RFC 7518 §6.2.1), the shape
+/// Web Crypto exports. Only `kty`, `crv`, `x` and `y` are read; the point
+/// has to lie on the curve.
+pub fn p256_public_key_from_jwk(jwk: &str) -> Result<p256::PublicKey, String> {
+    #[derive(serde::Deserialize)]
+    struct EcJwk {
+        kty: String,
+        crv: String,
+        x: String,
+        y: String,
+    }
+
+    let jwk: EcJwk = serde_json::from_str(jwk).map_err(|e| format!("not an EC JWK: {e}"))?;
+    if jwk.kty != "EC" {
+        return Err(format!("kty must be EC, got {}", jwk.kty));
+    }
+    if jwk.crv != "P-256" {
+        return Err(format!("crv must be P-256, got {}", jwk.crv));
+    }
+    let coordinate = |name: &str, value: &str| -> Result<Vec<u8>, String> {
+        let bytes = data_encoding::BASE64URL_NOPAD
+            .decode(value.as_bytes())
+            .map_err(|e| format!("{name} is not base64url: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!("{name} must be 32 bytes, got {}", bytes.len()));
+        }
+        Ok(bytes)
+    };
+    // SEC1 uncompressed point: 0x04 || x || y.
+    let mut sec1 = Vec::with_capacity(65);
+    sec1.push(0x04);
+    sec1.extend_from_slice(&coordinate("x", &jwk.x)?);
+    sec1.extend_from_slice(&coordinate("y", &jwk.y)?);
+    p256::PublicKey::from_sec1_bytes(&sec1).map_err(|_| "point is not on P-256".to_string())
+}
+
+/// The EC JWK for a P-256 public key: the inverse of
+/// [`p256_public_key_from_jwk`].
+pub fn p256_public_key_to_jwk(key: &p256::PublicKey) -> serde_json::Value {
+    use p256::elliptic_curve::sec1::ToSec1Point;
+
+    let point = key.to_sec1_point(false);
+    let encode = |bytes: &[u8]| data_encoding::BASE64URL_NOPAD.encode(bytes);
+    serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": encode(point.x().expect("uncompressed point has x")),
+        "y": encode(point.y().expect("uncompressed point has y")),
+    })
+}
+
+/// Verify a raw (`r || s`, 64 bytes) ECDSA P-256 / SHA-256 signature
+/// against a public key stored as a JWK. Web Crypto does not normalise
+/// `s`, so high-S signatures must verify too.
+fn verify_p256_jwk(
+    pubkey_json: &str,
+    message: &[u8],
+    sig_bytes: &[u8],
+) -> Result<(), SignatureCheck> {
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+
+    let public_key = p256_public_key_from_jwk(pubkey_json).map_err(SignatureCheck::BadKey)?;
+    let verifying_key = VerifyingKey::from(&public_key);
+    let signature = Signature::from_slice(sig_bytes)
+        .map_err(|e| SignatureCheck::BadSignature(e.to_string()))?;
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|_| SignatureCheck::Mismatch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Known-answer vectors produced with p256 0.13.2 / ecdsa 0.16.9, so a
+    // crate upgrade that changes what verifies shows up here. The key is
+    // the scalar 0x11 repeated; HIGH is LOW with `s` replaced by `n - s`,
+    // which is what Web Crypto hands out about half of the time.
+    const KAT_JWK: &str = r#"{"kty":"EC","crv":"P-256","x":"AhfmF_C2RDkoJ4-WmZ5pojpPLBUr321s32bluAKC1O0","y":"GUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q"}"#;
+    const KAT_MESSAGE: &[u8] = b"POST\n/api/admin/users\n1767225600\n6f1d3c1e-0000-4000-8000-000000000000\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const KAT_SIG_LOW_S: &str = "ca61c9a51b7168f798a98c755c82e1195cb799bcd1f8818f2623543e8573978b7c6c74cea4b6e214f912a94745e64eafb6fc8fe7207ec9103b348bebaad3a44b";
+    const KAT_SIG_HIGH_S: &str = "ca61c9a51b7168f798a98c755c82e1195cb799bcd1f8818f2623543e8573978b83938b305b491dec06ed56b8ba19b15005ea6ac68698d574b8853ed7518f8106";
+
+    #[test]
+    fn p256_known_signatures_verify() {
+        for sig in [KAT_SIG_LOW_S, KAT_SIG_HIGH_S] {
+            let sig = hex::decode(sig).unwrap();
+            assert!(verify_p256_jwk(KAT_JWK, KAT_MESSAGE, &sig).is_ok());
+        }
+    }
+
+    #[test]
+    fn p256_jwk_round_trips() {
+        let key = p256_public_key_from_jwk(KAT_JWK).unwrap();
+        let jwk = p256_public_key_to_jwk(&key);
+        let expected: serde_json::Value = serde_json::from_str(KAT_JWK).unwrap();
+        assert_eq!(jwk, expected);
+    }
+
+    #[test]
+    fn p256_jwk_rejects_malformed_keys() {
+        let jwk: serde_json::Value = serde_json::from_str(KAT_JWK).unwrap();
+        let with = |field: &str, value: &str| {
+            let mut j = jwk.clone();
+            j[field] = serde_json::Value::String(value.to_string());
+            j.to_string()
+        };
+        // Wrong key type / curve.
+        assert!(p256_public_key_from_jwk(&with("kty", "RSA")).is_err());
+        assert!(p256_public_key_from_jwk(&with("crv", "P-384")).is_err());
+        // Short coordinate, padded base64, off-curve point.
+        assert!(p256_public_key_from_jwk(&with("x", "AhfmF_C2RDkoJ4")).is_err());
+        let padded = format!("{}=", jwk["y"].as_str().unwrap());
+        assert!(p256_public_key_from_jwk(&with("y", &padded)).is_err());
+        let off_curve = data_encoding::BASE64URL_NOPAD.encode(&[1u8; 32]);
+        assert!(p256_public_key_from_jwk(&with("y", &off_curve)).is_err());
+        // Missing coordinate.
+        assert!(p256_public_key_from_jwk(r#"{"kty":"EC","crv":"P-256","x":"AA"}"#).is_err());
+    }
+
+    #[test]
+    fn p256_rejects_tampered_message_and_bad_input() {
+        let sig = hex::decode(KAT_SIG_LOW_S).unwrap();
+        assert!(matches!(
+            verify_p256_jwk(KAT_JWK, b"GET\n/", &sig),
+            Err(SignatureCheck::Mismatch)
+        ));
+        assert!(matches!(
+            verify_p256_jwk(KAT_JWK, KAT_MESSAGE, &sig[..63]),
+            Err(SignatureCheck::BadSignature(_))
+        ));
+        assert!(matches!(
+            verify_p256_jwk(r#"{"kty":"EC","crv":"P-256"}"#, KAT_MESSAGE, &sig),
+            Err(SignatureCheck::BadKey(_))
+        ));
+    }
 
     #[test]
     fn access_token_cookie_has_required_attrs() {

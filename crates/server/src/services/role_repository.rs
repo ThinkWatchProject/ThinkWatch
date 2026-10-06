@@ -6,7 +6,7 @@
 //! invalidation stay in `handlers::roles`. The statements `delete_role`
 //! runs in one transaction take a `&mut PgConnection`.
 
-use sqlx::{PgConnection, PgPool};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 use think_watch_common::errors::AppError;
 use uuid::Uuid;
 
@@ -53,21 +53,23 @@ pub async fn policy_documents(
 
 /// Every role, system rows first, then alphabetical.
 pub async fn list(pool: &PgPool) -> Result<Vec<RoleRow>, AppError> {
-    Ok(
-        sqlx::query_as(&format!("{ROLE_SELECT} ORDER BY is_system DESC, name ASC"))
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(AssertSqlSafe(format!(
+        "{ROLE_SELECT} ORDER BY is_system DESC, name ASC"
+    )))
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<RoleRow, AppError> {
     // Qualify with `r.id`: ROLE_SELECT joins `users u`, which also
     // has an `id` column — an unqualified WHERE here used to bubble
     // a 500 from "column reference \"id\" is ambiguous".
-    Ok(sqlx::query_as(&format!("{ROLE_SELECT} WHERE r.id = $1"))
-        .bind(id)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_as(AssertSqlSafe(format!("{ROLE_SELECT} WHERE r.id = $1")))
+            .bind(id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 /// A role's (is_system, name).

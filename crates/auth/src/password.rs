@@ -1,6 +1,6 @@
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 
 const RANDOM_PASSWORD_LEN: usize = 16;
@@ -17,10 +17,10 @@ pub fn generate_random_password() -> String {
 }
 
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let hash = argon2
-        .hash_password(password.as_bytes(), &salt)
+    // Random 16-byte salt from the OS RNG, Argon2id v19 with the OWASP
+    // parameters (m=19456, t=2, p=1).
+    let hash = Argon2::default()
+        .hash_password(password.as_bytes())
         .map_err(|e| anyhow::anyhow!("Password hashing failed: {e}"))?;
     Ok(hash.to_string())
 }
@@ -36,6 +36,25 @@ pub fn verify_password(password: &str, hash: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hash written by argon2 0.5.3 (`Argon2::default()`, fixed salt).
+    /// Stored hashes outlive crate upgrades: they must keep verifying.
+    const KAT_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$dGhpbmt3YXRjaC1rYXQtc2FsdA$6xffcgfh1b9KJMWg4mBS4qOWsK5MNUM1asLNHvgV0v8";
+
+    #[test]
+    fn stored_hash_from_earlier_release_verifies() {
+        assert!(verify_password("correct-horse-battery-staple", KAT_HASH).unwrap());
+        assert!(!verify_password("correct-horse-battery-stapler", KAT_HASH).unwrap());
+    }
+
+    #[test]
+    fn new_hashes_use_argon2id_with_owasp_parameters() {
+        let hash = hash_password("pw").unwrap();
+        assert!(
+            hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "unexpected parameters: {hash}"
+        );
+    }
 
     #[test]
     fn hash_and_verify_roundtrip() {

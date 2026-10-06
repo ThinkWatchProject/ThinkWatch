@@ -219,7 +219,7 @@ services:
     restart: unless-stopped
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3-alpine
+    image: clickhouse/clickhouse-server:26.8-alpine
     command: ["--", "--listen_host=0.0.0.0"]
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}

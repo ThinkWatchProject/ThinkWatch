@@ -29,7 +29,7 @@ impl IsolatedClickHouseDatabase {
 
         // Bootstrap client points at the default DB so we can
         // `CREATE DATABASE` regardless of whether `name` exists yet.
-        let mut admin = Client::default().with_url(url).with_database("default");
+        let mut admin = client_for(url).with_database("default");
         if let Some(u) = user {
             admin = admin.with_user(u);
         }
@@ -44,7 +44,7 @@ impl IsolatedClickHouseDatabase {
             .context("CREATE DATABASE on test ClickHouse")?;
 
         // Test client targets the new DB.
-        let mut client = Client::default().with_url(url).with_database(&name);
+        let mut client = client_for(url).with_database(&name);
         if let Some(u) = user {
             client = client.with_user(u);
         }
@@ -86,7 +86,7 @@ impl Drop for IsolatedClickHouseDatabase {
         let handle = tokio::runtime::Handle::try_current().ok();
         if let Some(h) = handle {
             h.spawn(async move {
-                let mut admin = Client::default().with_url(&url).with_database("default");
+                let mut admin = client_for(&url).with_database("default");
                 if let Some(u) = user {
                     admin = admin.with_user(u);
                 }
@@ -133,4 +133,11 @@ async fn load_schema(client: &Client) -> Result<()> {
             .with_context(|| format!("CH schema stmt failed: {trimmed:.120}"))?;
     }
     Ok(())
+}
+
+/// A client for the test server, reading compressed answers the way the
+/// application's own client does.
+fn client_for(url: &str) -> Client {
+    let (name, value) = think_watch_common::clickhouse_client::NETWORK_COMPRESSION_METHOD;
+    Client::default().with_url(url).with_setting(name, value)
 }
