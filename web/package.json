@@ -3,7 +3,7 @@
   "private": true,
   "version": "3.2.0",
   "type": "module",
-  "packageManager": "pnpm@11.28.4",
+  "packageManager": "pnpm@12.9.1",
   "scripts": {
     "dev": "vite",
     "build": "node scripts/check-i18n.mjs && tsc -b && vite build",

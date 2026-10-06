@@ -46,13 +46,11 @@ pub fn create_client(config: &AuditConfig) -> Option<clickhouse::Client> {
         .with_url(url)
         .with_database(&config.clickhouse_db)
         .with_product_info("think-watch", env!("CARGO_PKG_VERSION"))
-        .with_setting(NETWORK_COMPRESSION_METHOD.0, NETWORK_COMPRESSION_METHOD.1)
-        // Plain `RowBinary`, as before clickhouse 0.14. Validation reads
-        // results as `RowBinaryWithNamesAndTypes` and fails a query whose
-        // row struct differs from the column types at all, i64 against
-        // UInt64 included. Not every query has been checked against
-        // that yet; until they have, it stays off.
-        .with_validation(false);
+        .with_setting(NETWORK_COMPRESSION_METHOD.0, NETWORK_COMPRESSION_METHOD.1);
+    // Row validation stays at the crate's default, on: each result is
+    // checked against the Rust row it lands in, so a type that drifts
+    // fails the query instead of decoding into garbage. Every read is
+    // exercised with complete rows by tests/clickhouse_row_types.rs.
 
     if let Some(ref user) = config.clickhouse_user {
         client = client.with_user(user);
