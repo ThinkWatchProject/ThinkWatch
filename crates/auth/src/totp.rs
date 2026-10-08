@@ -1,26 +1,40 @@
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret, Totp};
 
 const ISSUER: &str = "ThinkWatch";
-const DIGITS: usize = 6;
+const DIGITS: u8 = 6;
 const STEP: u64 = 30;
-const SKEW: u8 = 1;
+const SKEW: u16 = 1;
+
+/// How long a code stays acceptable, in seconds: its own time step and
+/// [`SKEW`] steps either side. A record of the last step accepted for a
+/// user (see [`verify_step`]) has to outlive this, or the code it guards
+/// could be replayed once the record expires.
+pub const ACCEPT_WINDOW_SECS: u64 = STEP * (2 * SKEW as u64 + 1);
 
 /// Generate a new random TOTP secret (base32-encoded).
 pub fn generate_secret() -> String {
-    let secret = Secret::generate_secret();
-    secret.to_encoded().to_string()
+    Secret::generate().to_base32()
 }
 
 /// Build an otpauth:// URI for QR code generation.
 pub fn otpauth_uri(secret_base32: &str, email: &str) -> anyhow::Result<String> {
     let totp = build_totp(secret_base32, email)?;
-    Ok(totp.get_url())
+    totp.to_url()
+        .map_err(|e| anyhow::anyhow!("TOTP URI failed: {e}"))
 }
 
-/// Verify a 6-digit TOTP code against the secret.
-pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bool> {
+/// Check a 6-digit TOTP code against the secret at the current time,
+/// allowing [`SKEW`] steps of clock drift either side. Returns the time
+/// step the code belongs to, or `None` when it matches none.
+///
+/// **A match alone must not let anyone in.** RFC 6238 §5.2: a code is
+/// accepted once. The caller records the step it accepted for the user
+/// and refuses any later code whose step is not greater, so a code seen
+/// over a shoulder or in a log cannot be used again while it is still
+/// valid (up to [`ACCEPT_WINDOW_SECS`]).
+pub fn verify_step(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<Option<u64>> {
     let totp = build_totp(secret_base32, email)?;
-    Ok(totp.check_current(code).unwrap_or(false))
+    Ok(totp.check_current(code))
 }
 
 /// Compute the current 6-digit TOTP code for the given secret +
@@ -29,8 +43,14 @@ pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bo
 /// authenticator app.
 pub fn current_code(secret_base32: &str, email: &str) -> anyhow::Result<String> {
     let totp = build_totp(secret_base32, email)?;
-    totp.generate_current()
-        .map_err(|e| anyhow::anyhow!("TOTP generate failed: {e}"))
+    Ok(totp.generate_current().to_string())
+}
+
+/// The code an authenticator shows at `unix_secs`. For tests that need a
+/// code from a neighbouring time step (clock drift, the next code).
+pub fn code_at(secret_base32: &str, email: &str, unix_secs: u64) -> anyhow::Result<String> {
+    let totp = build_totp(secret_base32, email)?;
+    Ok(totp.generate(unix_secs).to_string())
 }
 
 /// Generate a set of one-time recovery codes (80-bit entropy each).
@@ -104,36 +124,91 @@ pub fn decrypt_secret(encrypted_hex: &str, key: &[u8; 32]) -> anyhow::Result<Str
     String::from_utf8(decrypted).map_err(|e| anyhow::anyhow!("Invalid UTF-8: {e}"))
 }
 
-fn build_totp(secret_base32: &str, email: &str) -> anyhow::Result<TOTP> {
-    let secret = Secret::Encoded(secret_base32.to_string())
-        .to_bytes()
+fn build_totp(secret_base32: &str, email: &str) -> anyhow::Result<Totp> {
+    let secret = Secret::try_from_base32(secret_base32)
         .map_err(|e| anyhow::anyhow!("Invalid TOTP secret: {e}"))?;
 
-    TOTP::new(
-        Algorithm::SHA1,
-        DIGITS,
-        SKEW,
-        STEP,
-        secret,
-        Some(ISSUER.to_string()),
-        email.to_string(),
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to create TOTP: {e}"))
+    Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(DIGITS)
+        .with_skew(SKEW)
+        .with_step_duration(STEP)
+        .with_secret(secret)
+        .with_issuer(Some(ISSUER))
+        .with_account_name(email)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create TOTP: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// RFC 6238 appendix B, SHA-1 secret "12345678901234567890", truncated
+    /// to our six digits. Enrolled authenticators keep the codes they
+    /// produce today, so a library upgrade must not change them.
+    const RFC6238_SECRET_B32: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    #[test]
+    fn rfc6238_vectors() {
+        let totp = build_totp(RFC6238_SECRET_B32, "kat@example.com").unwrap();
+        for (time, code) in [
+            (59, "287082"),
+            (1_111_111_109, "081804"),
+            (1_234_567_890, "005924"),
+            (2_000_000_000, "279037"),
+        ] {
+            assert_eq!(totp.generate(time).to_string(), code, "t={time}");
+            assert!(totp.check(code, time).is_some());
+        }
+        // One step of skew either side, not two.
+        assert!(totp.check("081804", 1_111_111_109 + 30).is_some());
+        assert!(totp.check("081804", 1_111_111_109 + 60).is_none());
+    }
+
     #[test]
     fn generate_and_verify() {
         let secret = generate_secret();
         let totp = build_totp(&secret, "test@example.com").unwrap();
-        let code = totp
-            .generate_current()
-            .expect("should generate current code");
-        assert!(verify(&secret, &code, "test@example.com").unwrap());
-        assert!(!verify(&secret, "000000", "test@example.com").unwrap());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let code = totp.generate(now).to_string();
+        let step = verify_step(&secret, &code, "test@example.com")
+            .unwrap()
+            .expect("the current code matches");
+        // The step of the current code, give or take a step boundary
+        // passed between generating and checking.
+        assert!(step == now / STEP || step + 1 == now / STEP, "{step}");
+        // A wrong code matches no step: one that differs from all three
+        // codes the window accepts ("000000" alone would be one of them
+        // once in a few hundred thousand runs).
+        let accepted: Vec<String> = [now - STEP, now, now + STEP]
+            .iter()
+            .map(|&t| totp.generate(t).to_string())
+            .collect();
+        let wrong = ["000000", "000001", "000002", "000003"]
+            .into_iter()
+            .find(|c| !accepted.iter().any(|a| a == c))
+            .unwrap();
+        assert_eq!(
+            verify_step(&secret, wrong, "test@example.com").unwrap(),
+            None
+        );
+        // A neighbouring step's code still matches (clock drift), and says
+        // which step it belongs to.
+        let next = code_at(&secret, "test@example.com", now + STEP).unwrap();
+        assert!(
+            verify_step(&secret, &next, "test@example.com")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_accept_window_spans_the_skew() {
+        assert_eq!(ACCEPT_WINDOW_SECS, 90);
     }
 
     #[test]

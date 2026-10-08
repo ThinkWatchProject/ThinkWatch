@@ -1,6 +1,6 @@
 use aes_gcm::{
-    Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
+    Aes256Gcm,
+    aead::{Aead, KeyInit, Nonce},
 };
 
 /// Magic prefix for versioned ciphertexts. Every payload is parsed as
@@ -19,10 +19,10 @@ pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> anyhow::Result<Vec<u8>> {
 
     let mut nonce_bytes = [0u8; 12];
     rand::fill(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::<Aes256Gcm>::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
 
     let mut result = Vec::with_capacity(4 + 1 + 12 + ciphertext.len());
@@ -49,10 +49,11 @@ pub fn decrypt(encrypted: &[u8], key: &[u8; 32]) -> anyhow::Result<Vec<u8>> {
     let version = encrypted[4];
     match version {
         1 => {
-            let nonce = Nonce::from_slice(&encrypted[5..17]);
+            let nonce = Nonce::<Aes256Gcm>::try_from(&encrypted[5..17])
+                .map_err(|_| anyhow::anyhow!("Ciphertext too short"))?;
             let ciphertext = &encrypted[17..];
             cipher
-                .decrypt(nonce, ciphertext)
+                .decrypt(&nonce, ciphertext)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))
         }
         other => Err(anyhow::anyhow!(
@@ -78,6 +79,22 @@ pub fn parse_encryption_key(hex_key: &str) -> anyhow::Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An envelope written by aes-gcm 0.10.3: key `0x42 * 32`, nonce
+    /// `0x24 * 12`. Everything at rest is in this format, so it has to
+    /// keep decrypting across crate upgrades.
+    const KAT_ENVELOPE: &str = "fe545701012424242424242424242424245fd39716b0f5826e63a072e18e62cbf6125ce4f859cd09c169d112d90468ab87";
+
+    #[test]
+    fn envelope_from_earlier_release_decrypts() {
+        let envelope = hex::decode(KAT_ENVELOPE).unwrap();
+        let plain = decrypt(&envelope, &[0x42; 32]).unwrap();
+        assert_eq!(plain, b"JBSWY3DPEHPK3PXP");
+
+        let mut tampered = envelope.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(decrypt(&tampered, &[0x42; 32]).is_err());
+    }
 
     fn test_key() -> [u8; 32] {
         let mut key = [0u8; 32];

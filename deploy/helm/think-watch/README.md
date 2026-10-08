@@ -39,7 +39,7 @@ make helm-deploy HELM_VALUES=deploy/helm/think-watch/values-production.yaml.exam
 # Or one-off flags
 helm upgrade --install thinkwatch deploy/helm/think-watch \
   --namespace thinkwatch --create-namespace \
-  --set image.server.tag=v0.2.0 \
+  --set image.server.tag=3.2.1 \
   --set ingress.enabled=true \
   --set ingress.gateway.host=api.example.com
 ```

@@ -16,7 +16,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-use super::clickhouse_util::{ch_available, ch_client};
+use super::clickhouse_util::{ch_available, ch_client, ch_read_failed};
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TraceEvent {
@@ -108,7 +108,7 @@ pub async fn get_trace(
         let rows: Vec<GatewayRow> = ch
             .query(
                 "SELECT id, \
-                        formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                        formatDateTime(created_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS created_at, \
                         model_id, status_code, latency_ms, user_id \
                    FROM gateway_logs \
                   WHERE trace_id = ?",
@@ -116,7 +116,7 @@ pub async fn get_trace(
             .bind(&trace_id)
             .fetch_all::<GatewayRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace gateway_logs"))?;
         for r in rows {
             events.push(TraceEvent {
                 kind: "gateway".into(),
@@ -141,7 +141,7 @@ pub async fn get_trace(
         let rows: Vec<McpRow> = ch
             .query(
                 "SELECT id, \
-                        formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                        formatDateTime(created_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS created_at, \
                         tool_name, status, duration_ms, user_id \
                    FROM mcp_logs \
                   WHERE trace_id = ?",
@@ -149,7 +149,7 @@ pub async fn get_trace(
             .bind(&trace_id)
             .fetch_all::<McpRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace mcp_logs"))?;
         for r in rows {
             events.push(TraceEvent {
                 kind: "mcp".into(),
@@ -172,7 +172,7 @@ pub async fn get_trace(
         let rows: Vec<AuditRow> = ch
             .query(
                 "SELECT id, \
-                        formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                        formatDateTime(created_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS created_at, \
                         action, user_id \
                    FROM audit_logs \
                   WHERE trace_id = ?",
@@ -180,7 +180,7 @@ pub async fn get_trace(
             .bind(&trace_id)
             .fetch_all::<AuditRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace audit_logs"))?;
         for r in rows {
             events.push(TraceEvent {
                 kind: "audit".into(),
@@ -210,6 +210,10 @@ pub async fn get_trace(
             level: String,
             message: String,
         }
+        // `app_logs.created_at`, qualified: unqualified, the name means
+        // the String alias above, the comparison with a DateTime fails,
+        // and `unwrap_or_default` turned that into "no app events".
+        //
         // Escape LIKE metacharacters in the user-supplied trace_id so
         // `trace_id=%` doesn't trigger a 1h-window app_logs scan
         // bypassing the substring-search intent. LIMIT 200 + PREWHERE
@@ -222,10 +226,10 @@ pub async fn get_trace(
         let app_rows: Vec<AppLogRow> = ch
             .query(
                 "SELECT id, \
-                        formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                        formatDateTime(created_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS created_at, \
                         level, message \
                    FROM app_logs \
-                  PREWHERE created_at >= now() - INTERVAL 1 HOUR \
+                  PREWHERE app_logs.created_at >= now() - INTERVAL 1 HOUR \
                     AND (fields LIKE ? OR span LIKE ?) \
                   LIMIT 200",
             )
@@ -233,7 +237,7 @@ pub async fn get_trace(
             .bind(&pattern)
             .fetch_all::<AppLogRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace app_logs"))?;
         for r in app_rows {
             events.push(TraceEvent {
                 kind: "app".into(),

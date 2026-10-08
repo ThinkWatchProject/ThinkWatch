@@ -488,28 +488,19 @@ pub async fn login(
         ));
     }
 
-    // Constant-time login: always perform Argon2 verify to prevent user enumeration
-    let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
     // Soft-deleted users must NOT be able to log in. Every other user
     // lookup in this file already filters `deleted_at IS NULL`; the
     // login path was the lone exception, leaving a 30-day window after
     // soft-delete where the credential still worked.
-    let maybe_user = repo::find_active_by_email(&state.db, &email).await?;
+    let user = repo::find_active_by_email(&state.db, &email).await?;
 
-    let (user, password_hash) = match maybe_user {
-        Some(u) => {
-            let hash = u
-                .password_hash
-                .clone()
-                .unwrap_or_else(|| dummy_hash.to_string());
-            (Some(u), hash)
-        }
-        None => (None, dummy_hash.to_string()),
-    };
-
-    // Always verify (constant time regardless of user existence)
-    let password_valid = password::verify_password(&req.password, &password_hash).unwrap_or(false);
+    // Constant-time login: always run Argon2, against a dummy hash when
+    // there is no account or it has no password, so the response time does
+    // not tell which addresses have accounts.
+    let password_valid = password::verify_password_or_dummy(
+        &req.password,
+        user.as_ref().and_then(|u| u.password_hash.as_deref()),
+    );
 
     if !password_valid || user.is_none() {
         // Per-email cross-IP failure counter. The `count` above is keyed
@@ -588,11 +579,31 @@ pub async fn login(
                 .into_response());
             }
             Some(code) => {
-                // Verify TOTP code or recovery code
+                // Verify TOTP code or recovery code. A code that matches
+                // counts only if its time step is later than the last one
+                // accepted for this user: RFC 6238 §5.2, a code is used
+                // once. Without this, a code read over a shoulder, from a
+                // screen share or from a proxy log logs in again (with the
+                // password) for as long as the window still accepts it.
+                let mut totp_replayed = false;
                 let totp_valid = if let Some(ref encrypted_secret) = user.totp_secret {
                     let secret =
                         crate::services::totp_service::decrypt_secret(&state, encrypted_secret)?;
-                    think_watch_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
+                    match think_watch_auth::totp::verify_step(&secret, code, &user.email)
+                        .unwrap_or(None)
+                    {
+                        Some(step) => {
+                            let fresh = crate::services::totp_service::claim_step(
+                                &state.redis,
+                                user.id,
+                                step,
+                            )
+                            .await?;
+                            totp_replayed = !fresh;
+                            fresh
+                        }
+                        None => false,
+                    }
                 } else {
                     false
                 };
@@ -742,12 +753,11 @@ pub async fn login(
                             user_email: Some(&user.email),
                             user_id: Some(user.id),
                         };
-                        state.audit.log(
-                            actor
-                                .audit("auth.totp_failed")
-                                .resource("auth")
-                                .detail(serde_json::json!({"email": email})),
-                        );
+                        state
+                            .audit
+                            .log(actor.audit("auth.totp_failed").resource("auth").detail(
+                                serde_json::json!({"email": email, "replayed": totp_replayed}),
+                            ));
                         return Err(AppError::Unauthorized);
                     }
                 }
@@ -929,8 +939,8 @@ pub async fn register_key(
         return Err(AppError::RateLimited);
     }
 
-    // Web Crypto JWK includes extra fields (key_ops, ext) that the p256 crate
-    // doesn't understand. Extract only the fields p256 needs: kty, crv, x, y.
+    // Web Crypto JWK includes extra fields (key_ops, ext) that we don't
+    // store. Keep only the public-key fields: kty, crv, x, y.
     let jwk = &req.public_key;
     let minimal_jwk = serde_json::json!({
         "kty": jwk.get("kty").cloned().unwrap_or(serde_json::Value::Null),
@@ -942,7 +952,7 @@ pub async fn register_key(
         .map_err(|e| AppError::BadRequest(format!("Invalid public key JSON: {e}")))?;
 
     // Validate that this is a valid P-256 public key
-    p256::PublicKey::from_jwk_str(&pubkey_json)
+    crate::middleware::verify_signature::p256_public_key_from_jwk(&pubkey_json)
         .map_err(|e| AppError::BadRequest(format!("Invalid ECDSA P-256 public key JWK: {e}")))?;
 
     // The signature verification middleware fails-closed if a request
@@ -1750,8 +1760,13 @@ pub async fn totp_verify_setup(
     let pending: PendingData = serde_json::from_str(&pending_str)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("Corrupt pending TOTP data")))?;
 
-    // Verify the code against the pending secret
-    if !totp::verify(&pending.secret, &req.code, user_email).unwrap_or(false) {
+    // Verify the code against the pending secret, and use up its time
+    // step: the code that turns TOTP on must not then log in a second time.
+    let Some(step) = totp::verify_step(&pending.secret, &req.code, user_email).unwrap_or(None)
+    else {
+        return Err(AppError::BadRequest("Invalid TOTP code".into()));
+    };
+    if !crate::services::totp_service::claim_step(&state.redis, user_id, step).await? {
         return Err(AppError::BadRequest("Invalid TOTP code".into()));
     }
 

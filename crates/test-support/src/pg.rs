@@ -5,7 +5,7 @@
 
 use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Connection, Executor, PgConnection, PgPool};
+use sqlx::{AssertSqlSafe, Connection, Executor, PgConnection, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -43,7 +43,7 @@ impl IsolatedDatabase {
             .await
             .with_context(|| format!("connect to admin DB at {admin_url}"))?;
         admin
-            .execute(format!("CREATE DATABASE \"{name}\"").as_str())
+            .execute(AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
             .await
             .context("CREATE DATABASE for test")?;
         let _ = admin.close().await;
@@ -92,16 +92,13 @@ impl Drop for IsolatedDatabase {
                 pool.close().await;
                 if let Ok(mut conn) = PgConnection::connect(&admin_url).await {
                     let _ = conn
-                        .execute(
-                            format!(
-                                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-                                 WHERE datname = '{name}' AND pid <> pg_backend_pid()"
-                            )
-                            .as_str(),
-                        )
+                        .execute(AssertSqlSafe(format!(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                             WHERE datname = '{name}' AND pid <> pg_backend_pid()"
+                        )))
                         .await;
                     let _ = conn
-                        .execute(format!("DROP DATABASE IF EXISTS \"{name}\"").as_str())
+                        .execute(AssertSqlSafe(format!("DROP DATABASE IF EXISTS \"{name}\"")))
                         .await;
                     let _ = conn.close().await;
                 }

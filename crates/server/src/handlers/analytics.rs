@@ -8,7 +8,7 @@ use think_watch_common::cost_decimal::decode_i128;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
-use crate::handlers::clickhouse_util::ch_client;
+use crate::handlers::clickhouse_util::{ch_client, ch_read_failed};
 use crate::handlers::time_range::{RangeQuery, TimeRange};
 use crate::middleware::auth_guard::AuthUser;
 use crate::services::analytics_repository as repo;
@@ -220,14 +220,14 @@ pub async fn get_usage_stats(
             .bind(&window_start_str)
             .fetch_all::<Bucket>()
             .await
-            .unwrap_or_default(),
+            .map_err(ch_read_failed("usage_stats buckets"))?,
         Some(ids) => ch
             .query(&bucket_sql_scoped)
             .bind(&window_start_str)
             .bind(ids)
             .fetch_all::<Bucket>()
             .await
-            .unwrap_or_default(),
+            .map_err(ch_read_failed("usage_stats buckets"))?,
     };
     let lookup: std::collections::HashMap<i64, i64> = bucket_rows
         .into_iter()
@@ -262,7 +262,7 @@ pub async fn get_usage_stats(
                 .bind(&prev_end_str)
                 .fetch_one::<Totals>()
                 .await
-                .ok(),
+                .map_err(ch_read_failed("usage_stats previous window"))?,
             Some(ids) => ch
                 .query(
                     "SELECT \
@@ -278,12 +278,8 @@ pub async fn get_usage_stats(
                 .bind(ids)
                 .fetch_one::<Totals>()
                 .await
-                .ok(),
+                .map_err(ch_read_failed("usage_stats previous window"))?,
         };
-        let prev = prev.unwrap_or(Totals {
-            total_tokens: 0,
-            total_requests: 0,
-        });
         (
             Some(prev.total_tokens as i64),
             Some(prev.total_requests as i64),
@@ -673,14 +669,14 @@ pub async fn get_cost_stats(
                 .bind(&window_start_str)
                 .fetch_all::<CostBucketCh>()
                 .await
-                .unwrap_or_default(),
+                .map_err(ch_read_failed("cost_stats buckets"))?,
             Some(ids) => ch
                 .query(&sql_scoped)
                 .bind(&window_start_str)
                 .bind(ids)
                 .fetch_all::<CostBucketCh>()
                 .await
-                .unwrap_or_default(),
+                .map_err(ch_read_failed("cost_stats buckets"))?,
         };
         let lookup: std::collections::HashMap<i64, Decimal> = rows
             .into_iter()
@@ -720,7 +716,7 @@ pub async fn get_cost_stats(
                     .bind(&prev_end_str)
                     .fetch_one::<PrevCost>()
                     .await
-                    .ok(),
+                    .map_err(ch_read_failed("cost_stats previous window"))?,
                 Some(ids) => ch
                     .query(
                         "SELECT sum(ifNull(cost_usd, 0)) AS cost FROM gateway_logs \
@@ -733,9 +729,9 @@ pub async fn get_cost_stats(
                     .bind(ids)
                     .fetch_one::<PrevCost>()
                     .await
-                    .ok(),
+                    .map_err(ch_read_failed("cost_stats previous window"))?,
             };
-            Some(prev.map(|p| decode_i128(p.cost)).unwrap_or(Decimal::ZERO))
+            Some(decode_i128(prev.cost))
         }
     } else {
         None

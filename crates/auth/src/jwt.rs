@@ -225,6 +225,41 @@ pub async fn is_revoked(
 mod tests {
     use super::*;
 
+    /// HS256 token written by jsonwebtoken 10.3.0 with the test secret,
+    /// valid until 2100. Sessions in flight during an upgrade must survive.
+    const KAT_HS256: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0aGlua3dhdGNoIiwiZW1haWwiOiJrYXRAZXhhbXBsZS5jb20iLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTc2NzIyNTYwMCwiaXNzIjoidGhpbmt3YXRjaCIsInN1YiI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRva2VuX3R5cGUiOiJhY2Nlc3MifQ.p-MxHUJmArio32oT6tJt3wqIZBCGOt8ffjBvi32ZEZQ";
+    /// The same claims signed HS512 with the same secret.
+    const KAT_HS512: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJhdWQiOiJ0aGlua3dhdGNoIiwiZW1haWwiOiJrYXRAZXhhbXBsZS5jb20iLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTc2NzIyNTYwMCwiaXNzIjoidGhpbmt3YXRjaCIsInN1YiI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRva2VuX3R5cGUiOiJhY2Nlc3MifQ.L2JlgTNVUVTEdsVftiPY6UOjVwKmeYPHnO91JDyv3OBBvx-D2Fa64e1gXTSu2l4LPyYbOJepsimYm1matRjTGQ";
+
+    #[test]
+    fn token_from_earlier_release_verifies() {
+        let claims = test_jwt_manager().verify_token(KAT_HS256).unwrap();
+        assert_eq!(claims.sub, test_user_id());
+        assert_eq!(claims.email, "kat@example.com");
+    }
+
+    #[test]
+    fn only_hs256_is_accepted() {
+        let mgr = test_jwt_manager();
+        assert!(
+            mgr.verify_token(KAT_HS512).is_err(),
+            "HS512 must be rejected"
+        );
+
+        // `alg: none` with the signature stripped.
+        let payload = KAT_HS256.split('.').nth(1).unwrap();
+        let none = format!("eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.{payload}.");
+        assert!(
+            mgr.verify_token(&none).is_err(),
+            "alg none must be rejected"
+        );
+
+        // Same header and claims, signature from a different secret.
+        let mut forged = KAT_HS256.rsplit_once('.').unwrap().0.to_string();
+        forged.push_str(".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert!(mgr.verify_token(&forged).is_err());
+    }
+
     fn test_jwt_manager() -> JwtManager {
         JwtManager::new("test-secret-key-for-unit-tests")
     }

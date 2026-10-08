@@ -26,6 +26,15 @@ USE think_watch;
 -- ---------------------------------------------------------------------------
 -- Log tables
 -- ---------------------------------------------------------------------------
+--
+-- A column added to app_logs, access_logs, audit_logs, gateway_logs or
+-- mcp_logs needs a DEFAULT (Nullable(String) DEFAULT NULL will do). The
+-- server checks every insert against the table's columns, and a column
+-- the inserting instance does not write must have a default. An instance
+-- of the previous release does not write the new column, so without a
+-- default its inserts into the table fail: during a rolling upgrade, and
+-- after a rollback. The test new_log_table_columns_have_a_default in
+-- crates/common/src/audit/clickhouse.rs fails on such a column.
 
 CREATE TABLE IF NOT EXISTS app_logs (
     id               String,

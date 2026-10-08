@@ -50,7 +50,11 @@ async fn connect(app: &TestApp, key: &str) -> Socket {
 }
 
 fn create(model: &str, input: &str) -> Message {
-    Message::Text(json!({"type": "response.create", "model": model, "input": input}).to_string())
+    Message::Text(
+        json!({"type": "response.create", "model": model, "input": input})
+            .to_string()
+            .into(),
+    )
 }
 
 /// Read events until the turn ends (`response.completed` or
@@ -177,12 +181,14 @@ async fn limits_apply_per_turn_and_a_refusal_keeps_the_connection() {
     // A frame that is not a turn is refused the same way, and the
     // connection is still there after it.
     socket
-        .send(Message::Text(json!({"type": "session.update"}).to_string()))
+        .send(Message::Text(
+            json!({"type": "session.update"}).to_string().into(),
+        ))
         .await
         .unwrap();
     let refused = turn(&mut socket).await;
     assert_eq!(refused.last().unwrap()["type"], "response.failed");
-    socket.send(Message::Ping(vec![1])).await.unwrap();
+    socket.send(Message::Ping(vec![1].into())).await.unwrap();
 }
 
 /// OpenAI's socket mode keeps the connection's last response, so a turn
@@ -200,7 +206,8 @@ async fn a_turn_continues_from_the_connections_last_response() {
     socket
         .send(Message::Text(
             json!({"type": "response.create", "model": "ws-chain", "store": false, "input": "one"})
-                .to_string(),
+                .to_string()
+                .into(),
         ))
         .await
         .unwrap();
@@ -214,7 +221,8 @@ async fn a_turn_continues_from_the_connections_last_response() {
         .send(Message::Text(
             json!({"type": "response.create", "model": "ws-chain", "store": false,
                    "previous_response_id": id, "input": "two"})
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();

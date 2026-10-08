@@ -11,7 +11,7 @@ name: thinkwatch
 
 services:
   server:
-    image: ghcr.io/thinkwatch/think-watch-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/thinkwatchproject/think-watch-server:${IMAGE_TAG:-latest}
     ports:
       - "${GATEWAY_PORT:-3000}:3000"   # Gateway — expose to clients
       # Console port NOT exposed externally by default
@@ -84,7 +84,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: ghcr.io/thinkwatch/think-watch-web:${IMAGE_TAG:-latest}
+    image: ghcr.io/thinkwatchproject/think-watch-web:${IMAGE_TAG:-latest}
     environment:
       TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:?TRUSTED_PROXY_SECRET is required (shared with the server)}
       # Substitute ONLY our variable. The nginx entrypoint's default is
@@ -219,7 +219,7 @@ services:
     restart: unless-stopped
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3-alpine
+    image: clickhouse/clickhouse-server:26.8-alpine
     command: ["--", "--listen_host=0.0.0.0"]
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}

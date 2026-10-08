@@ -12,7 +12,7 @@
     "https://github.com/apps/renovate against ThinkWatchProject to",
     "activate.",
     "",
-    "`baseBranches: ['dev']` pins Renovate to the working branch — the",
+    "`baseBranchPatterns: ['dev']` pins Renovate to the working branch — the",
     "GitHub default is `main` (release-only, branch-protected), but",
     "dep-bump PRs MUST target `dev` so they get merged into the next",
     "release naturally. Without this override, Renovate would default",
@@ -23,7 +23,7 @@
     "advisories override the schedule and open immediately."
   ],
 
-  "baseBranches": ["dev"],
+  "baseBranchPatterns": ["dev"],
   "schedule": ["before 6am on sunday"],
   "timezone": "Asia/Shanghai",
   "labels": ["deps"],
@@ -47,6 +47,17 @@
   },
 
   "packageRules": [
+    {
+      "description": "The thinkwatch-core crates are pinned to a core release tag by hand, together with the code that follows the new core. Renovate leaves them alone.",
+      "matchManagers": ["cargo"],
+      "matchDepNames": ["tw-bedrock", "tw-breaker", "tw-dialect", "tw-guard"],
+      "enabled": false
+    },
+    {
+      "description": "ClickHouse server: long-term-support releases only (YY.3 and YY.8), which get a year of fixes instead of three months. 26.9 also changed the default network compression to ZSTD, which the clickhouse crate could not read until the client named LZ4 itself.",
+      "matchDepNames": ["clickhouse/clickhouse-server"],
+      "allowedVersions": "/^\\d+\\.(3|8)(-alpine)?$/"
+    },
     {
       "description": "Cargo crates — group everything together, separate major bumps to a dedicated PR for review.",
       "matchManagers": ["cargo"],
@@ -97,7 +108,7 @@
       "pinDigests": true
     },
     {
-      "description": "Docker base images in deploy/docker/Dockerfile.*. Patch + minor automerge if CI passes — the base images we use (node:24-alpine, nginx:1.29-alpine, distroless/static) are mature enough that patch bumps are safe. Major bumps go through review.",
+      "description": "Docker base images in deploy/docker/Dockerfile.*. Patch + minor automerge if CI passes — the base images we use (node, nginx, rust, distroless/static) are mature enough that patch bumps are safe. Major bumps go through review.",
       "matchManagers": ["dockerfile"],
       "matchUpdateTypes": ["patch", "minor"],
       "groupName": "docker base images",

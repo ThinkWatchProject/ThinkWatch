@@ -109,6 +109,7 @@ pub async fn list_mcp_logs(
     push_time_range_conditions(
         &mut conditions,
         &mut binds,
+        "mcp_logs",
         params.from.as_deref(),
         params.to.as_deref(),
     )?;
@@ -272,7 +273,7 @@ pub async fn get_mcp_log_body(
     let row: Option<McpLogBodyRow> = ch
         .query(
             "SELECT id, trace_id, user_id, server_id, server_name, tool_name, \
-                    formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                    formatDateTime(created_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS created_at, \
                     tool_arguments, tool_result, arguments_bytes, result_bytes, \
                     body_capture_status \
              FROM mcp_logs WHERE id = ? LIMIT 1",
