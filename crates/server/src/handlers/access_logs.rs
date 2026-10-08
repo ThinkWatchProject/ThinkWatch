@@ -123,6 +123,7 @@ pub async fn list_access_logs(
     push_time_range_conditions(
         &mut conditions,
         &mut binds,
+        "access_logs",
         params.from.as_deref(),
         params.to.as_deref(),
     )?;

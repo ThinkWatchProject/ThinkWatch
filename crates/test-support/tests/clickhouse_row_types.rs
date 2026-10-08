@@ -389,6 +389,29 @@ async fn log_trace_and_history_queries_read_their_rows() {
         assert!(!items.is_empty(), "{path}: {body}");
     }
 
+    // A range in the `YYYY-MM-DDTHH:MM:SS` form the API accepts. The list
+    // queries select `toString(created_at) AS created_at`, which shadows
+    // the column: an unqualified time filter compared text with text in
+    // the data query and dropped every row of the `from` day, a space
+    // sorting before `T`, while the count query still counted them.
+    let now = chrono::Utc::now();
+    let from = (now - chrono::Duration::hours(1)).format("%Y-%m-%dT%H:%M:%S");
+    let to = (now + chrono::Duration::minutes(5)).format("%Y-%m-%dT%H:%M:%S");
+    for path in [
+        "/api/gateway/logs",
+        "/api/mcp/logs",
+        "/api/audit/logs",
+        "/api/admin/app-logs",
+        "/api/admin/access-logs",
+    ] {
+        let body = get(&admin, &format!("{path}?from={from}&to={to}")).await;
+        let items = body["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path}: {body}"));
+        assert!(!items.is_empty(), "{path} from {from}: {body}");
+        assert!(body["total"].as_u64() > Some(0), "{path}: {body}");
+    }
+
     let body = get(
         &admin,
         &format!("/api/admin/gateway/logs/{}/body", s.gateway_log_id),
