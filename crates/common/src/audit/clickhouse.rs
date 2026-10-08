@@ -2,10 +2,14 @@
 //! one-time schema bootstrap (`ensure_clickhouse_tables`).
 //!
 //! Each `flush_<type>` function pulls the audit-shaped JSON detail
-//! into the right ClickHouse Row struct and bulk-inserts via the
-//! clickhouse 0.13 crate. Errors retain entries (bounded by
-//! `CH_RETAIN_CAP`) so the next worker tick can retry instead of
-//! dropping audit data on every transient outage.
+//! into the right ClickHouse Row struct and bulk-inserts it. Errors
+//! retain entries (bounded by `CH_RETAIN_CAP`) so the next worker tick
+//! can retry instead of dropping audit data on every transient outage.
+//! The `flush_<type>` functions therefore read the batch without taking
+//! entries out of it: an insert fails at `write` or `end` as often as at
+//! `insert` (once the table's schema is cached, `insert` sends nothing),
+//! and only `flush_to_clickhouse` clears the batch, once the insert has
+//! succeeded.
 
 use super::sanitize::sanitize_body_if_json;
 use super::types::{
@@ -83,10 +87,10 @@ pub(super) async fn flush_to_clickhouse(
 async fn flush_app(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChAppLogRow>(table).await?;
-    for entry in batch.drain(..) {
+    for entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         insert
             .write(&ChAppLogRow {
@@ -106,10 +110,10 @@ async fn flush_app(
 async fn flush_access(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChAccessRow>(table).await?;
-    for entry in batch.drain(..) {
+    for entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         insert
             .write(&ChAccessRow {
@@ -133,10 +137,10 @@ async fn flush_access(
 async fn flush_audit(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChAuditRow>(table).await?;
-    for mut entry in batch.drain(..) {
+    for mut entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         insert
             .write(&ChAuditRow {
@@ -162,10 +166,10 @@ async fn flush_audit(
 async fn flush_gateway(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChGatewayRow>(table).await?;
-    for mut entry in batch.drain(..) {
+    for mut entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         // Sanitise first, then measure — so the bytes column reflects
         // what is ACTUALLY stored in the body cell, not the pre-redaction
@@ -214,10 +218,10 @@ async fn flush_gateway(
 async fn flush_mcp(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChMcpRow>(table).await?;
-    for mut entry in batch.drain(..) {
+    for mut entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         // Same sanitise-then-measure ordering as flush_gateway so
         // `length(tool_arguments) == arguments_bytes` for inline rows.
@@ -379,5 +383,63 @@ async fn backfill_if_empty(client: &clickhouse::Client, table: &str, insert_sql:
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("ClickHouse count({table}) failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ClickHouse that refuses connections. Validation off, so
+    /// `insert` asks nothing of the server and the failure comes where it
+    /// does once a table's schema is cached: at `write` or `end`, after
+    /// the rows have been read from the batch.
+    fn unreachable_client() -> clickhouse::Client {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        clickhouse::Client::default()
+            .with_url(format!("http://127.0.0.1:{port}"))
+            .with_validation(false)
+    }
+
+    #[tokio::test]
+    async fn a_failed_insert_keeps_every_entry_for_the_next_tick() {
+        let ch = Some(unreachable_client());
+        for log_type in [
+            LogType::Access,
+            LogType::App,
+            LogType::Audit,
+            LogType::Gateway,
+            LogType::Mcp,
+        ] {
+            let mut batch: Vec<AuditEntry> = (0..3)
+                .map(|i| {
+                    #[allow(deprecated)]
+                    let mut e = AuditEntry::new(format!("test.{i}"));
+                    e.log_type = log_type;
+                    e.request_body = Some(r#"{"q":1}"#.into());
+                    e.response_body = Some(r#"{"a":1}"#.into());
+                    e
+                })
+                .collect();
+            let ids: Vec<String> = batch.iter().map(|e| e.id.clone()).collect();
+            flush_to_clickhouse(&ch, log_type.index_id(), &mut batch).await;
+            assert_eq!(
+                batch.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+                ids,
+                "{log_type:?}"
+            );
+            // Bodies are sanitised into the row, never taken out of the
+            // retained entry: the retry writes the same row.
+            assert!(
+                batch
+                    .iter()
+                    .all(|e| e.request_body.is_some() && e.response_body.is_some()),
+                "{log_type:?}"
+            );
+        }
     }
 }
