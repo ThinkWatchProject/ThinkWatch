@@ -25,6 +25,10 @@ COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY web/ .
+# vite.config.ts reads the version the console shows from the workspace
+# Cargo.toml one directory above web/. Without it here the build falls
+# back to 0.0.0, and the console said "v0.0.0" in every released image.
+COPY Cargo.toml /Cargo.toml
 RUN pnpm build
 
 # Stage 2: Serve with Nginx
