@@ -62,7 +62,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
+      # Save only on pushes (dev, main). A PR can read its own caches, its
+      # base branch's and the default branch's, never another PR's, so a cache
+      # saved on a PR serves only a later push to that same PR, while taking as
+      # much of the repository's 10 GB cache quota as dev's and evicting it.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
         with:
           tool: cargo-nextest
@@ -158,6 +164,9 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # See the `rust` job.
+          save-if: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
         with:
           tool: cargo-nextest

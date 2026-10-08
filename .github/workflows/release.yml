@@ -104,8 +104,13 @@ jobs:
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=BUSL-1.1
-          cache-from: type=gha,scope=${{ matrix.component }}-${{ steps.meta.outputs.platform_pair }}
-          cache-to: type=gha,scope=${{ matrix.component }}-${{ steps.meta.outputs.platform_pair }},mode=max
+          # Read the caches CI saves on main, never write. A tag run can read
+          # its own caches and the default branch's (main) only, and the tag
+          # points at a commit whose main push CI has just built from the same
+          # Dockerfile, so these scopes are CI's (`server-<platform>`, and `web`
+          # for both platforms). A cache written here would be filed under the
+          # tag, where no later run can read it.
+          cache-from: type=gha,scope=${{ matrix.component == 'web' && 'web' || format('server-{0}', matrix.platform) }}
 
       - name: Export digest
         run: |
