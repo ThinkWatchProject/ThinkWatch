@@ -11,6 +11,116 @@ target.
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-10-09
+
+The Helm chart and the Compose file now pull the published images: they
+named `ghcr.io/thinkwatch/…`, which this project does not publish to, so a
+default install could not pull. Log rows are no longer lost while
+ClickHouse is unreachable. Five reads from ClickHouse returned wrong or
+missing data and now return what is stored: the SLO latency percentiles, a
+route's latency history, the times on traces and log bodies, a trace's app
+events, and the log lists for a range written with a `T`. The server also
+reads from ClickHouse 26.9 and later, the console shows its own version
+again, and the dependencies move to current releases, two of them for
+security advisories. The thinkwatch-core crates move from v0.62.0 to
+v0.65.0, which makes outbound redaction and the content filter faster
+without changing what they find.
+
+No setting, schema or API route changes, and instances of 3.2.0 and 3.2.1
+can run side by side during a rollout.
+
+### Read before upgrading
+
+- **Image names in your own files.** A values file or `--set` flag of your
+  own that names `ghcr.io/thinkwatch/think-watch-server` or `…-web` keeps
+  overriding the chart's new default, and a copy of
+  `deploy/docker-compose.yml` keeps the old name: change them to
+  `ghcr.io/thinkwatchproject/…`. A pinned image tag has no `v`: `3.2.1`,
+  not `v3.2.1`.
+
+### Fixed
+
+- **Image names.** The Helm chart (`image.server.repository`,
+  `image.web.repository`) and `deploy/docker-compose.yml` named
+  `ghcr.io/thinkwatch/think-watch-server` and `…-web`, which this project
+  does not publish to and which refuses anonymous pulls, so `helm install`
+  with the default values and `docker compose pull` failed. Releases are
+  published to `ghcr.io/thinkwatchproject/think-watch-server` and `…-web`,
+  and both files now name them. The tag examples in the chart's README and
+  `values-production.yaml.example` wrote `v0.2.0`; published tags have no
+  `v`, and the examples now say `3.2.1`.
+- **SLO latency percentiles.** `GET /api/admin/slo` reported p50, p95 and
+  p99 latencies next to zero: the percentiles kept the column's integer
+  type and were read as floating-point numbers. They now give the
+  latencies in milliseconds.
+- **Route latency history.** The latency sparkline on the routing page
+  (`GET /api/admin/models/{model_id}/route-history`) was always empty: the
+  query's column types differed from the ones the server read, and the
+  failure fell back to no data. It now shows each minute's p50 and p95, and
+  a gap for a minute whose requests all failed before a latency was
+  recorded.
+- **Times on traces and log bodies.** The trace view and the gateway and
+  MCP log body views put the month name where the minutes belong
+  (`2026-10-06T04:October:52`), because `%M` in ClickHouse's
+  `formatDateTime` is the month name. They now read `04:31:52`.
+- **App events on traces.** A trace never listed app log events: the query
+  that finds them compared a text column with a time, ClickHouse refused
+  it, and the refusal showed as no events.
+- **ClickHouse 26.9 and later.** ClickHouse 26.9 compresses query results
+  with ZSTD unless the client names a method, and the server's client
+  reads only LZ4, so every read failed with `incorrect magic number`. The
+  server now names LZ4 on every query, which every ClickHouse version
+  supports. Query results are also checked against the types the server
+  reads them into, so a query whose types drift fails instead of returning
+  garbage; every query was checked against ClickHouse 26.8 and 26.9.
+- **Log rows kept through a ClickHouse outage.** The log writer is meant to
+  keep a batch that ClickHouse did not take and retry it on the next tick,
+  up to 1000 entries per table. A batch that failed while being sent —
+  ClickHouse restarting or unreachable, the usual case — had already been
+  emptied, so its gateway, MCP, audit, access or app log rows were lost
+  while the server logged `retaining N entries for retry`. They are now
+  kept and retried. A batch that ClickHouse stored but whose answer never
+  arrived is written a second time.
+- **Time ranges on the log lists.** On the gateway, MCP, audit, app and
+  access log lists, a `from` written `YYYY-MM-DDTHH:MM:SS`, the form the
+  API's error message suggests, dropped every row of that day from
+  `items` while `total` still counted them: the list compared the times
+  as text. The console sends `YYYY-MM-DD HH:MM:SS` and was not affected.
+- **The console's version.** The sidebar of the web console showed
+  `v0.0.0` in every released web image, because the image build could not
+  see the version file it reads. It now shows the release.
+
+### Security
+
+- rand 0.10.3 ([RUSTSEC-2026-0097](https://rustsec.org/advisories/RUSTSEC-2026-0097.html))
+  and xxhash-rust 0.8.19
+  ([GHSA-6g2r-675j-hx59](https://github.com/advisories/GHSA-6g2r-675j-hx59)).
+  Neither affects how ThinkWatch uses the crate: it installs no `log`
+  logger that draws random numbers, and it hashes with xxh3's default
+  secret only.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.62.0 → v0.65.0. Secret scanning and the content filter do much less
+  work per request: they search bytes directly, skip plain ASCII where no
+  rule can match it, and lowercase text in runs. Core tests each fast path
+  against the code it replaced on randomly generated text, so they find
+  exactly what they found before.
+- The bundled ClickHouse (Helm `clickhouse.image`, `deploy/docker-compose.yml`)
+  moves from 26.3 to 26.8, both long-term-support releases. An upgrade
+  restarts it on 26.8 with its data. ClickHouse does not promise that an
+  older version reads what a newer one wrote, so to roll back to 3.2.0
+  later, keep `clickhouse.image` at 26.8.
+- Dependencies move to current releases, among them sqlx 0.9, clickhouse
+  0.15, tower-http 0.7, utoipa 6, jsonwebtoken 11, argon2 0.6, aes-gcm 0.11,
+  p256 0.14 and totp-rs 6. Password hashes, encrypted secrets, issued
+  tokens, request signatures and TOTP codes from 3.2.0 keep verifying, and
+  what 3.2.1 writes verifies on 3.2.0; known-answer tests cover each.
+- The server image is built with Rust 1.99, and the web image serves from
+  nginx 1.31 (was 1.29), built with Node 24.21 and pnpm 12. Building from
+  source needs Rust 1.94.1 or newer (was 1.85).
+
 ## [3.2.0] — 2026-10-05
 
 Redis Cluster and Redis over TLS now work, so managed Redis services can be
@@ -1331,7 +1441,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.2.1...HEAD
+[3.2.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.1
 [3.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.0
 [3.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.1.0
 [3.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.0.0
