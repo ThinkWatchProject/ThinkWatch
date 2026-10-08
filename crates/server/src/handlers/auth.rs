@@ -588,11 +588,31 @@ pub async fn login(
                 .into_response());
             }
             Some(code) => {
-                // Verify TOTP code or recovery code
+                // Verify TOTP code or recovery code. A code that matches
+                // counts only if its time step is later than the last one
+                // accepted for this user: RFC 6238 §5.2, a code is used
+                // once. Without this, a code read over a shoulder, from a
+                // screen share or from a proxy log logs in again (with the
+                // password) for as long as the window still accepts it.
+                let mut totp_replayed = false;
                 let totp_valid = if let Some(ref encrypted_secret) = user.totp_secret {
                     let secret =
                         crate::services::totp_service::decrypt_secret(&state, encrypted_secret)?;
-                    think_watch_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
+                    match think_watch_auth::totp::verify_step(&secret, code, &user.email)
+                        .unwrap_or(None)
+                    {
+                        Some(step) => {
+                            let fresh = crate::services::totp_service::claim_step(
+                                &state.redis,
+                                user.id,
+                                step,
+                            )
+                            .await?;
+                            totp_replayed = !fresh;
+                            fresh
+                        }
+                        None => false,
+                    }
                 } else {
                     false
                 };
@@ -742,12 +762,11 @@ pub async fn login(
                             user_email: Some(&user.email),
                             user_id: Some(user.id),
                         };
-                        state.audit.log(
-                            actor
-                                .audit("auth.totp_failed")
-                                .resource("auth")
-                                .detail(serde_json::json!({"email": email})),
-                        );
+                        state
+                            .audit
+                            .log(actor.audit("auth.totp_failed").resource("auth").detail(
+                                serde_json::json!({"email": email, "replayed": totp_replayed}),
+                            ));
                         return Err(AppError::Unauthorized);
                     }
                 }
@@ -1750,8 +1769,13 @@ pub async fn totp_verify_setup(
     let pending: PendingData = serde_json::from_str(&pending_str)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("Corrupt pending TOTP data")))?;
 
-    // Verify the code against the pending secret
-    if !totp::verify(&pending.secret, &req.code, user_email).unwrap_or(false) {
+    // Verify the code against the pending secret, and use up its time
+    // step: the code that turns TOTP on must not then log in a second time.
+    let Some(step) = totp::verify_step(&pending.secret, &req.code, user_email).unwrap_or(None)
+    else {
+        return Err(AppError::BadRequest("Invalid TOTP code".into()));
+    };
+    if !crate::services::totp_service::claim_step(&state.redis, user_id, step).await? {
         return Err(AppError::BadRequest("Invalid TOTP code".into()));
     }
 
