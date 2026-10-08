@@ -193,6 +193,7 @@ pub async fn list_gateway_logs(
     push_time_range_conditions(
         &mut conditions,
         &mut bind_values,
+        "gateway_logs",
         params.from.as_deref(),
         params.to.as_deref(),
     )?;

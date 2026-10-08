@@ -18,7 +18,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-use super::clickhouse_util::ch_client;
+use super::clickhouse_util::{ch_client, ch_read_failed};
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LicenseTier {
@@ -169,7 +169,7 @@ pub async fn get_usage_license(
         .fetch_one::<TokenCount>()
         .await
         .map(|r| r.cnt as i64)
-        .unwrap_or(0);
+        .map_err(ch_read_failed("usage_license tokens"))?;
 
     let token_rows: Vec<DailyTokens> = ch
         .query(
@@ -182,7 +182,7 @@ pub async fn get_usage_license(
         .bind(&month_start_str)
         .fetch_all::<DailyTokens>()
         .await
-        .unwrap_or_default();
+        .map_err(ch_read_failed("usage_license daily tokens"))?;
     let parsed_tokens: Vec<(chrono::NaiveDate, i64)> = token_rows
         .into_iter()
         .filter_map(|r| {
@@ -214,7 +214,7 @@ pub async fn get_usage_license(
         .fetch_one::<CallCount>()
         .await
         .map(|r| r.cnt as i64)
-        .unwrap_or(0);
+        .map_err(ch_read_failed("usage_license tool calls"))?;
 
     let call_rows: Vec<CallDaily> = ch
         .query(
@@ -227,7 +227,7 @@ pub async fn get_usage_license(
         .bind(&month_start_str)
         .fetch_all::<CallDaily>()
         .await
-        .unwrap_or_default();
+        .map_err(ch_read_failed("usage_license daily tool calls"))?;
     let parsed_calls: Vec<(chrono::NaiveDate, i64)> = call_rows
         .into_iter()
         .filter_map(|r| {

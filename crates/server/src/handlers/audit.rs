@@ -100,6 +100,7 @@ pub async fn list_audit_logs(
     push_time_range_conditions(
         &mut conditions,
         &mut binds,
+        "audit_logs",
         query.from.as_deref(),
         query.to.as_deref(),
     )?;

@@ -389,6 +389,29 @@ async fn log_trace_and_history_queries_read_their_rows() {
         assert!(!items.is_empty(), "{path}: {body}");
     }
 
+    // A range in the `YYYY-MM-DDTHH:MM:SS` form the API accepts. The list
+    // queries select `toString(created_at) AS created_at`, which shadows
+    // the column: an unqualified time filter compared text with text in
+    // the data query and dropped every row of the `from` day, a space
+    // sorting before `T`, while the count query still counted them.
+    let now = chrono::Utc::now();
+    let from = (now - chrono::Duration::hours(1)).format("%Y-%m-%dT%H:%M:%S");
+    let to = (now + chrono::Duration::minutes(5)).format("%Y-%m-%dT%H:%M:%S");
+    for path in [
+        "/api/gateway/logs",
+        "/api/mcp/logs",
+        "/api/audit/logs",
+        "/api/admin/app-logs",
+        "/api/admin/access-logs",
+    ] {
+        let body = get(&admin, &format!("{path}?from={from}&to={to}")).await;
+        let items = body["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path}: {body}"));
+        assert!(!items.is_empty(), "{path} from {from}: {body}");
+        assert!(body["total"].as_u64() > Some(0), "{path}: {body}");
+    }
+
     let body = get(
         &admin,
         &format!("/api/admin/gateway/logs/{}/body", s.gateway_log_id),
@@ -426,4 +449,45 @@ async fn log_trace_and_history_queries_read_their_rows() {
         !history["items"].as_array().unwrap().is_empty(),
         "role history: {history}"
     );
+}
+
+/// A ClickHouse read that fails is an error where the answer is the
+/// ClickHouse data: an empty trace or a zero usage meter would read as
+/// "nothing happened", which is how a broken query goes unnoticed. Where
+/// ClickHouse only adds to data from Postgres (dashboard tiles, the MCP
+/// server list's call counts), the page still loads and the failure is
+/// logged.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_failed_clickhouse_read_is_an_error_where_the_answer_is_clickhouse_data() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let admin = admin_session(&app).await;
+    let ch = app
+        .state
+        .clickhouse
+        .as_ref()
+        .expect("ClickHouse configured");
+    // Every read of these two tables fails from here on.
+    for table in ["gateway_logs", "mcp_logs"] {
+        ch.query(&format!("RENAME TABLE {table} TO {table}_gone"))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for path in [
+        "/api/admin/trace/no-such-trace",
+        "/api/admin/usage-license",
+        "/api/analytics/usage/stats?range=24h&compare=true",
+        "/api/analytics/costs/stats?range=24h&compare=true",
+    ] {
+        let resp = admin.get(path).await.unwrap();
+        assert_eq!(resp.status, 500, "{path} answered without ClickHouse");
+    }
+    for path in [
+        "/api/dashboard/stats?range=24h&compare=true",
+        "/api/mcp/servers",
+    ] {
+        admin.get(path).await.unwrap().assert_ok();
+    }
 }

@@ -2,10 +2,14 @@
 //! one-time schema bootstrap (`ensure_clickhouse_tables`).
 //!
 //! Each `flush_<type>` function pulls the audit-shaped JSON detail
-//! into the right ClickHouse Row struct and bulk-inserts via the
-//! clickhouse 0.13 crate. Errors retain entries (bounded by
-//! `CH_RETAIN_CAP`) so the next worker tick can retry instead of
-//! dropping audit data on every transient outage.
+//! into the right ClickHouse Row struct and bulk-inserts it. Errors
+//! retain entries (bounded by `CH_RETAIN_CAP`) so the next worker tick
+//! can retry instead of dropping audit data on every transient outage.
+//! The `flush_<type>` functions therefore read the batch without taking
+//! entries out of it: an insert fails at `write` or `end` as often as at
+//! `insert` (once the table's schema is cached, `insert` sends nothing),
+//! and only `flush_to_clickhouse` clears the batch, once the insert has
+//! succeeded.
 
 use super::sanitize::sanitize_body_if_json;
 use super::types::{
@@ -83,10 +87,10 @@ pub(super) async fn flush_to_clickhouse(
 async fn flush_app(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChAppLogRow>(table).await?;
-    for entry in batch.drain(..) {
+    for entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         insert
             .write(&ChAppLogRow {
@@ -106,10 +110,10 @@ async fn flush_app(
 async fn flush_access(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChAccessRow>(table).await?;
-    for entry in batch.drain(..) {
+    for entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         insert
             .write(&ChAccessRow {
@@ -133,10 +137,10 @@ async fn flush_access(
 async fn flush_audit(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChAuditRow>(table).await?;
-    for mut entry in batch.drain(..) {
+    for mut entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         insert
             .write(&ChAuditRow {
@@ -162,10 +166,10 @@ async fn flush_audit(
 async fn flush_gateway(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChGatewayRow>(table).await?;
-    for mut entry in batch.drain(..) {
+    for mut entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         // Sanitise first, then measure — so the bytes column reflects
         // what is ACTUALLY stored in the body cell, not the pre-redaction
@@ -214,10 +218,10 @@ async fn flush_gateway(
 async fn flush_mcp(
     client: &clickhouse::Client,
     table: &str,
-    batch: &mut Vec<AuditEntry>,
+    batch: &[AuditEntry],
 ) -> Result<(), clickhouse::error::Error> {
     let mut insert = client.insert::<ChMcpRow>(table).await?;
-    for mut entry in batch.drain(..) {
+    for mut entry in batch.iter().cloned() {
         let ts = parse_created_at(&entry.created_at);
         // Same sanitise-then-measure ordering as flush_gateway so
         // `length(tool_arguments) == arguments_bytes` for inline rows.
@@ -379,5 +383,244 @@ async fn backfill_if_empty(client: &clickhouse::Client, table: &str, insert_sql:
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("ClickHouse count({table}) failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The columns of the five tables the writer inserts into that have no
+    /// default, as of 3.2.1. Each one is written by every release since it
+    /// was added. A column added later has to come with a default (see the
+    /// note at the top of the log tables in 01_init.sql), so this list only
+    /// ever shrinks.
+    const WITHOUT_DEFAULT: &[(&str, &[&str])] = &[
+        (
+            "app_logs",
+            &["id", "level", "target", "message", "fields", "span"],
+        ),
+        (
+            "access_logs",
+            &[
+                "id",
+                "method",
+                "path",
+                "status_code",
+                "latency_ms",
+                "port",
+                "user_id",
+                "user_email",
+                "ip_address",
+                "user_agent",
+            ],
+        ),
+        (
+            "audit_logs",
+            &[
+                "id",
+                "user_id",
+                "user_email",
+                "api_key_id",
+                "api_key_lineage_id",
+                "action",
+                "resource",
+                "resource_id",
+                "detail",
+                "ip_address",
+                "user_agent",
+                "trace_id",
+            ],
+        ),
+        (
+            "gateway_logs",
+            &[
+                "id",
+                "user_id",
+                "user_email",
+                "api_key_id",
+                "api_key_lineage_id",
+                "model_id",
+                "provider",
+                "upstream_model",
+                "input_tokens",
+                "output_tokens",
+                "cost_usd",
+                "latency_ms",
+                "status_code",
+                "ip_address",
+                "user_agent",
+                "detail",
+                "trace_id",
+                "session_id",
+                "request_body",
+                "response_body",
+                "request_body_bytes",
+                "response_body_bytes",
+                "body_capture_status",
+            ],
+        ),
+        (
+            "mcp_logs",
+            &[
+                "id",
+                "user_id",
+                "user_email",
+                "server_id",
+                "server_name",
+                "tool_name",
+                "duration_ms",
+                "status",
+                "error_message",
+                "ip_address",
+                "detail",
+                "trace_id",
+                "tool_arguments",
+                "tool_result",
+                "arguments_bytes",
+                "result_bytes",
+                "body_capture_status",
+            ],
+        ),
+    ];
+
+    /// Every column `table` gets from 01_init.sql, from its CREATE TABLE and
+    /// its `ADD COLUMN`s, and whether it has a default (DEFAULT,
+    /// MATERIALIZED, ALIAS or EPHEMERAL).
+    fn columns(sql: &str, table: &str) -> Vec<(String, bool)> {
+        let has_default = |rest: &str| {
+            rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|w| matches!(w, "DEFAULT" | "MATERIALIZED" | "ALIAS" | "EPHEMERAL"))
+        };
+        let mut out = Vec::new();
+        let create = format!("CREATE TABLE IF NOT EXISTS {table} (");
+        let start = sql.find(&create).expect("CREATE TABLE") + create.len();
+        let body = &sql[start..start + sql[start..].find("\n) ENGINE").expect("ENGINE")];
+        for line in body.lines() {
+            let line = line.trim().trim_end_matches(',');
+            let first = line.split_whitespace().next().unwrap_or("");
+            if first.is_empty()
+                || first.starts_with("--")
+                || matches!(first, "INDEX" | "PROJECTION" | "CONSTRAINT")
+            {
+                continue;
+            }
+            out.push((first.to_string(), has_default(&line[first.len()..])));
+        }
+        let add = format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS ");
+        for line in sql
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(add.as_str()))
+        {
+            let name = line.split_whitespace().next().expect("column name");
+            out.push((name.to_string(), has_default(&line[name.len()..])));
+        }
+        out
+    }
+
+    /// The server validates each insert against the table: a column the
+    /// inserting instance does not write must have a default. An instance of
+    /// the previous release does not write a column added since, so a new
+    /// column without a default makes its inserts fail during a rolling
+    /// upgrade and after a rollback, losing log rows.
+    #[test]
+    fn new_log_table_columns_have_a_default() {
+        let sql = include_str!("../../../../deploy/clickhouse/initdb.d/01_init.sql");
+        for (table, known) in WITHOUT_DEFAULT {
+            let cols = columns(sql, table);
+            assert!(
+                cols.iter().any(|(c, d)| c == "created_at" && *d),
+                "{table}: the parser did not find the columns: {cols:?}"
+            );
+            let mut without: Vec<&str> = cols
+                .iter()
+                .filter(|(_, d)| !d)
+                .map(|(c, _)| c.as_str())
+                .collect();
+            without.sort_unstable();
+            let mut known = known.to_vec();
+            known.sort_unstable();
+            let new: Vec<&&str> = without.iter().filter(|c| !known.contains(c)).collect();
+            assert!(
+                new.is_empty(),
+                "{table}: column(s) {new:?} have no default. Instances of the \
+                 previous release do not write them, and their inserts into \
+                 {table} fail until they have one: add `DEFAULT …` (for a \
+                 Nullable column, `DEFAULT NULL`)."
+            );
+            assert_eq!(
+                without, known,
+                "{table}: a listed column is gone or has a default now; take it \
+                 off WITHOUT_DEFAULT"
+            );
+        }
+    }
+
+    /// The parser sees a default where there is one.
+    #[test]
+    fn the_column_parser_reads_defaults() {
+        let sql = "CREATE TABLE IF NOT EXISTS t (\n    a String,\n    b Nullable(String) DEFAULT NULL,\n    INDEX i a TYPE set(1) GRANULARITY 1\n) ENGINE = MergeTree()\nALTER TABLE t ADD COLUMN IF NOT EXISTS c Nullable(UInt32) AFTER b;\nALTER TABLE t ADD COLUMN IF NOT EXISTS d UInt8 DEFAULT 0;\n";
+        assert_eq!(
+            columns(sql, "t"),
+            vec![
+                ("a".to_string(), false),
+                ("b".to_string(), true),
+                ("c".to_string(), false),
+                ("d".to_string(), true),
+            ]
+        );
+    }
+
+    /// A ClickHouse that refuses connections. Validation off, so
+    /// `insert` asks nothing of the server and the failure comes where it
+    /// does once a table's schema is cached: at `write` or `end`, after
+    /// the rows have been read from the batch.
+    fn unreachable_client() -> clickhouse::Client {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        clickhouse::Client::default()
+            .with_url(format!("http://127.0.0.1:{port}"))
+            .with_validation(false)
+    }
+
+    #[tokio::test]
+    async fn a_failed_insert_keeps_every_entry_for_the_next_tick() {
+        let ch = Some(unreachable_client());
+        for log_type in [
+            LogType::Access,
+            LogType::App,
+            LogType::Audit,
+            LogType::Gateway,
+            LogType::Mcp,
+        ] {
+            let mut batch: Vec<AuditEntry> = (0..3)
+                .map(|i| {
+                    #[allow(deprecated)]
+                    let mut e = AuditEntry::new(format!("test.{i}"));
+                    e.log_type = log_type;
+                    e.request_body = Some(r#"{"q":1}"#.into());
+                    e.response_body = Some(r#"{"a":1}"#.into());
+                    e
+                })
+                .collect();
+            let ids: Vec<String> = batch.iter().map(|e| e.id.clone()).collect();
+            flush_to_clickhouse(&ch, log_type.index_id(), &mut batch).await;
+            assert_eq!(
+                batch.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+                ids,
+                "{log_type:?}"
+            );
+            // Bodies are sanitised into the row, never taken out of the
+            // retained entry: the retry writes the same row.
+            assert!(
+                batch
+                    .iter()
+                    .all(|e| e.request_body.is_some() && e.response_body.is_some()),
+                "{log_type:?}"
+            );
+        }
     }
 }

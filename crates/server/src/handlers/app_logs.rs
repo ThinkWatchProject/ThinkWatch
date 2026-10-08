@@ -104,6 +104,7 @@ pub async fn list_app_logs(
     push_time_range_conditions(
         &mut conditions,
         &mut binds,
+        "app_logs",
         params.from.as_deref(),
         params.to.as_deref(),
     )?;

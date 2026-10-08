@@ -160,7 +160,8 @@ pub async fn list_servers(
     let mut servers = repo::list_with_tool_counts(&state.db).await?;
 
     // Attach lifetime call counts from ClickHouse (mcp_logs) — best-effort:
-    // if CH is unavailable we simply leave the counter at 0.
+    // if CH is unavailable or the read fails (logged) we leave the counter
+    // at 0, so the server list still loads.
     if super::clickhouse_util::ch_available(&state)
         && let Ok(ch) = super::clickhouse_util::ch_client(&state)
     {
@@ -180,8 +181,8 @@ pub async fn list_servers(
                  GROUP BY server_id",
             )
             .fetch_all::<CallRow>()
-            .await
-            .unwrap_or_default();
+            .await;
+        let rows = super::clickhouse_util::ch_or_default(rows, "mcp server call counts");
         let mut lookup = std::collections::HashMap::<String, i64>::new();
         for r in rows {
             lookup.insert(r.server_id, r.calls as i64);

@@ -5,6 +5,12 @@ const DIGITS: u8 = 6;
 const STEP: u64 = 30;
 const SKEW: u16 = 1;
 
+/// How long a code stays acceptable, in seconds: its own time step and
+/// [`SKEW`] steps either side. A record of the last step accepted for a
+/// user (see [`verify_step`]) has to outlive this, or the code it guards
+/// could be replayed once the record expires.
+pub const ACCEPT_WINDOW_SECS: u64 = STEP * (2 * SKEW as u64 + 1);
+
 /// Generate a new random TOTP secret (base32-encoded).
 pub fn generate_secret() -> String {
     Secret::generate().to_base32()
@@ -17,10 +23,18 @@ pub fn otpauth_uri(secret_base32: &str, email: &str) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("TOTP URI failed: {e}"))
 }
 
-/// Verify a 6-digit TOTP code against the secret.
-pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bool> {
+/// Check a 6-digit TOTP code against the secret at the current time,
+/// allowing [`SKEW`] steps of clock drift either side. Returns the time
+/// step the code belongs to, or `None` when it matches none.
+///
+/// **A match alone must not let anyone in.** RFC 6238 §5.2: a code is
+/// accepted once. The caller records the step it accepted for the user
+/// and refuses any later code whose step is not greater, so a code seen
+/// over a shoulder or in a log cannot be used again while it is still
+/// valid (up to [`ACCEPT_WINDOW_SECS`]).
+pub fn verify_step(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<Option<u64>> {
     let totp = build_totp(secret_base32, email)?;
-    Ok(totp.check_current(code).is_some())
+    Ok(totp.check_current(code))
 }
 
 /// Compute the current 6-digit TOTP code for the given secret +
@@ -30,6 +44,13 @@ pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bo
 pub fn current_code(secret_base32: &str, email: &str) -> anyhow::Result<String> {
     let totp = build_totp(secret_base32, email)?;
     Ok(totp.generate_current().to_string())
+}
+
+/// The code an authenticator shows at `unix_secs`. For tests that need a
+/// code from a neighbouring time step (clock drift, the next code).
+pub fn code_at(secret_base32: &str, email: &str, unix_secs: u64) -> anyhow::Result<String> {
+    let totp = build_totp(secret_base32, email)?;
+    Ok(totp.generate(unix_secs).to_string())
 }
 
 /// Generate a set of one-time recovery codes (80-bit entropy each).
@@ -149,9 +170,45 @@ mod tests {
     fn generate_and_verify() {
         let secret = generate_secret();
         let totp = build_totp(&secret, "test@example.com").unwrap();
-        let code = totp.generate_current().to_string();
-        assert!(verify(&secret, &code, "test@example.com").unwrap());
-        assert!(!verify(&secret, "000000", "test@example.com").unwrap());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let code = totp.generate(now).to_string();
+        let step = verify_step(&secret, &code, "test@example.com")
+            .unwrap()
+            .expect("the current code matches");
+        // The step of the current code, give or take a step boundary
+        // passed between generating and checking.
+        assert!(step == now / STEP || step + 1 == now / STEP, "{step}");
+        // A wrong code matches no step: one that differs from all three
+        // codes the window accepts ("000000" alone would be one of them
+        // once in a few hundred thousand runs).
+        let accepted: Vec<String> = [now - STEP, now, now + STEP]
+            .iter()
+            .map(|&t| totp.generate(t).to_string())
+            .collect();
+        let wrong = ["000000", "000001", "000002", "000003"]
+            .into_iter()
+            .find(|c| !accepted.iter().any(|a| a == c))
+            .unwrap();
+        assert_eq!(
+            verify_step(&secret, wrong, "test@example.com").unwrap(),
+            None
+        );
+        // A neighbouring step's code still matches (clock drift), and says
+        // which step it belongs to.
+        let next = code_at(&secret, "test@example.com", now + STEP).unwrap();
+        assert!(
+            verify_step(&secret, &next, "test@example.com")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_accept_window_spans_the_skew() {
+        assert_eq!(ACCEPT_WINDOW_SECS, 90);
     }
 
     #[test]

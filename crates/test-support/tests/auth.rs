@@ -351,8 +351,12 @@ async fn totp_setup_then_verify_then_login_requires_code() {
         .to_string();
 
     // 2. Verify a freshly-generated code to enable TOTP.
-    let code = think_watch_auth::totp::current_code(&secret, &user.user.email).unwrap();
-    con.post("/api/auth/totp/verify-setup", json!({"code": code}))
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let setup_code = think_watch_auth::totp::code_at(&secret, &user.user.email, now).unwrap();
+    con.post("/api/auth/totp/verify-setup", json!({"code": setup_code}))
         .await
         .unwrap()
         .assert_ok();
@@ -375,19 +379,38 @@ async fn totp_setup_then_verify_then_login_requires_code() {
         .unwrap();
     assert_eq!(stage1["totp_required"], serde_json::json!(true));
 
-    // 5. Supply the code → success.
-    let code = think_watch_auth::totp::current_code(&secret, &user.user.email).unwrap();
-    con.post(
-        "/api/auth/login",
-        json!({
-            "email": user.user.email,
-            "password": user.plaintext_password,
-            "totp_code": code,
-        }),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
+    let login_with = |code: String| {
+        let con = &con;
+        let email = user.user.email.clone();
+        let password = user.plaintext_password.clone();
+        async move {
+            con.post(
+                "/api/auth/login",
+                json!({"email": email, "password": password, "totp_code": code}),
+            )
+            .await
+            .unwrap()
+            .status
+        }
+    };
+
+    // 5. A code is accepted once (RFC 6238 §5.2): the one that turned TOTP
+    //    on is spent, though the window still accepts its time step.
+    assert_eq!(
+        login_with(setup_code.clone()).await,
+        401,
+        "the setup code logged in again"
+    );
+
+    // 6. The next code logs in. It is one step ahead of the clock, so this
+    //    also checks the step of drift the window allows.
+    let next = think_watch_auth::totp::code_at(&secret, &user.user.email, now + 30).unwrap();
+    assert_eq!(login_with(next.clone()).await, 200);
+
+    // 7. Used once: the same code again is refused, and so is an older code
+    //    the window would still take.
+    assert_eq!(login_with(next).await, 401, "a code logged in twice");
+    assert_eq!(login_with(setup_code).await, 401);
 }
 
 /// Drive the /totp/setup → /totp/verify-setup flow against `con` and

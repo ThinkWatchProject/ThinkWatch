@@ -15,6 +15,25 @@ pub fn ch_available(state: &AppState) -> bool {
     state.clickhouse.is_some()
 }
 
+/// Turn a failed ClickHouse read into a 500 that names it. For endpoints
+/// whose answer is the ClickHouse data: an empty or zero answer would read
+/// as "nothing happened", which is how a broken query goes unnoticed.
+/// `AppError::Internal` logs the error when the response is built.
+pub fn ch_read_failed(query: &'static str) -> impl FnOnce(clickhouse::error::Error) -> AppError {
+    move |e| AppError::Internal(anyhow::anyhow!("ClickHouse query {query} failed: {e}"))
+}
+
+/// A ClickHouse read the endpoint can answer without (a count or a
+/// sparkline beside data from Postgres): log the failure and use
+/// `T::default()`, so the page still loads and the failure still shows in
+/// the server log.
+pub fn ch_or_default<T: Default>(result: Result<T, clickhouse::error::Error>, query: &str) -> T {
+    result.unwrap_or_else(|e| {
+        tracing::warn!(query, error = %e, "ClickHouse query failed; answering without it");
+        T::default()
+    })
+}
+
 /// Maximum allowed pagination offset for log/analytics list endpoints.
 /// Without a cap, an attacker can send `offset=10_000_000` and force
 /// ClickHouse to scan and discard millions of rows before returning a
@@ -43,10 +62,18 @@ pub const DEFAULT_LOG_LOOKBACK_DAYS: i64 = 7;
 /// exports.
 pub const MAX_LOG_WINDOW_DAYS: i64 = 90;
 
-/// Push `created_at >= ?` and (optional) `created_at <= ?` predicates
-/// onto a log-query WHERE collector with the standard floor and
-/// max-window cap. Mutates `conditions` and `binds` in place; returns
+/// Push `<table>.created_at >= ?` and (optional) `<table>.created_at <= ?`
+/// predicates onto a log-query WHERE collector with the standard floor
+/// and max-window cap. Mutates `conditions` and `binds` in place; returns
 /// a `BadRequest` if the explicit range exceeds [`MAX_LOG_WINDOW_DAYS`].
+///
+/// The column is qualified with `table` because the list queries select
+/// `toString(created_at) AS created_at`, and in ClickHouse an alias
+/// shadows the column of the same name everywhere in the query, WHERE
+/// included: unqualified, the data query compared text with text
+/// (`'2026-10-06 05:00:00.000' >= '2026-10-06T00:00:00'` is false, a
+/// space sorting before `T`) while the count query compared times, so
+/// `items` lost rows that `total` counted.
 ///
 /// Every CH-backed log handler should call this instead of pushing
 /// raw `from` / `to` strings — otherwise a missed handler ships
@@ -55,6 +82,7 @@ pub const MAX_LOG_WINDOW_DAYS: i64 = 90;
 pub fn push_time_range_conditions(
     conditions: &mut Vec<String>,
     binds: &mut Vec<String>,
+    table: &str,
     from: Option<&str>,
     to: Option<&str>,
 ) -> Result<(), AppError> {
@@ -109,10 +137,10 @@ pub fn push_time_range_conditions(
         }
     }
 
-    conditions.push("created_at >= ?".into());
+    conditions.push(format!("{table}.created_at >= ?"));
     binds.push(from_val);
     if let Some(to) = to {
-        conditions.push("created_at <= ?".into());
+        conditions.push(format!("{table}.created_at <= ?"));
         binds.push(to.to_string());
     }
     Ok(())
@@ -282,8 +310,8 @@ mod tests {
     fn push_time_range_defaults_to_seven_days_back_when_no_from() {
         let mut conds = Vec::new();
         let mut binds = Vec::new();
-        push_time_range_conditions(&mut conds, &mut binds, None, None).unwrap();
-        assert_eq!(conds, vec!["created_at >= ?".to_string()]);
+        push_time_range_conditions(&mut conds, &mut binds, "gateway_logs", None, None).unwrap();
+        assert_eq!(conds, vec!["gateway_logs.created_at >= ?".to_string()]);
         assert_eq!(binds.len(), 1);
         let parsed = chrono::NaiveDateTime::parse_from_str(&binds[0], "%Y-%m-%d %H:%M:%S")
             .expect("default from must be parseable");
@@ -300,6 +328,7 @@ mod tests {
         let err = push_time_range_conditions(
             &mut conds,
             &mut binds,
+            "gateway_logs",
             Some("2024-01-01"),
             Some("2024-12-31"),
         )
@@ -314,6 +343,7 @@ mod tests {
         let err = push_time_range_conditions(
             &mut conds,
             &mut binds,
+            "gateway_logs",
             Some("2024-06-01"),
             Some("2024-05-01"),
         )
@@ -325,8 +355,14 @@ mod tests {
     fn push_time_range_rejects_invalid_timestamp() {
         let mut conds = Vec::new();
         let mut binds = Vec::new();
-        let err = push_time_range_conditions(&mut conds, &mut binds, Some("not-a-date"), None)
-            .unwrap_err();
+        let err = push_time_range_conditions(
+            &mut conds,
+            &mut binds,
+            "gateway_logs",
+            Some("not-a-date"),
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
@@ -337,13 +373,17 @@ mod tests {
         push_time_range_conditions(
             &mut conds,
             &mut binds,
+            "gateway_logs",
             Some("2024-01-01"),
             Some("2024-03-15"),
         )
         .unwrap();
         assert_eq!(
             conds,
-            vec!["created_at >= ?".to_string(), "created_at <= ?".to_string()]
+            vec![
+                "gateway_logs.created_at >= ?".to_string(),
+                "gateway_logs.created_at <= ?".to_string()
+            ]
         );
         assert_eq!(
             binds,

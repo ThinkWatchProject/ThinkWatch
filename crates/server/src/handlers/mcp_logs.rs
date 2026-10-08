@@ -109,6 +109,7 @@ pub async fn list_mcp_logs(
     push_time_range_conditions(
         &mut conditions,
         &mut binds,
+        "mcp_logs",
         params.from.as_deref(),
         params.to.as_deref(),
     )?;

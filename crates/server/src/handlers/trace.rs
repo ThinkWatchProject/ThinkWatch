@@ -16,7 +16,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-use super::clickhouse_util::{ch_available, ch_client};
+use super::clickhouse_util::{ch_available, ch_client, ch_read_failed};
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TraceEvent {
@@ -116,7 +116,7 @@ pub async fn get_trace(
             .bind(&trace_id)
             .fetch_all::<GatewayRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace gateway_logs"))?;
         for r in rows {
             events.push(TraceEvent {
                 kind: "gateway".into(),
@@ -149,7 +149,7 @@ pub async fn get_trace(
             .bind(&trace_id)
             .fetch_all::<McpRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace mcp_logs"))?;
         for r in rows {
             events.push(TraceEvent {
                 kind: "mcp".into(),
@@ -180,7 +180,7 @@ pub async fn get_trace(
             .bind(&trace_id)
             .fetch_all::<AuditRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace audit_logs"))?;
         for r in rows {
             events.push(TraceEvent {
                 kind: "audit".into(),
@@ -237,7 +237,7 @@ pub async fn get_trace(
             .bind(&pattern)
             .fetch_all::<AppLogRow>()
             .await
-            .unwrap_or_default();
+            .map_err(ch_read_failed("trace app_logs"))?;
         for r in app_rows {
             events.push(TraceEvent {
                 kind: "app".into(),
