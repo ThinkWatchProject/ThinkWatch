@@ -15,16 +15,17 @@ target.
 
 The Helm chart and the Compose file now pull the published images: they
 named `ghcr.io/thinkwatch/…`, which this project does not publish to, so a
-default install could not pull. Log rows are no longer lost while
-ClickHouse is unreachable. Five reads from ClickHouse returned wrong or
-missing data and now return what is stored: the SLO latency percentiles, a
-route's latency history, the times on traces and log bodies, a trace's app
-events, and the log lists for a range written with a `T`. The server also
-reads from ClickHouse 26.9 and later, the console shows its own version
-again, and the dependencies move to current releases, two of them for
-security advisories. The thinkwatch-core crates move from v0.62.0 to
-v0.65.0, which makes outbound redaction and the content filter faster
-without changing what they find.
+default install could not pull. A TOTP code now logs in once, and log rows
+are no longer lost while ClickHouse is unreachable. Five reads from
+ClickHouse returned wrong or missing data and now return what is stored:
+the SLO latency percentiles, a route's latency history, the times on traces
+and log bodies, a trace's app events, and the log lists for a range written
+with a `T`; and a failed read is now an error or a logged warning instead of
+an empty answer. The server also reads from ClickHouse 26.9 and later, the
+console shows its own version again, and the dependencies move to current
+releases, several of them for security advisories. The thinkwatch-core
+crates move from v0.62.0 to v0.65.0, which makes outbound redaction and the
+content filter faster without changing what they find.
 
 No setting, schema or API route changes, and instances of 3.2.0 and 3.2.1
 can run side by side during a rollout.
@@ -86,18 +87,39 @@ can run side by side during a rollout.
   API's error message suggests, dropped every row of that day from
   `items` while `total` still counted them: the list compared the times
   as text. The console sends `YYYY-MM-DD HH:MM:SS` and was not affected.
+- **ClickHouse failures no longer read as no data.** The trace view, the
+  usage-license meter (`/api/admin/usage-license`) and the per-period series
+  and previous-period totals of the usage and cost statistics turned a
+  failed ClickHouse query into an empty or zero answer, with nothing in the
+  log. They now answer `500` and log the error. The dashboard's request and
+  active-key tiles and the call counts on the MCP server list still answer
+  without the part that failed, so the page loads, and now log a warning
+  naming the query.
 - **The console's version.** The sidebar of the web console showed
   `v0.0.0` in every released web image, because the image build could not
   see the version file it reads. It now shows the release.
 
 ### Security
 
+- **A TOTP code logs in once.** A code accepted at login could log in again,
+  with the password, for as long as it stayed valid: up to 90 seconds with
+  the step of clock drift allowed either side, so a code read over a
+  shoulder or a shared screen was enough. The last time step accepted for
+  each user is now kept in Redis (`totp_last_step:<user id>`, for three
+  minutes), and a code whose step is not later is refused, the code that
+  turned TOTP on included. Logging in twice within one 30-second step needs
+  the next code; one step of clock drift is still accepted. A refused
+  replay is audited as `auth.totp_failed` with `"replayed": true`.
+  Instances of 3.2.0 do not check, so this holds once the rollout is done.
 - rand 0.10.3 ([RUSTSEC-2026-0097](https://rustsec.org/advisories/RUSTSEC-2026-0097.html))
   and xxhash-rust 0.8.19
   ([GHSA-6g2r-675j-hx59](https://github.com/advisories/GHSA-6g2r-675j-hx59)).
   Neither affects how ThinkWatch uses the crate: it installs no `log`
   logger that draws random numbers, and it hashes with xxh3's default
   secret only.
+- The web console's build tools: brace-expansion 2.1.7 and 5.0.12, and
+  ip-address 10.7.3 (Dependabot alerts on dependencies of eslint and the
+  shadcn CLI). None of them is part of the console that is served.
 
 ### Changed
 
@@ -117,6 +139,12 @@ can run side by side during a rollout.
   p256 0.14 and totp-rs 6. Password hashes, encrypted secrets, issued
   tokens, request signatures and TOTP codes from 3.2.0 keep verifying, and
   what 3.2.1 writes verifies on 3.2.0; known-answer tests cover each.
+- Tests now hold two things that could otherwise break unnoticed: a login
+  for an address with no account still spends the time of a password check
+  (so its timing does not tell which addresses have accounts), and a column
+  added to a ClickHouse log table comes with a default (without one, the
+  previous release's inserts into that table fail during a rolling upgrade
+  or after a rollback).
 - The server image is built with Rust 1.99, and the web image serves from
   nginx 1.31 (was 1.29), built with Node 24.21 and pnpm 12. Building from
   source needs Rust 1.94.1 or newer (was 1.85).
