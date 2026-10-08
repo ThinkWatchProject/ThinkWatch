@@ -488,28 +488,19 @@ pub async fn login(
         ));
     }
 
-    // Constant-time login: always perform Argon2 verify to prevent user enumeration
-    let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
     // Soft-deleted users must NOT be able to log in. Every other user
     // lookup in this file already filters `deleted_at IS NULL`; the
     // login path was the lone exception, leaving a 30-day window after
     // soft-delete where the credential still worked.
-    let maybe_user = repo::find_active_by_email(&state.db, &email).await?;
+    let user = repo::find_active_by_email(&state.db, &email).await?;
 
-    let (user, password_hash) = match maybe_user {
-        Some(u) => {
-            let hash = u
-                .password_hash
-                .clone()
-                .unwrap_or_else(|| dummy_hash.to_string());
-            (Some(u), hash)
-        }
-        None => (None, dummy_hash.to_string()),
-    };
-
-    // Always verify (constant time regardless of user existence)
-    let password_valid = password::verify_password(&req.password, &password_hash).unwrap_or(false);
+    // Constant-time login: always run Argon2, against a dummy hash when
+    // there is no account or it has no password, so the response time does
+    // not tell which addresses have accounts.
+    let password_valid = password::verify_password_or_dummy(
+        &req.password,
+        user.as_ref().and_then(|u| u.password_hash.as_deref()),
+    );
 
     if !password_valid || user.is_none() {
         // Per-email cross-IP failure counter. The `count` above is keyed
