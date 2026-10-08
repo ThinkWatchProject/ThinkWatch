@@ -390,6 +390,187 @@ async fn backfill_if_empty(client: &clickhouse::Client, table: &str, insert_sql:
 mod tests {
     use super::*;
 
+    /// The columns of the five tables the writer inserts into that have no
+    /// default, as of 3.2.1. Each one is written by every release since it
+    /// was added. A column added later has to come with a default (see the
+    /// note at the top of the log tables in 01_init.sql), so this list only
+    /// ever shrinks.
+    const WITHOUT_DEFAULT: &[(&str, &[&str])] = &[
+        (
+            "app_logs",
+            &["id", "level", "target", "message", "fields", "span"],
+        ),
+        (
+            "access_logs",
+            &[
+                "id",
+                "method",
+                "path",
+                "status_code",
+                "latency_ms",
+                "port",
+                "user_id",
+                "user_email",
+                "ip_address",
+                "user_agent",
+            ],
+        ),
+        (
+            "audit_logs",
+            &[
+                "id",
+                "user_id",
+                "user_email",
+                "api_key_id",
+                "api_key_lineage_id",
+                "action",
+                "resource",
+                "resource_id",
+                "detail",
+                "ip_address",
+                "user_agent",
+                "trace_id",
+            ],
+        ),
+        (
+            "gateway_logs",
+            &[
+                "id",
+                "user_id",
+                "user_email",
+                "api_key_id",
+                "api_key_lineage_id",
+                "model_id",
+                "provider",
+                "upstream_model",
+                "input_tokens",
+                "output_tokens",
+                "cost_usd",
+                "latency_ms",
+                "status_code",
+                "ip_address",
+                "user_agent",
+                "detail",
+                "trace_id",
+                "session_id",
+                "request_body",
+                "response_body",
+                "request_body_bytes",
+                "response_body_bytes",
+                "body_capture_status",
+            ],
+        ),
+        (
+            "mcp_logs",
+            &[
+                "id",
+                "user_id",
+                "user_email",
+                "server_id",
+                "server_name",
+                "tool_name",
+                "duration_ms",
+                "status",
+                "error_message",
+                "ip_address",
+                "detail",
+                "trace_id",
+                "tool_arguments",
+                "tool_result",
+                "arguments_bytes",
+                "result_bytes",
+                "body_capture_status",
+            ],
+        ),
+    ];
+
+    /// Every column `table` gets from 01_init.sql, from its CREATE TABLE and
+    /// its `ADD COLUMN`s, and whether it has a default (DEFAULT,
+    /// MATERIALIZED, ALIAS or EPHEMERAL).
+    fn columns(sql: &str, table: &str) -> Vec<(String, bool)> {
+        let has_default = |rest: &str| {
+            rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|w| matches!(w, "DEFAULT" | "MATERIALIZED" | "ALIAS" | "EPHEMERAL"))
+        };
+        let mut out = Vec::new();
+        let create = format!("CREATE TABLE IF NOT EXISTS {table} (");
+        let start = sql.find(&create).expect("CREATE TABLE") + create.len();
+        let body = &sql[start..start + sql[start..].find("\n) ENGINE").expect("ENGINE")];
+        for line in body.lines() {
+            let line = line.trim().trim_end_matches(',');
+            let first = line.split_whitespace().next().unwrap_or("");
+            if first.is_empty()
+                || first.starts_with("--")
+                || matches!(first, "INDEX" | "PROJECTION" | "CONSTRAINT")
+            {
+                continue;
+            }
+            out.push((first.to_string(), has_default(&line[first.len()..])));
+        }
+        let add = format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS ");
+        for line in sql
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(add.as_str()))
+        {
+            let name = line.split_whitespace().next().expect("column name");
+            out.push((name.to_string(), has_default(&line[name.len()..])));
+        }
+        out
+    }
+
+    /// The server validates each insert against the table: a column the
+    /// inserting instance does not write must have a default. An instance of
+    /// the previous release does not write a column added since, so a new
+    /// column without a default makes its inserts fail during a rolling
+    /// upgrade and after a rollback, losing log rows.
+    #[test]
+    fn new_log_table_columns_have_a_default() {
+        let sql = include_str!("../../../../deploy/clickhouse/initdb.d/01_init.sql");
+        for (table, known) in WITHOUT_DEFAULT {
+            let cols = columns(sql, table);
+            assert!(
+                cols.iter().any(|(c, d)| c == "created_at" && *d),
+                "{table}: the parser did not find the columns: {cols:?}"
+            );
+            let mut without: Vec<&str> = cols
+                .iter()
+                .filter(|(_, d)| !d)
+                .map(|(c, _)| c.as_str())
+                .collect();
+            without.sort_unstable();
+            let mut known = known.to_vec();
+            known.sort_unstable();
+            let new: Vec<&&str> = without.iter().filter(|c| !known.contains(c)).collect();
+            assert!(
+                new.is_empty(),
+                "{table}: column(s) {new:?} have no default. Instances of the \
+                 previous release do not write them, and their inserts into \
+                 {table} fail until they have one: add `DEFAULT …` (for a \
+                 Nullable column, `DEFAULT NULL`)."
+            );
+            assert_eq!(
+                without, known,
+                "{table}: a listed column is gone or has a default now; take it \
+                 off WITHOUT_DEFAULT"
+            );
+        }
+    }
+
+    /// The parser sees a default where there is one.
+    #[test]
+    fn the_column_parser_reads_defaults() {
+        let sql = "CREATE TABLE IF NOT EXISTS t (\n    a String,\n    b Nullable(String) DEFAULT NULL,\n    INDEX i a TYPE set(1) GRANULARITY 1\n) ENGINE = MergeTree()\nALTER TABLE t ADD COLUMN IF NOT EXISTS c Nullable(UInt32) AFTER b;\nALTER TABLE t ADD COLUMN IF NOT EXISTS d UInt8 DEFAULT 0;\n";
+        assert_eq!(
+            columns(sql, "t"),
+            vec![
+                ("a".to_string(), false),
+                ("b".to_string(), true),
+                ("c".to_string(), false),
+                ("d".to_string(), true),
+            ]
+        );
+    }
+
     /// A ClickHouse that refuses connections. Validation off, so
     /// `insert` asks nothing of the server and the failure comes where it
     /// does once a table's schema is cached: at `write` or `end`, after
