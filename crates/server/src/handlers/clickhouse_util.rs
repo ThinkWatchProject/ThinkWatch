@@ -15,6 +15,25 @@ pub fn ch_available(state: &AppState) -> bool {
     state.clickhouse.is_some()
 }
 
+/// Turn a failed ClickHouse read into a 500 that names it. For endpoints
+/// whose answer is the ClickHouse data: an empty or zero answer would read
+/// as "nothing happened", which is how a broken query goes unnoticed.
+/// `AppError::Internal` logs the error when the response is built.
+pub fn ch_read_failed(query: &'static str) -> impl FnOnce(clickhouse::error::Error) -> AppError {
+    move |e| AppError::Internal(anyhow::anyhow!("ClickHouse query {query} failed: {e}"))
+}
+
+/// A ClickHouse read the endpoint can answer without (a count or a
+/// sparkline beside data from Postgres): log the failure and use
+/// `T::default()`, so the page still loads and the failure still shows in
+/// the server log.
+pub fn ch_or_default<T: Default>(result: Result<T, clickhouse::error::Error>, query: &str) -> T {
+    result.unwrap_or_else(|e| {
+        tracing::warn!(query, error = %e, "ClickHouse query failed; answering without it");
+        T::default()
+    })
+}
+
 /// Maximum allowed pagination offset for log/analytics list endpoints.
 /// Without a cap, an attacker can send `offset=10_000_000` and force
 /// ClickHouse to scan and discard millions of rows before returning a

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
-use crate::handlers::clickhouse_util::{ch_available, ch_client};
+use crate::handlers::clickhouse_util::{ch_available, ch_client, ch_or_default};
 use crate::middleware::auth_guard::AuthUser;
 use crate::services::observability_repository as repo;
 
@@ -145,7 +145,7 @@ pub async fn get_dashboard_stats(
                     .bind(&prev_start_str)
                     .fetch_one::<ReqCounts>()
                     .await
-                    .ok(),
+                    .map(Some),
                 Some(ids) => ch
                     .query(
                         "SELECT \
@@ -164,9 +164,9 @@ pub async fn get_dashboard_stats(
                     .bind(ids)
                     .fetch_one::<ReqCounts>()
                     .await
-                    .ok(),
+                    .map(Some),
             };
-        let row = row.unwrap_or(ReqCounts {
+        let row = ch_or_default(row, "dashboard request counts").unwrap_or(ReqCounts {
             current_total: 0,
             prev_total: 0,
         });
@@ -263,21 +263,20 @@ pub async fn get_dashboard_stats(
             }
         };
 
-        let count_result: u64 = match &visible_user_ids {
+        let count_result = match &visible_user_ids {
             None => ch
                 .query(count_query)
                 .fetch_one::<KeyCount>()
                 .await
-                .map(|r| r.cnt)
-                .unwrap_or(0),
+                .map(|r| r.cnt),
             Some(ids) => ch
                 .query(count_query_scoped)
                 .bind(ids)
                 .fetch_one::<KeyCount>()
                 .await
-                .map(|r| r.cnt)
-                .unwrap_or(0),
+                .map(|r| r.cnt),
         };
+        let count_result: u64 = ch_or_default(count_result, "dashboard active keys");
 
         let bucket_query = match range {
             TimeRange::Day => {
@@ -335,19 +334,17 @@ pub async fn get_dashboard_stats(
             }
         };
 
-        let bucket_rows: Vec<KeyBucket> = match &visible_user_ids {
-            None => ch
-                .query(bucket_query)
-                .fetch_all::<KeyBucket>()
-                .await
-                .unwrap_or_default(),
-            Some(ids) => ch
-                .query(bucket_query_scoped)
-                .bind(ids)
-                .fetch_all::<KeyBucket>()
-                .await
-                .unwrap_or_default(),
+        let bucket_rows = match &visible_user_ids {
+            None => ch.query(bucket_query).fetch_all::<KeyBucket>().await,
+            Some(ids) => {
+                ch.query(bucket_query_scoped)
+                    .bind(ids)
+                    .fetch_all::<KeyBucket>()
+                    .await
+            }
         };
+        let bucket_rows: Vec<KeyBucket> =
+            ch_or_default(bucket_rows, "dashboard active key buckets");
 
         // CH emits bucket strings in its default `%Y-%m-%d %H:%M:%S` format.
         // Parse them to timestamps so we can align with range.bucket_starts.
@@ -391,7 +388,7 @@ pub async fn get_dashboard_stats(
             // Month switch above.
             let prev_start_str = prev_start.format("%Y-%m-%d %H:%M:%S").to_string();
             let prev_end_str = prev_end.format("%Y-%m-%d %H:%M:%S").to_string();
-            ch_client(&state)?
+            let result = ch_client(&state)?
                 .query(
                     "SELECT uniqExact(api_key_id) AS cnt \
                      FROM gateway_logs \
@@ -403,8 +400,8 @@ pub async fn get_dashboard_stats(
                 .bind(&prev_end_str)
                 .fetch_one::<KeyCount>()
                 .await
-                .map(|r| r.cnt as i64)
-                .unwrap_or(0)
+                .map(|r| r.cnt as i64);
+            ch_or_default(result, "dashboard previous active keys")
         } else {
             repo::count_api_keys_used_between(&state.db, prev_start, prev_end)
                 .await?

@@ -450,3 +450,44 @@ async fn log_trace_and_history_queries_read_their_rows() {
         "role history: {history}"
     );
 }
+
+/// A ClickHouse read that fails is an error where the answer is the
+/// ClickHouse data: an empty trace or a zero usage meter would read as
+/// "nothing happened", which is how a broken query goes unnoticed. Where
+/// ClickHouse only adds to data from Postgres (dashboard tiles, the MCP
+/// server list's call counts), the page still loads and the failure is
+/// logged.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_failed_clickhouse_read_is_an_error_where_the_answer_is_clickhouse_data() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let admin = admin_session(&app).await;
+    let ch = app
+        .state
+        .clickhouse
+        .as_ref()
+        .expect("ClickHouse configured");
+    // Every read of these two tables fails from here on.
+    for table in ["gateway_logs", "mcp_logs"] {
+        ch.query(&format!("RENAME TABLE {table} TO {table}_gone"))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for path in [
+        "/api/admin/trace/no-such-trace",
+        "/api/admin/usage-license",
+        "/api/analytics/usage/stats?range=24h&compare=true",
+        "/api/analytics/costs/stats?range=24h&compare=true",
+    ] {
+        let resp = admin.get(path).await.unwrap();
+        assert_eq!(resp.status, 500, "{path} answered without ClickHouse");
+    }
+    for path in [
+        "/api/dashboard/stats?range=24h&compare=true",
+        "/api/mcp/servers",
+    ] {
+        admin.get(path).await.unwrap().assert_ok();
+    }
+}
