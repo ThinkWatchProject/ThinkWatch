@@ -7,6 +7,8 @@ edition.workspace = true
 tw-breaker = { workspace = true }
 tw-guard = { workspace = true }
 tw-bedrock = { workspace = true }
+# Reads the compaction summaries a conversion carries (see `pii`).
+tw-dialect = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 fred = { workspace = true }
@@ -46,6 +48,3 @@ aws-sigv4 = { workspace = true }
 aws-credential-types = { workspace = true }
 http_1x = { package = "http", version = "1" }
 async-trait = "0.1"
-
-[dev-dependencies]
-tw-dialect = { workspace = true }

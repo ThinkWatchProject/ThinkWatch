@@ -517,3 +517,85 @@ async fn a_passthrough_request_leaves_the_gateways_own_signatures_behind() {
     assert_eq!(sent["messages"][1]["content"][0]["text"], "answer one");
     assert_eq!(sent["messages"][2]["content"][0]["signature"], "EqQBCkgIBx");
 }
+
+/// A Responses request the gateway cannot convert — it continues a
+/// conversation kept on OpenAI's servers and carries a compaction only
+/// OpenAI can read, as Codex sends after compacting against OpenAI — is
+/// still forwarded as sent to a route that speaks Responses. Only when
+/// every route would have to convert it is it refused, saying why.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_request_only_openai_can_read_is_forwarded_to_a_responses_route() {
+    use wiremock::matchers::{method, path};
+
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::openai_chat_ok("resp-model").await;
+    upstream
+        .mount(
+            wiremock::Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(MockProvider::json(json!({
+                    "id": "resp_2",
+                    "object": "response",
+                    "created_at": 1_700_000_000_i64,
+                    "model": "resp-model",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message", "id": "msg_1", "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "continued",
+                                     "annotations": []}]
+                    }],
+                    "usage": {"input_tokens": 9, "output_tokens": 2, "total_tokens": 11}
+                }))),
+        )
+        .await;
+    let api_key = seed_provider_and_key(&app, &upstream.uri(), "openai", "resp-model", None).await;
+    let ask = json!({
+        "model": "resp-model",
+        "previous_response_id": "resp_1",
+        "input": [
+            {"type": "compaction", "encrypted_content": "gAAAAABo"},
+            {"type": "message", "role": "user", "content": "go on"}
+        ]
+    });
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+
+    // The route converts to Chat Completions, an OpenAI provider's
+    // default: refused with the reason, and nothing sent.
+    let resp = gw.post("/v1/responses", ask.clone()).await.unwrap();
+    resp.assert_status(400);
+    let body: Value = resp.json().unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("previous_response_id")),
+        "{body}"
+    );
+    assert!(upstream.received_requests().await.is_empty());
+
+    // A route that speaks Responses: forwarded as sent.
+    sqlx::query(
+        "UPDATE model_routes SET upstream_protocol = 'openai_responses' WHERE model_id = $1",
+    )
+    .bind("resp-model")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+    let resp = gw.post("/v1/responses", ask).await.unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    assert_eq!(
+        body["output"][0]["content"][0]["text"], "continued",
+        "{body}"
+    );
+
+    let sent = upstream.received_requests().await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].url.path(), "/v1/responses");
+    let sent: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(sent["previous_response_id"], "resp_1", "{sent}");
+    assert_eq!(sent["input"][0]["encrypted_content"], "gAAAAABo", "{sent}");
+}

@@ -300,6 +300,30 @@ impl Outbound {
         tw_dialect::params::cap_max_output_tokens(dialect, body, cap, official);
     }
 
+    /// What assembles an answer forwarded in the caller's own format, for
+    /// the cache and the audit row.
+    ///
+    /// It is made from the request alone. Decoding also notes how the
+    /// caller wants a converted answer written — for a Codex compaction,
+    /// as one item carrying the summary the upstream wrote — and a
+    /// forwarded answer is the upstream's own: assembled that way, OpenAI's
+    /// compaction would be recorded as a failed one. A request the
+    /// conversion layer cannot read at all can still be forwarded, and its
+    /// answer is assembled knowing only the model and whether it streams.
+    fn forwarded_session(&self, body: &Value, model: &str, target: &Target) -> Session {
+        let client = self.surface.dialect;
+        let request =
+            match tw_dialect::convert::decode(client, body, &self.path, internal_query(client)) {
+                Ok(decoded) => decoded.request,
+                Err(_) => tw_dialect::ir::Request {
+                    model: model.to_string(),
+                    stream: self.stream,
+                    ..Default::default()
+                },
+            };
+        tw_dialect::convert::encode(&request, target).session
+    }
+
     /// Address the request to `protocol`, naming `model` upstream.
     pub(crate) fn address(
         &self,
@@ -357,7 +381,7 @@ impl Outbound {
                 }
             }
             self.cap_output(client, &mut body, model, official);
-            let collect = decode(&body)?.encode(&target(client)).session;
+            let collect = self.forwarded_session(&body, model, &target(client));
             let mut bytes = serde_json::to_vec(&body).unwrap_or_default();
             // Reasoning signatures a conversion wrote earlier in this
             // conversation (`tw1.`-prefixed) were not issued by this
@@ -662,10 +686,13 @@ async fn run(
         None => (body, raw),
     };
 
-    // 4. Decode once, for the input estimate.
+    // 4. Decode once, for the input estimate and to know whether the
+    //    request can be converted at all. One that cannot — it continues a
+    //    conversation kept on OpenAI's servers (`previous_response_id`), or
+    //    carries a compaction only OpenAI can read — can still be forwarded
+    //    to an upstream of its own format, so that is where it goes (step 9).
     let decoded =
-        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect))
-            .map_err(|r| ctx.emit(GatewayError::TransformError(r.0)))?;
+        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect));
 
     // 5. Outbound redaction: the whole request is searched and what is
     //    found numbered once, in the order the caller wrote it.
@@ -822,8 +849,32 @@ async fn run(
             "No provider found for model: {mapped_model}"
         )))
     })?;
-
-    let input_estimate = crate::usage_estimate::request_tokens(&decoded.request);
+    // A request the conversion layer cannot read goes only to routes that
+    // forward it as sent. With none, the reason it cannot be converted is
+    // the answer, as it would be from any of the routes.
+    let forwarding: Vec<RouteEntry>;
+    let (routes, input_estimate) = match &decoded {
+        Ok(decoded) => (
+            routes.as_slice(),
+            crate::usage_estimate::request_tokens(&decoded.request),
+        ),
+        Err(rejection) => {
+            forwarding = routes
+                .iter()
+                .filter(|r| r.protocol.dialect() == surface.dialect)
+                .cloned()
+                .collect();
+            if forwarding.is_empty() {
+                return Err(ctx
+                    .emit(GatewayError::TransformError(rejection.0.clone()))
+                    .into());
+            }
+            (
+                forwarding.as_slice(),
+                crate::usage_estimate::raw_request_tokens(&outbound_body),
+            )
+        }
+    };
     let outbound = Outbound {
         surface,
         path: path.to_string(),
@@ -1061,25 +1112,29 @@ mod tests {
         assert_eq!(gemini_target("/v1beta/models/:generateContent"), None);
     }
 
-    /// The body a Chat caller's request goes out with to a Chat upstream,
-    /// under a model cap of `cap`.
-    fn sent_to_chat(ask: Value, cap: u32, official: bool) -> Value {
+    fn outbound(surface: ClientSurface, path: &str, body: Value, cap: Option<u32>) -> Outbound {
         let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
             mode: tw_guard::policy::Mode::Off,
             ..Default::default()
         });
         let (_, ledger) = redaction.look(b"{}");
-        let outbound = Outbound {
-            surface: CHAT,
-            path: "/v1/chat/completions".into(),
-            body: ask,
-            stream: false,
+        Outbound {
+            surface,
+            path: path.into(),
+            stream: body["stream"] == true,
+            body,
             dialect_headers: Vec::new(),
             input_estimate: 0,
             redaction,
             ledger,
-            max_output_tokens: Some(cap),
-        };
+            max_output_tokens: cap,
+        }
+    }
+
+    /// The body a Chat caller's request goes out with to a Chat upstream,
+    /// under a model cap of `cap`.
+    fn sent_to_chat(ask: Value, cap: u32, official: bool) -> Value {
+        let outbound = outbound(CHAT, "/v1/chat/completions", ask, Some(cap));
         let wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", official)
             .unwrap_or_else(|e| panic!("{e:?}"));
@@ -1100,6 +1155,65 @@ mod tests {
         let sent = sent_to_chat(ask, 4096, false);
         assert_eq!(sent["max_tokens"], 4096, "{sent}");
         assert!(sent.get("max_completion_tokens").is_none(), "{sent}");
+    }
+
+    /// A Responses request that continues a conversation kept on OpenAI's
+    /// servers, or carries a compaction only OpenAI can read, cannot be
+    /// converted — and is forwarded as sent to an upstream that speaks
+    /// Responses.
+    #[test]
+    fn a_request_the_conversion_cannot_read_still_goes_out_in_its_own_format() {
+        let ask = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "previous_response_id": "resp_1",
+            "input": [
+                {"type": "compaction", "encrypted_content": "gAAAAABo"},
+                {"type": "message", "role": "user", "content": "next"}
+            ]
+        });
+        let out = outbound(RESPONSES, "/v1/responses", ask.clone(), None);
+        let wire = out
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5.5", true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(wire.convert.is_none());
+        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(sent, ask);
+        assert!(wire.collect.stream && wire.collect.model == "gpt-5.5");
+
+        match out.address(UpstreamProtocol::OpenAiChat, "gpt-5.5", true) {
+            Err(GatewayError::TransformError(_)) => {}
+            Err(e) => panic!("{e:?}"),
+            Ok(_) => panic!("converted a request that points at OpenAI's servers"),
+        }
+    }
+
+    /// Codex's compaction forwarded to OpenAI comes back as OpenAI's own
+    /// compaction item. Assembled for the audit row as if converted, it
+    /// would read as a compaction that wrote no summary and failed.
+    #[test]
+    fn a_forwarded_compaction_is_assembled_as_the_upstreams_answer() {
+        let ask = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "input": [
+                {"type": "message", "role": "user", "content": "fix the test"},
+                {"type": "compaction_trigger"}
+            ]
+        });
+        let out = outbound(RESPONSES, "/v1/responses", ask.clone(), None);
+        let forwarded = out
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5.5", true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!forwarded.collect.is_compaction());
+        let sent: Value = serde_json::from_slice(&forwarded.body).unwrap();
+        assert_eq!(sent, ask);
+
+        // Converted, the upstream's summary is what Codex gets back.
+        let converted = out
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5.5", true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(converted.convert.as_ref().unwrap().is_compaction());
     }
 
     #[test]
