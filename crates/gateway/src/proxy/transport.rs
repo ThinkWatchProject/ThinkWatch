@@ -65,6 +65,9 @@ pub struct Upstream {
     pub shape: Shape,
     /// Names the upstream in error messages.
     pub label: String,
+    /// The models this upstream refused the cache breakpoints a
+    /// conversion adds for (see `proxy::cache_marks`).
+    pub(crate) cache_marks: crate::proxy::cache_marks::Refused,
 }
 
 impl Upstream {
@@ -75,6 +78,7 @@ impl Upstream {
             headers,
             shape,
             label: label.to_string(),
+            cache_marks: Default::default(),
         }
     }
 

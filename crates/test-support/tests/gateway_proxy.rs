@@ -599,3 +599,69 @@ async fn a_request_only_openai_can_read_is_forwarded_to_a_responses_route() {
     assert_eq!(sent["previous_response_id"], "resp_1", "{sent}");
     assert_eq!(sent["input"][0]["encrypted_content"], "gAAAAABo", "{sent}");
 }
+
+/// A request converted for an Anthropic-format upstream gets prompt-cache
+/// breakpoints when the caller marked none. A compatible upstream that
+/// does not take `cache_control` refuses the whole request; it gets it
+/// again without them, and later requests to it leave them out from the
+/// start.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_upstream_that_refuses_added_cache_breakpoints_gets_the_request_without_them() {
+    use wiremock::matchers::{body_string_contains, method, path};
+
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::anthropic_messages_ok("claude-relay").await;
+    upstream
+        .mount(
+            wiremock::Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .and(body_string_contains("cache_control"))
+                .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "messages.0.content.0.cache_control: Extra inputs are not permitted"
+                    }
+                })))
+                .with_priority(1),
+        )
+        .await;
+    let api_key =
+        seed_provider_and_key(&app, &upstream.uri(), "anthropic", "claude-relay", None).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    let ask = json!({
+        "model": "claude-relay",
+        "messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "hi"}
+        ]
+    });
+
+    // A Chat caller, so the request is converted and marked.
+    let resp = gw.post("/v1/chat/completions", ask.clone()).await.unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "hi", "{body}");
+    let sent = upstream.received_requests().await;
+    assert_eq!(sent.len(), 2, "refused, then sent again");
+    let marked = String::from_utf8_lossy(&sent[0].body).into_owned();
+    assert!(marked.contains("cache_control"), "{marked}");
+    let plain: Value = serde_json::from_slice(&sent[1].body).unwrap();
+    assert!(!plain.to_string().contains("cache_control"), "{plain}");
+    assert_eq!(plain["system"][0]["text"], "Be brief.", "{plain}");
+    assert_eq!(plain["messages"][0]["content"][0]["text"], "hi", "{plain}");
+
+    // Remembered: the next request goes out without them at once. (Not
+    // the same request, which the response cache would answer.)
+    let mut next = ask;
+    next["messages"][1]["content"] = json!("and again");
+    gw.post("/v1/chat/completions", next)
+        .await
+        .unwrap()
+        .assert_ok();
+    let sent = upstream.received_requests().await;
+    assert_eq!(sent.len(), 3);
+    assert!(!String::from_utf8_lossy(&sent[2].body).contains("cache_control"));
+}

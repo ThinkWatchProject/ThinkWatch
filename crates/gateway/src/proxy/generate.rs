@@ -259,6 +259,53 @@ pub(crate) struct Wire {
     /// Restores this hop's answer: the request's ledger, and any value
     /// only this hop carried.
     pub ledger: Ledger,
+    /// The body's prompt-cache breakpoints are ones the conversion added:
+    /// the caller marked none. An upstream that refuses them gets the
+    /// request again without them (see `proxy::cache_marks`).
+    pub auto_cache: bool,
+}
+
+impl Wire {
+    /// Take out the cache breakpoints the conversion added. False when
+    /// there were none to take out.
+    fn drop_added_marks(&mut self) -> bool {
+        if !std::mem::take(&mut self.auto_cache) {
+            return false;
+        }
+        match tw_dialect::cache::strip_marks(self.dialect, &self.body) {
+            Some(body) => {
+                self.body = body;
+                true
+            }
+            None => false,
+        }
+    }
+
+    async fn send_to(
+        &self,
+        upstream: &super::transport::Upstream,
+        call_ctx: &CallCtx,
+    ) -> Result<reqwest::Response, GatewayError> {
+        upstream
+            .send(
+                self.body.clone(),
+                &self.path,
+                self.query.as_deref(),
+                self.dialect,
+                &self.headers,
+                call_ctx,
+            )
+            .await
+    }
+
+    /// This hop as `upstream` takes it: without the added breakpoints
+    /// when it refused them for `model` before.
+    fn for_upstream(mut self, upstream: &super::transport::Upstream, model: &str) -> Wire {
+        if self.auto_cache && upstream.cache_marks.refused(model) {
+            self.drop_added_marks();
+        }
+        self
+    }
 }
 
 impl Outbound {
@@ -400,6 +447,7 @@ impl Outbound {
                 convert: None,
                 collect,
                 ledger,
+                auto_cache: false,
             });
         }
 
@@ -424,6 +472,10 @@ impl Outbound {
         // The conversion moved the placeholders along with the text; one it
         // assembled from two pieces is numbered here.
         let (body, ledger) = self.redaction.replace(body, &self.ledger);
+        // With none of the caller's own, any breakpoints are the ones the
+        // conversion added for Claude.
+        let auto_cache = decoded.request.cache.is_empty()
+            && tw_dialect::cache::may_have_marks(protocol.dialect(), &body);
         Ok(Wire {
             body,
             path: prepared.path,
@@ -433,6 +485,7 @@ impl Outbound {
             convert: Some(prepared.session.clone()),
             collect: prepared.session,
             ledger,
+            auto_cache,
         })
     }
 }
@@ -440,9 +493,14 @@ impl Outbound {
 /// Send to `entry`, and if the upstream rejects the dialect this route
 /// is configured for, try its alternates and remember whichever answers.
 ///
-/// A rejected dialect is known before a single byte of body arrives —
-/// the status check happens inside `send` — so a stream needs no special
-/// handling: nothing has reached the client yet when the retry happens.
+/// An upstream that refuses the prompt-cache breakpoints the conversion
+/// added gets the request once more without them, and is remembered as
+/// refusing them for this model (see `proxy::cache_marks`).
+///
+/// A rejected dialect or breakpoint is known before a single byte of body
+/// arrives — the status check happens inside `send` — so a stream needs
+/// no special handling: nothing has reached the client yet when the retry
+/// happens.
 pub(crate) async fn send(
     entry: &RouteEntry,
     outbound: &Outbound,
@@ -450,23 +508,31 @@ pub(crate) async fn send(
     db: &sqlx::PgPool,
     model: &str,
 ) -> Result<(reqwest::Response, Wire), GatewayError> {
-    let official = entry.upstream.is_official();
-    let first = outbound.address(entry.protocol, model, official)?;
-    let result = entry
-        .upstream
-        .send(
-            first.body.clone(),
-            &first.path,
-            first.query.as_deref(),
-            first.dialect,
-            &first.headers,
-            call_ctx,
-        )
-        .await;
-    let mut last = match result {
+    let upstream = &entry.upstream;
+    let official = upstream.is_official();
+    let first = outbound
+        .address(entry.protocol, model, official)?
+        .for_upstream(upstream, model);
+    let mut last = match first.send_to(upstream, call_ctx).await {
         Ok(resp) => return Ok((resp, first)),
         Err(e) => e,
     };
+
+    if first.auto_cache && super::cache_marks::is_refusal(&last, &upstream.label) {
+        let mut wire = first;
+        if wire.drop_added_marks() {
+            upstream.cache_marks.note(model);
+            tracing::info!(
+                provider = %entry.provider_name,
+                model,
+                "Upstream refused the cache breakpoints added on conversion — sending again without them"
+            );
+            match wire.send_to(upstream, call_ctx).await {
+                Ok(resp) => return Ok((resp, wire)),
+                Err(e) => last = e,
+            }
+        }
+    }
 
     if super::protocol_relearn::is_protocol_mismatch(&last) {
         for protocol in &entry.alternates {
@@ -477,19 +543,10 @@ pub(crate) async fn send(
                 to = %protocol,
                 "Upstream rejected the configured protocol — retrying with an alternate"
             );
-            let wire = outbound.address(*protocol, model, official)?;
-            match entry
-                .upstream
-                .send(
-                    wire.body.clone(),
-                    &wire.path,
-                    wire.query.as_deref(),
-                    wire.dialect,
-                    &wire.headers,
-                    call_ctx,
-                )
-                .await
-            {
+            let wire = outbound
+                .address(*protocol, model, official)?
+                .for_upstream(upstream, model);
+            match wire.send_to(upstream, call_ctx).await {
                 Ok(resp) => {
                     super::protocol_relearn::persist(db, entry.route_id, *protocol).await;
                     return Ok((resp, wire));
@@ -1214,6 +1271,53 @@ mod tests {
             .address(UpstreamProtocol::OpenAiChat, "gpt-5.5", true)
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(converted.convert.as_ref().unwrap().is_compaction());
+    }
+
+    /// Only breakpoints the conversion added may be taken out when an
+    /// upstream refuses them; the caller's own are its decision.
+    #[test]
+    fn only_breakpoints_the_conversion_added_count_as_added() {
+        let chat = outbound(
+            CHAT,
+            "/v1/chat/completions",
+            serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        let mut wire = chat
+            .address(
+                UpstreamProtocol::AnthropicMessages,
+                "claude-sonnet-4-5",
+                true,
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(wire.auto_cache);
+        assert!(wire.drop_added_marks());
+        let body = String::from_utf8(wire.body.clone()).unwrap();
+        assert!(
+            !body.contains("cache_control") && body.contains("hi"),
+            "{body}"
+        );
+
+        let claude_code = outbound(
+            MESSAGES,
+            "/v1/messages",
+            serde_json::json!({
+                "model": "m", "max_tokens": 16,
+                "system": [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}],
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            None,
+        );
+        let mut wire = claude_code
+            .address(
+                UpstreamProtocol::BedrockNative,
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                true,
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(String::from_utf8_lossy(&wire.body).contains("cachePoint"));
+        assert!(!wire.auto_cache);
+        assert!(!wire.drop_added_marks());
     }
 
     #[test]
