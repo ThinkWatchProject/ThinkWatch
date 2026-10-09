@@ -10,7 +10,7 @@ replicaCount: 3
 
 image:
   server:
-    tag: ""   # "" → .Chart.AppVersion; set e.g. "3.2.1" to pin (no "v")
+    tag: ""   # "" → .Chart.AppVersion; set e.g. "3.3.0" to pin (no "v")
   web:
     tag: ""
 

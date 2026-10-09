@@ -11,6 +11,106 @@ target.
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-10-09
+
+Requests converted for Claude now use prompt caching, and Codex works
+through routes that convert its requests to another format: its tools,
+its history and its compactions arrive. A Responses request that only
+OpenAI can read — one that continues a conversation kept on OpenAI's
+servers, or carries a compaction OpenAI wrote — now goes to a route that
+speaks Responses instead of being refused. The thinkwatch-core crates move
+from v0.65.0 to v0.67.1.
+
+### Read before upgrading
+
+- **Converted requests to Claude are cached, and billed as cache traffic.**
+  A request converted for an Anthropic-format upstream, or for a Claude
+  model on Bedrock that AWS lists for prompt caching (Claude 3.5 Sonnet v2,
+  Claude 3.7 Sonnet, and Claude 4.5 and later), from a client that marks no
+  cache breakpoints — Codex, Chat and Gemini clients, and an Anthropic
+  client whose request goes to Bedrock without `cache_control` — now gets
+  them at the end of the tools, the system prompt and the last two user
+  turns, with the 5-minute lifetime.
+  - The upstream bills the prefix a request writes at its cache-write rate
+    (1.25× input at Anthropic) and what the next turns read back at its
+    cache-read rate (0.1×). ThinkWatch prices and counts them the same
+    way: cost, budgets and `tokens` rate limits weigh a cache write by the
+    model's `cache_write_weight` and a read by its `cache_read_weight`,
+    1.25× and 0.1× its input weight when unset. Set them on the model to
+    match what your upstream charges.
+  - A conversation of several turns costs less. A one-off request with a
+    long prompt costs up to a quarter more on its input.
+  - Prompt token counts (`input_tokens` on the log rows, quotas) include
+    cached input in full, as before.
+  - Requests that mark their own breakpoints, such as Claude Code's, and
+    requests forwarded in their own format are unchanged.
+  - An upstream that refuses the added breakpoints — a `400` that names
+    `cache_control`, `cachePoint` or prompt caching, as an
+    Anthropic-compatible endpoint that does not know them answers — gets
+    the request once more without them, and later requests to it for that
+    model leave them out from the start. Each instance remembers this
+    until a provider or model is changed or it restarts. Breakpoints a
+    client marked itself are never taken out, and the probes that check a
+    route's API format go without breakpoints.
+- **Rolling back with Codex sessions.** A Codex session that compacted
+  through a converted route on 3.3.0 carries a compaction that 3.2.1
+  refuses, so after a rollback, or on a 3.2.1 instance during the rollout,
+  it cannot continue and needs a new session.
+
+Nothing else needs action: no setting, schema, API route or Redis key
+changes.
+
+### Fixed
+
+- **Responses requests that only OpenAI can read.** A Responses request
+  that continues a conversation kept on OpenAI's servers
+  (`previous_response_id`, `conversation`, `prompt`, `background`), points
+  at a stored item (`item_reference`) or carries a compaction OpenAI wrote
+  was refused with `400`, even on a route that speaks Responses and would
+  have forwarded it as sent: every request was decoded for its usage
+  estimate, and one that could not be decoded was refused. Codex sends such
+  a compaction in every request after compacting a session through an
+  OpenAI upstream, so the session could not go on; and a WebSocket turn
+  naming a response other than the connection's last one, meant to go
+  upstream as sent, was refused too. These requests now go to the model's
+  routes that speak Responses, and only a model with none refuses them,
+  with the reason. Their input estimate counts the request's text.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.65.0 → v0.67.1. Only tw-dialect, the format conversion, changes:
+  - **Prompt caching for Claude** on converted requests (see Read before
+    upgrading).
+  - **Codex tools.** For some models Codex declares every tool in an
+    `additional_tools` input item and sends no top-level `tools`. Those
+    items were dropped, so a route converting to Anthropic, Chat, Gemini
+    or Bedrock sent no tools and Codex could not read files or run
+    commands. Every tool now arrives, and tool calls come back under the
+    names and kinds Codex declared. Local shell calls, tool search,
+    reasoning-effort changes and agent messages in the history are
+    converted instead of dropped.
+  - **Codex compaction on converted routes.** Codex compacts a long
+    session through a provider named `OpenAI` by asking for exactly one
+    compaction item, which a converted route could not give, so compacting
+    failed. The upstream now writes a handoff summary, Codex receives it as
+    its compaction, and later requests carry it back. The summary request
+    is billed like any other. The summary travels in the item's
+    `encrypted_content` (`tw1.c.…`) base64-encoded, not encrypted; with
+    `audit.body_redact_pii` on, captured bodies have it redacted like the
+    rest of the body. OpenAI's own compactions still cannot be read by an
+    upstream of another format, and are refused saying so.
+  - **System messages in mid-conversation stay in place.** A `system` or
+    `developer` message after the conversation has started was added to
+    the system prompt on a converted route. It now stays where it was
+    given: a developer message for a Responses upstream, and a user turn
+    wrapped in `<system-reminder>` for Anthropic, Chat, Gemini and Bedrock
+    upstreams. The system prompt stays the same from one turn to the next,
+    which is what keeps the prompt cache working.
+  - **`verbosity`** (Chat) and **`text.verbosity`** (Responses) carry
+    across the conversion to GPT-5 and later models. Other models still
+    leave it out.
+
 ## [3.2.1] — 2026-10-09
 
 The Helm chart and the Compose file now pull the published images: they
@@ -1469,7 +1569,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.2.1...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.0
 [3.2.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.1
 [3.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.0
 [3.1.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.1.0
