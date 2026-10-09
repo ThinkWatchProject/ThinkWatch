@@ -19,17 +19,18 @@ its history and its compactions arrive. A Responses request that only
 OpenAI can read — one that continues a conversation kept on OpenAI's
 servers, or carries a compaction OpenAI wrote — now goes to a route that
 speaks Responses instead of being refused. The thinkwatch-core crates move
-from v0.65.0 to v0.67.0.
+from v0.65.0 to v0.67.1.
 
 ### Read before upgrading
 
 - **Converted requests to Claude are cached, and billed as cache traffic.**
   A request converted for an Anthropic-format upstream, or for a Claude
-  model on Bedrock, from a client that marks no cache breakpoints — Codex,
-  Chat and Gemini clients, and an Anthropic client whose request goes to
-  Bedrock without `cache_control` — now gets them at the end of the tools,
-  the system prompt and the last two user turns, with the 5-minute
-  lifetime.
+  model on Bedrock that AWS lists for prompt caching (Claude 3.5 Sonnet v2,
+  Claude 3.7 Sonnet, and Claude 4.5 and later), from a client that marks no
+  cache breakpoints — Codex, Chat and Gemini clients, and an Anthropic
+  client whose request goes to Bedrock without `cache_control` — now gets
+  them at the end of the tools, the system prompt and the last two user
+  turns, with the 5-minute lifetime.
   - The upstream bills the prefix a request writes at its cache-write rate
     (1.25× input at Anthropic) and what the next turns read back at its
     cache-read rate (0.1×). ThinkWatch prices and counts them the same
@@ -43,9 +44,14 @@ from v0.65.0 to v0.67.0.
     cached input in full, as before.
   - Requests that mark their own breakpoints, such as Claude Code's, and
     requests forwarded in their own format are unchanged.
-  - The breakpoints go to every Anthropic-format upstream, including
-    compatible ones that are not Anthropic's. Try converted traffic
-    against those before upgrading production.
+  - An upstream that refuses the added breakpoints — a `400` that names
+    `cache_control`, `cachePoint` or prompt caching, as an
+    Anthropic-compatible endpoint that does not know them answers — gets
+    the request once more without them, and later requests to it for that
+    model leave them out from the start. Each instance remembers this
+    until a provider or model is changed or it restarts. Breakpoints a
+    client marked itself are never taken out, and the probes that check a
+    route's API format go without breakpoints.
 - **Rolling back with Codex sessions.** A Codex session that compacted
   through a converted route on 3.3.0 carries a compaction that 3.2.1
   refuses, so after a rollback, or on a 3.2.1 instance during the rollout,
@@ -73,7 +79,7 @@ changes.
 ### Changed
 
 - thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
-  v0.65.0 → v0.67.0. Only tw-dialect, the format conversion, changes:
+  v0.65.0 → v0.67.1. Only tw-dialect, the format conversion, changes:
   - **Prompt caching for Claude** on converted requests (see Read before
     upgrading).
   - **Codex tools.** For some models Codex declares every tool in an
