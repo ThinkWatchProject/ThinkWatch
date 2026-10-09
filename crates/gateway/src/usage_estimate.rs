@@ -58,10 +58,25 @@ pub fn answer_tokens(body: &[u8]) -> u64 {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return to_tokens(body.len());
     };
-    to_tokens(text_len(&v))
+    to_tokens(text_len(&v, &[]))
 }
 
-fn text_len(v: &Value) -> usize {
+/// The input of a request the conversion layer cannot read, in tokens.
+///
+/// Such a request can still be forwarded in its own format — one that
+/// continues a conversation kept on OpenAI's servers, say — but there is
+/// no decoded request to measure. Its text is counted the way an answer's
+/// is, and images and files are left out as [`request_tokens`] leaves
+/// them out.
+pub fn raw_request_tokens(v: &Value) -> u64 {
+    /// Images and files: a Chat or Responses `image_url` (often a data
+    /// URI), the base64 `data` of an Anthropic or Gemini part, and a
+    /// Responses `file_data`.
+    const MEDIA: &[&str] = &["image_url", "data", "file_data"];
+    to_tokens(text_len(v, MEDIA))
+}
+
+fn text_len(v: &Value, skip: &[&str]) -> usize {
     const NOT_TEXT: &[&str] = &[
         "id",
         "model",
@@ -80,11 +95,11 @@ fn text_len(v: &Value) -> usize {
     ];
     match v {
         Value::String(s) => s.len(),
-        Value::Array(a) => a.iter().map(text_len).sum(),
+        Value::Array(a) => a.iter().map(|v| text_len(v, skip)).sum(),
         Value::Object(o) => o
             .iter()
-            .filter(|(k, _)| !NOT_TEXT.contains(&k.as_str()))
-            .map(|(_, v)| text_len(v))
+            .filter(|(k, _)| !NOT_TEXT.contains(&k.as_str()) && !skip.contains(&k.as_str()))
+            .map(|(_, v)| text_len(v, skip))
             .sum(),
         _ => 0,
     }
@@ -160,6 +175,24 @@ mod tests {
             ],
         });
         assert_eq!(answer_tokens(body.to_string().as_bytes()), 2);
+    }
+
+    #[test]
+    fn an_unreadable_request_counts_its_text_and_not_its_images() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "previous_response_id": "resp_0123456789",
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "12345678"},
+                    {"type": "input_image", "image_url": format!("data:image/png;base64,{}", "A".repeat(4000))}
+                ]},
+                {"type": "compaction", "encrypted_content": "x".repeat(4000)}
+            ]
+        });
+        // "resp_0123456789" and "12345678": 23 bytes. The model, the item
+        // types, the role, the image and the compaction are not text.
+        assert_eq!(raw_request_tokens(&body), 6);
     }
 
     #[test]

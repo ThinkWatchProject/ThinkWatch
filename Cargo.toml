@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.2.1"
+version = "3.3.0"
 edition = "2024"
 # The MSRV: the newest `rust-version` among the locked dependencies
 # (sqlx 0.9 and the aws-smithy crates under aws-sigv4). Without it,
@@ -70,10 +70,10 @@ opt-level = 3
 # never re-exported through a local shim. And the reverse: something only
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.65.0" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.65.0" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.65.0" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.65.0" }
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.67.1" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.67.1" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.67.1" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.67.1" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }

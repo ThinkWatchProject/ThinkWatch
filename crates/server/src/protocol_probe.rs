@@ -150,13 +150,19 @@ pub(crate) async fn clear_for_provider(db: &sqlx::PgPool, provider_id: Uuid) -> 
 /// converts live traffic. A hand-written probe body drifts from what
 /// forwarding actually sends, and then "the probe passed, forwarding
 /// fails" has nothing to go on.
+///
+/// Without the prompt-cache breakpoints the conversion adds for Claude,
+/// though: a probe is far too short to be cached, and an upstream that
+/// does not take them would refuse the probe and have the model recorded
+/// as unavailable for good. Live traffic recovers from that refusal on
+/// its own (see the gateway's `proxy::cache_marks`).
 fn probe_request(
     upstream_model: &str,
     protocol: UpstreamProtocol,
     official: bool,
 ) -> tw_dialect::convert::Prepared {
     use tw_dialect::ir::{Message, Part, Request, Role, Target};
-    tw_dialect::convert::encode(
+    let mut prepared = tw_dialect::convert::encode(
         &Request {
             model: upstream_model.to_string(),
             messages: vec![Message {
@@ -171,7 +177,11 @@ fn probe_request(
             official,
             default_max_tokens: 1,
         },
-    )
+    );
+    if let Some(body) = tw_dialect::cache::strip_marks(protocol.dialect(), &prepared.body) {
+        prepared.body = body;
+    }
+    prepared
 }
 
 /// Does this failure tell us anything about the model, or only about
@@ -407,6 +417,27 @@ pub(crate) async fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conversion marks Claude-bound requests for caching; a probe goes
+    /// out without the marks, so an upstream that does not take them
+    /// cannot make a model look unavailable.
+    #[test]
+    fn a_probe_carries_no_cache_breakpoints() {
+        for (protocol, model) in [
+            (UpstreamProtocol::AnthropicMessages, "claude-sonnet-4-5"),
+            (
+                UpstreamProtocol::BedrockNative,
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            ),
+        ] {
+            let body = String::from_utf8(probe_request(model, protocol, true).body).unwrap();
+            assert!(
+                !body.contains("cache_control") && !body.contains("cachePoint"),
+                "{body}"
+            );
+            assert!(body.contains("hi"), "{body}");
+        }
+    }
 
     #[test]
     fn transient_failures_never_become_a_permanent_verdict() {

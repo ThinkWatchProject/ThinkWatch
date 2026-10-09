@@ -259,6 +259,53 @@ pub(crate) struct Wire {
     /// Restores this hop's answer: the request's ledger, and any value
     /// only this hop carried.
     pub ledger: Ledger,
+    /// The body's prompt-cache breakpoints are ones the conversion added:
+    /// the caller marked none. An upstream that refuses them gets the
+    /// request again without them (see `proxy::cache_marks`).
+    pub auto_cache: bool,
+}
+
+impl Wire {
+    /// Take out the cache breakpoints the conversion added. False when
+    /// there were none to take out.
+    fn drop_added_marks(&mut self) -> bool {
+        if !std::mem::take(&mut self.auto_cache) {
+            return false;
+        }
+        match tw_dialect::cache::strip_marks(self.dialect, &self.body) {
+            Some(body) => {
+                self.body = body;
+                true
+            }
+            None => false,
+        }
+    }
+
+    async fn send_to(
+        &self,
+        upstream: &super::transport::Upstream,
+        call_ctx: &CallCtx,
+    ) -> Result<reqwest::Response, GatewayError> {
+        upstream
+            .send(
+                self.body.clone(),
+                &self.path,
+                self.query.as_deref(),
+                self.dialect,
+                &self.headers,
+                call_ctx,
+            )
+            .await
+    }
+
+    /// This hop as `upstream` takes it: without the added breakpoints
+    /// when it refused them for `model` before.
+    fn for_upstream(mut self, upstream: &super::transport::Upstream, model: &str) -> Wire {
+        if self.auto_cache && upstream.cache_marks.refused(model) {
+            self.drop_added_marks();
+        }
+        self
+    }
 }
 
 impl Outbound {
@@ -298,6 +345,30 @@ impl Outbound {
             return;
         }
         tw_dialect::params::cap_max_output_tokens(dialect, body, cap, official);
+    }
+
+    /// What assembles an answer forwarded in the caller's own format, for
+    /// the cache and the audit row.
+    ///
+    /// It is made from the request alone. Decoding also notes how the
+    /// caller wants a converted answer written — for a Codex compaction,
+    /// as one item carrying the summary the upstream wrote — and a
+    /// forwarded answer is the upstream's own: assembled that way, OpenAI's
+    /// compaction would be recorded as a failed one. A request the
+    /// conversion layer cannot read at all can still be forwarded, and its
+    /// answer is assembled knowing only the model and whether it streams.
+    fn forwarded_session(&self, body: &Value, model: &str, target: &Target) -> Session {
+        let client = self.surface.dialect;
+        let request =
+            match tw_dialect::convert::decode(client, body, &self.path, internal_query(client)) {
+                Ok(decoded) => decoded.request,
+                Err(_) => tw_dialect::ir::Request {
+                    model: model.to_string(),
+                    stream: self.stream,
+                    ..Default::default()
+                },
+            };
+        tw_dialect::convert::encode(&request, target).session
     }
 
     /// Address the request to `protocol`, naming `model` upstream.
@@ -357,7 +428,7 @@ impl Outbound {
                 }
             }
             self.cap_output(client, &mut body, model, official);
-            let collect = decode(&body)?.encode(&target(client)).session;
+            let collect = self.forwarded_session(&body, model, &target(client));
             let mut bytes = serde_json::to_vec(&body).unwrap_or_default();
             // Reasoning signatures a conversion wrote earlier in this
             // conversation (`tw1.`-prefixed) were not issued by this
@@ -376,6 +447,7 @@ impl Outbound {
                 convert: None,
                 collect,
                 ledger,
+                auto_cache: false,
             });
         }
 
@@ -400,6 +472,10 @@ impl Outbound {
         // The conversion moved the placeholders along with the text; one it
         // assembled from two pieces is numbered here.
         let (body, ledger) = self.redaction.replace(body, &self.ledger);
+        // With none of the caller's own, any breakpoints are the ones the
+        // conversion added for Claude.
+        let auto_cache = decoded.request.cache.is_empty()
+            && tw_dialect::cache::may_have_marks(protocol.dialect(), &body);
         Ok(Wire {
             body,
             path: prepared.path,
@@ -409,6 +485,7 @@ impl Outbound {
             convert: Some(prepared.session.clone()),
             collect: prepared.session,
             ledger,
+            auto_cache,
         })
     }
 }
@@ -416,9 +493,14 @@ impl Outbound {
 /// Send to `entry`, and if the upstream rejects the dialect this route
 /// is configured for, try its alternates and remember whichever answers.
 ///
-/// A rejected dialect is known before a single byte of body arrives —
-/// the status check happens inside `send` — so a stream needs no special
-/// handling: nothing has reached the client yet when the retry happens.
+/// An upstream that refuses the prompt-cache breakpoints the conversion
+/// added gets the request once more without them, and is remembered as
+/// refusing them for this model (see `proxy::cache_marks`).
+///
+/// A rejected dialect or breakpoint is known before a single byte of body
+/// arrives — the status check happens inside `send` — so a stream needs
+/// no special handling: nothing has reached the client yet when the retry
+/// happens.
 pub(crate) async fn send(
     entry: &RouteEntry,
     outbound: &Outbound,
@@ -426,23 +508,31 @@ pub(crate) async fn send(
     db: &sqlx::PgPool,
     model: &str,
 ) -> Result<(reqwest::Response, Wire), GatewayError> {
-    let official = entry.upstream.is_official();
-    let first = outbound.address(entry.protocol, model, official)?;
-    let result = entry
-        .upstream
-        .send(
-            first.body.clone(),
-            &first.path,
-            first.query.as_deref(),
-            first.dialect,
-            &first.headers,
-            call_ctx,
-        )
-        .await;
-    let mut last = match result {
+    let upstream = &entry.upstream;
+    let official = upstream.is_official();
+    let first = outbound
+        .address(entry.protocol, model, official)?
+        .for_upstream(upstream, model);
+    let mut last = match first.send_to(upstream, call_ctx).await {
         Ok(resp) => return Ok((resp, first)),
         Err(e) => e,
     };
+
+    if first.auto_cache && super::cache_marks::is_refusal(&last, &upstream.label) {
+        let mut wire = first;
+        if wire.drop_added_marks() {
+            upstream.cache_marks.note(model);
+            tracing::info!(
+                provider = %entry.provider_name,
+                model,
+                "Upstream refused the cache breakpoints added on conversion — sending again without them"
+            );
+            match wire.send_to(upstream, call_ctx).await {
+                Ok(resp) => return Ok((resp, wire)),
+                Err(e) => last = e,
+            }
+        }
+    }
 
     if super::protocol_relearn::is_protocol_mismatch(&last) {
         for protocol in &entry.alternates {
@@ -453,19 +543,10 @@ pub(crate) async fn send(
                 to = %protocol,
                 "Upstream rejected the configured protocol — retrying with an alternate"
             );
-            let wire = outbound.address(*protocol, model, official)?;
-            match entry
-                .upstream
-                .send(
-                    wire.body.clone(),
-                    &wire.path,
-                    wire.query.as_deref(),
-                    wire.dialect,
-                    &wire.headers,
-                    call_ctx,
-                )
-                .await
-            {
+            let wire = outbound
+                .address(*protocol, model, official)?
+                .for_upstream(upstream, model);
+            match wire.send_to(upstream, call_ctx).await {
                 Ok(resp) => {
                     super::protocol_relearn::persist(db, entry.route_id, *protocol).await;
                     return Ok((resp, wire));
@@ -662,10 +743,13 @@ async fn run(
         None => (body, raw),
     };
 
-    // 4. Decode once, for the input estimate.
+    // 4. Decode once, for the input estimate and to know whether the
+    //    request can be converted at all. One that cannot — it continues a
+    //    conversation kept on OpenAI's servers (`previous_response_id`), or
+    //    carries a compaction only OpenAI can read — can still be forwarded
+    //    to an upstream of its own format, so that is where it goes (step 9).
     let decoded =
-        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect))
-            .map_err(|r| ctx.emit(GatewayError::TransformError(r.0)))?;
+        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect));
 
     // 5. Outbound redaction: the whole request is searched and what is
     //    found numbered once, in the order the caller wrote it.
@@ -822,8 +906,32 @@ async fn run(
             "No provider found for model: {mapped_model}"
         )))
     })?;
-
-    let input_estimate = crate::usage_estimate::request_tokens(&decoded.request);
+    // A request the conversion layer cannot read goes only to routes that
+    // forward it as sent. With none, the reason it cannot be converted is
+    // the answer, as it would be from any of the routes.
+    let forwarding: Vec<RouteEntry>;
+    let (routes, input_estimate) = match &decoded {
+        Ok(decoded) => (
+            routes.as_slice(),
+            crate::usage_estimate::request_tokens(&decoded.request),
+        ),
+        Err(rejection) => {
+            forwarding = routes
+                .iter()
+                .filter(|r| r.protocol.dialect() == surface.dialect)
+                .cloned()
+                .collect();
+            if forwarding.is_empty() {
+                return Err(ctx
+                    .emit(GatewayError::TransformError(rejection.0.clone()))
+                    .into());
+            }
+            (
+                forwarding.as_slice(),
+                crate::usage_estimate::raw_request_tokens(&outbound_body),
+            )
+        }
+    };
     let outbound = Outbound {
         surface,
         path: path.to_string(),
@@ -1061,25 +1169,29 @@ mod tests {
         assert_eq!(gemini_target("/v1beta/models/:generateContent"), None);
     }
 
-    /// The body a Chat caller's request goes out with to a Chat upstream,
-    /// under a model cap of `cap`.
-    fn sent_to_chat(ask: Value, cap: u32, official: bool) -> Value {
+    fn outbound(surface: ClientSurface, path: &str, body: Value, cap: Option<u32>) -> Outbound {
         let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
             mode: tw_guard::policy::Mode::Off,
             ..Default::default()
         });
         let (_, ledger) = redaction.look(b"{}");
-        let outbound = Outbound {
-            surface: CHAT,
-            path: "/v1/chat/completions".into(),
-            body: ask,
-            stream: false,
+        Outbound {
+            surface,
+            path: path.into(),
+            stream: body["stream"] == true,
+            body,
             dialect_headers: Vec::new(),
             input_estimate: 0,
             redaction,
             ledger,
-            max_output_tokens: Some(cap),
-        };
+            max_output_tokens: cap,
+        }
+    }
+
+    /// The body a Chat caller's request goes out with to a Chat upstream,
+    /// under a model cap of `cap`.
+    fn sent_to_chat(ask: Value, cap: u32, official: bool) -> Value {
+        let outbound = outbound(CHAT, "/v1/chat/completions", ask, Some(cap));
         let wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", official)
             .unwrap_or_else(|e| panic!("{e:?}"));
@@ -1100,6 +1212,112 @@ mod tests {
         let sent = sent_to_chat(ask, 4096, false);
         assert_eq!(sent["max_tokens"], 4096, "{sent}");
         assert!(sent.get("max_completion_tokens").is_none(), "{sent}");
+    }
+
+    /// A Responses request that continues a conversation kept on OpenAI's
+    /// servers, or carries a compaction only OpenAI can read, cannot be
+    /// converted — and is forwarded as sent to an upstream that speaks
+    /// Responses.
+    #[test]
+    fn a_request_the_conversion_cannot_read_still_goes_out_in_its_own_format() {
+        let ask = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "previous_response_id": "resp_1",
+            "input": [
+                {"type": "compaction", "encrypted_content": "gAAAAABo"},
+                {"type": "message", "role": "user", "content": "next"}
+            ]
+        });
+        let out = outbound(RESPONSES, "/v1/responses", ask.clone(), None);
+        let wire = out
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5.5", true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(wire.convert.is_none());
+        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(sent, ask);
+        assert!(wire.collect.stream && wire.collect.model == "gpt-5.5");
+
+        match out.address(UpstreamProtocol::OpenAiChat, "gpt-5.5", true) {
+            Err(GatewayError::TransformError(_)) => {}
+            Err(e) => panic!("{e:?}"),
+            Ok(_) => panic!("converted a request that points at OpenAI's servers"),
+        }
+    }
+
+    /// Codex's compaction forwarded to OpenAI comes back as OpenAI's own
+    /// compaction item. Assembled for the audit row as if converted, it
+    /// would read as a compaction that wrote no summary and failed.
+    #[test]
+    fn a_forwarded_compaction_is_assembled_as_the_upstreams_answer() {
+        let ask = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "input": [
+                {"type": "message", "role": "user", "content": "fix the test"},
+                {"type": "compaction_trigger"}
+            ]
+        });
+        let out = outbound(RESPONSES, "/v1/responses", ask.clone(), None);
+        let forwarded = out
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5.5", true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!forwarded.collect.is_compaction());
+        let sent: Value = serde_json::from_slice(&forwarded.body).unwrap();
+        assert_eq!(sent, ask);
+
+        // Converted, the upstream's summary is what Codex gets back.
+        let converted = out
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5.5", true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(converted.convert.as_ref().unwrap().is_compaction());
+    }
+
+    /// Only breakpoints the conversion added may be taken out when an
+    /// upstream refuses them; the caller's own are its decision.
+    #[test]
+    fn only_breakpoints_the_conversion_added_count_as_added() {
+        let chat = outbound(
+            CHAT,
+            "/v1/chat/completions",
+            serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        let mut wire = chat
+            .address(
+                UpstreamProtocol::AnthropicMessages,
+                "claude-sonnet-4-5",
+                true,
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(wire.auto_cache);
+        assert!(wire.drop_added_marks());
+        let body = String::from_utf8(wire.body.clone()).unwrap();
+        assert!(
+            !body.contains("cache_control") && body.contains("hi"),
+            "{body}"
+        );
+
+        let claude_code = outbound(
+            MESSAGES,
+            "/v1/messages",
+            serde_json::json!({
+                "model": "m", "max_tokens": 16,
+                "system": [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}],
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            None,
+        );
+        let mut wire = claude_code
+            .address(
+                UpstreamProtocol::BedrockNative,
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                true,
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(String::from_utf8_lossy(&wire.body).contains("cachePoint"));
+        assert!(!wire.auto_cache);
+        assert!(!wire.drop_added_marks());
     }
 
     #[test]
