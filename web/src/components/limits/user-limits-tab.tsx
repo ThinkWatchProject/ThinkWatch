@@ -29,6 +29,11 @@
 //   POST /api/admin/users/{id}/limits/reset
 //   POST /api/admin/limits/user/{id}/rules (+ budgets)   — single
 //   POST /api/admin/limits/bulk/{rules|budgets}/{disable|delete} — bulk
+//
+// The usage meter, expiry cell, rule label and the create / edit drawer
+// are exported for the API key's limits tab (`key-limits-tab.tsx`), which
+// edits a key's own rules and budgets through the same endpoints with
+// `kind = api_key`.
 // ============================================================================
 
 import { useMemo, useState } from 'react';
@@ -160,7 +165,7 @@ interface UserLimitsTabProps {
   userId: string;
 }
 
-interface DrawerInit {
+export interface DrawerInit {
   kind: 'rule' | 'cap';
   surface?: Surface;
   metric?: Metric;
@@ -171,7 +176,13 @@ interface DrawerInit {
   editing_override_id?: string;
   // Non-null when overriding a role default (for copy in create form)
   role_default?: number;
+  // Prefill when editing a key's limit: its expiry (null = none) and reason.
+  expires_at?: string | null;
+  reason?: string | null;
 }
+
+/// Whose limits the drawer writes: `POST /api/admin/limits/{kind}/{id}/…`.
+export type LimitSubject = { kind: 'user' | 'api_key'; id: string };
 
 export function UserLimitsTab({ userId }: UserLimitsTabProps) {
   const { t } = useTranslation();
@@ -392,8 +403,8 @@ export function UserLimitsTab({ userId }: UserLimitsTabProps) {
 
       {/* ------------------ Drawers / confirms ------------------ */}
       {drawer && (
-        <OverrideDrawer
-          userId={userId}
+        <LimitDrawer
+          subject={{ kind: 'user', id: userId }}
           init={drawer}
           onClose={() => setDrawer(null)}
           onApplied={() => {
@@ -586,18 +597,8 @@ function RuleRow({
   onEdit: () => void;
   onReset: () => void;
 }) {
-  const { t, i18n } = useTranslation();
-  const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
-  const pct = row.max_count > 0 ? Math.min(100, (row.current / row.max_count) * 100) : 0;
-  const toneClass =
-    pct >= 100
-      ? '[&>[data-slot=progress-indicator]]:bg-destructive'
-      : pct >= 80
-        ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
-        : '';
+  const { t } = useTranslation();
   const deltaChip = deltaLabel(row.role_default_max_count, row.max_count);
-  const overCap = row.max_count > 0 && row.current >= row.max_count;
-  const remaining = row.max_count - row.current;
   return (
     <tr className={selected ? 'bg-muted/30' : ''}>
       <td className="px-2 py-1.5">
@@ -611,9 +612,7 @@ function RuleRow({
         </Badge>
       </td>
       <td className="px-2 py-1.5 font-mono text-[10px]">
-        {t(`limits.surfaceShort_${row.surface}` as const)} ·{' '}
-        {t(`limits.metric_${row.metric}` as const)} ·{' '}
-        {secsLabel(row.window_secs, t)}
+        <RuleScopeLabel surface={row.surface} metric={row.metric} windowSecs={row.window_secs} />
       </td>
       <td className="px-2 py-1.5 font-mono tabular-nums">
         {row.max_count.toLocaleString()}
@@ -622,24 +621,7 @@ function RuleRow({
         )}
       </td>
       <td className="px-2 py-1.5">
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono tabular-nums">
-            {row.current.toLocaleString()}
-          </span>
-          <Progress value={Math.min(100, pct)} className={`h-1 w-20 bg-muted ${toneClass}`} />
-          <span className="text-[10px] text-muted-foreground">
-            {pct.toFixed(0)}%
-          </span>
-          {overCap ? (
-            <span className="text-[10px] font-medium text-destructive">
-              {t('limits.exceeded')}
-            </span>
-          ) : remaining > 0 ? (
-            <span className="text-[10px] text-muted-foreground">
-              {t('limits.remainingLabel', { count: remaining.toLocaleString(locale) })}
-            </span>
-          ) : null}
-        </div>
+        <UsageMeter current={row.current} limit={row.max_count} />
       </td>
       <td className="px-2 py-1.5 text-[11px]">
         <ExpiryCell at={row.expires_at} />
@@ -671,21 +653,8 @@ function CapRow({
   onEdit: () => void;
   onReset: () => void;
 }) {
-  const { t, i18n } = useTranslation();
-  const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
-  const pct =
-    row.limit_tokens > 0
-      ? Math.min(100, (row.current / row.limit_tokens) * 100)
-      : 0;
-  const toneClass =
-    pct >= 100
-      ? '[&>[data-slot=progress-indicator]]:bg-destructive'
-      : pct >= 80
-        ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
-        : '';
+  const { t } = useTranslation();
   const deltaChip = deltaLabel(row.role_default_limit_tokens, row.limit_tokens);
-  const overCap = row.limit_tokens > 0 && row.current >= row.limit_tokens;
-  const remaining = row.limit_tokens - row.current;
   return (
     <tr className={selected ? 'bg-muted/30' : ''}>
       <td className="px-2 py-1.5">
@@ -710,24 +679,7 @@ function CapRow({
         )}
       </td>
       <td className="px-2 py-1.5">
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono tabular-nums">
-            {row.current.toLocaleString()}
-          </span>
-          <Progress value={Math.min(100, pct)} className={`h-1 w-20 bg-muted ${toneClass}`} />
-          <span className="text-[10px] text-muted-foreground">
-            {pct.toFixed(0)}%
-          </span>
-          {overCap ? (
-            <span className="text-[10px] font-medium text-destructive">
-              {t('limits.exceeded')}
-            </span>
-          ) : remaining > 0 ? (
-            <span className="text-[10px] text-muted-foreground">
-              {t('limits.remainingLabel', { count: remaining.toLocaleString(locale) })}
-            </span>
-          ) : null}
-        </div>
+        <UsageMeter current={row.current} limit={row.limit_tokens} />
       </td>
       <td className="px-2 py-1.5 text-[11px]">
         <ExpiryCell at={row.expires_at} />
@@ -741,6 +693,57 @@ function CapRow({
         />
       </td>
     </tr>
+  );
+}
+
+/// What a counter holds against its limit: the count, a bar, the share,
+/// and what is left or that it is exceeded.
+export function UsageMeter({ current, limit }: { current: number; limit: number }) {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
+  const pct = limit > 0 ? Math.min(100, (current / limit) * 100) : 0;
+  const toneClass =
+    pct >= 100
+      ? '[&>[data-slot=progress-indicator]]:bg-destructive'
+      : pct >= 80
+        ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
+        : '';
+  const overCap = limit > 0 && current >= limit;
+  const remaining = limit - current;
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="font-mono tabular-nums">{current.toLocaleString()}</span>
+      <Progress value={pct} className={`h-1 w-20 bg-muted ${toneClass}`} />
+      <span className="text-[10px] text-muted-foreground">{pct.toFixed(0)}%</span>
+      {overCap ? (
+        <span className="text-[10px] font-medium text-destructive">
+          {t('limits.exceeded')}
+        </span>
+      ) : remaining > 0 ? (
+        <span className="text-[10px] text-muted-foreground">
+          {t('limits.remainingLabel', { count: remaining.toLocaleString(locale) })}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/// A rate-limit rule's slot: gateway · metric · window.
+export function RuleScopeLabel({
+  surface,
+  metric,
+  windowSecs,
+}: {
+  surface: Surface;
+  metric: Metric;
+  windowSecs: number;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {t(`limits.surfaceShort_${surface}` as const)} · {t(`limits.metric_${metric}` as const)} ·{' '}
+      {secsLabel(windowSecs, t)}
+    </>
   );
 }
 
@@ -789,7 +792,7 @@ function RowActions({
   );
 }
 
-function ExpiryCell({ at }: { at?: string | null }) {
+export function ExpiryCell({ at }: { at?: string | null }) {
   const { t } = useTranslation();
   // Label reads in hours and days, so a minute is a fine resolution.
   const now = useNow(60_000);
@@ -923,21 +926,33 @@ function summarizeDetail(d: Record<string, unknown>): string {
 }
 
 // ----------------------------------------------------------------------------
-// Create / edit override drawer
+// Create / edit drawer — a user's overrides, or an API key's own limits
 // ----------------------------------------------------------------------------
 
-function OverrideDrawer({
-  userId,
+/// `datetime-local` value (local time, minutes) for an ISO instant.
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export function LimitDrawer({
+  subject,
   init,
   onClose,
   onApplied,
 }: {
-  userId: string;
+  subject: LimitSubject;
   init: DrawerInit;
   onClose: () => void;
   onApplied: () => void;
 }) {
   const { t } = useTranslation();
+  const forKey = subject.kind === 'api_key';
+  // The row a rule or budget is stored as is keyed by its slot — gateway,
+  // metric and window, or period — so an edit keeps the slot and changes
+  // the rest.
+  const editing = !!init.editing_override_id;
   const [kind, setKind] = useState<'rule' | 'cap'>(init.kind);
   const [surface, setSurface] = useState<Surface>(init.surface ?? 'ai_gateway');
   const [metric, setMetric] = useState<Metric>(init.metric ?? 'requests');
@@ -946,12 +961,18 @@ function OverrideDrawer({
   const [value, setValue] = useState<string>(
     init.current_value !== undefined ? String(init.current_value) : '',
   );
-  const [expiryPreset, setExpiryPreset] = useState<string>('7d');
-  const [customExpiry, setCustomExpiry] = useState('');
-  const [reason, setReason] = useState('');
+  // A user override is temporary by default; a key's limit lasts.
+  const [expiryPreset, setExpiryPreset] = useState<string>(
+    init.expires_at ? 'custom' : forKey ? 'permanent' : '7d',
+  );
+  const [customExpiry, setCustomExpiry] = useState(
+    init.expires_at ? toLocalInput(init.expires_at) : '',
+  );
+  const [reason, setReason] = useState(init.reason ?? '');
   const [busy, setBusy] = useState(false);
 
   const roleDefault = init.role_default;
+  const base = `/api/admin/limits/${subject.kind}/${subject.id}`;
 
   const resolveExpiry = (): string | null | 'invalid' => {
     if (expiryPreset === 'permanent') return null;
@@ -980,7 +1001,7 @@ function OverrideDrawer({
     setBusy(true);
     try {
       if (kind === 'rule') {
-        await apiPost(`/api/admin/limits/user/${userId}/rules`, {
+        await apiPost(`${base}/rules`, {
           surface,
           metric,
           window_secs: windowSecs,
@@ -990,7 +1011,7 @@ function OverrideDrawer({
           reason: reason.trim() || null,
         });
       } else {
-        await apiPost(`/api/admin/limits/user/${userId}/budgets`, {
+        await apiPost(`${base}/budgets`, {
           period,
           limit_tokens: n,
           enabled: true,
@@ -998,7 +1019,7 @@ function OverrideDrawer({
           reason: reason.trim() || null,
         });
       }
-      toast.success(t('userLimitOverrides.added'));
+      toast.success(forKey ? t('keyLimits.saved') : t('userLimitOverrides.added'));
       onApplied();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t('common.operationFailed'));
@@ -1021,9 +1042,13 @@ function OverrideDrawer({
       >
         <div>
           <h3 className="text-sm font-semibold">
-            {init.editing_override_id
-              ? t('userLimitsTab.drawer.editTitle')
-              : t('userLimitsTab.drawer.createTitle')}
+            {forKey
+              ? editing
+                ? t('keyLimits.drawer.editTitle')
+                : t('keyLimits.drawer.createTitle')
+              : editing
+                ? t('userLimitsTab.drawer.editTitle')
+                : t('userLimitsTab.drawer.createTitle')}
           </h3>
           {roleDefault != null && (
             <p className="text-[11px] text-muted-foreground">
@@ -1036,7 +1061,11 @@ function OverrideDrawer({
 
         <div className="flex items-center gap-3">
           <Label className="text-xs">{t('userLimitOverrides.col.type')}</Label>
-          <Select value={kind} onValueChange={(v) => setKind(v as 'rule' | 'cap')}>
+          <Select
+            value={kind}
+            onValueChange={(v) => setKind(v as 'rule' | 'cap')}
+            disabled={editing}
+          >
             <SelectTrigger className="w-32 text-xs" style={{ height: 28 }}>
               <SelectValue />
             </SelectTrigger>
@@ -1053,7 +1082,11 @@ function OverrideDrawer({
               <Label className="text-[10px] text-muted-foreground">
                 {t('limits.surface')}
               </Label>
-              <Select value={surface} onValueChange={(v) => setSurface(v as Surface)}>
+              <Select
+                value={surface}
+                onValueChange={(v) => setSurface(v as Surface)}
+                disabled={editing}
+              >
                 <SelectTrigger className="text-xs" style={{ height: 28 }}>
                   <SelectValue />
                 </SelectTrigger>
@@ -1074,7 +1107,7 @@ function OverrideDrawer({
               <Select
                 value={metric}
                 onValueChange={(v) => setMetric(v as Metric)}
-                disabled={surface === 'mcp_gateway'}
+                disabled={editing || surface === 'mcp_gateway'}
               >
                 <SelectTrigger className="text-xs" style={{ height: 28 }}>
                   <SelectValue />
@@ -1094,6 +1127,7 @@ function OverrideDrawer({
               <Select
                 value={String(windowSecs)}
                 onValueChange={(v) => setWindowSecs(Number(v))}
+                disabled={editing}
               >
                 <SelectTrigger className="text-xs" style={{ height: 28 }}>
                   <SelectValue />
@@ -1113,7 +1147,11 @@ function OverrideDrawer({
             <Label className="text-[10px] text-muted-foreground">
               {t('limits.period')}
             </Label>
-            <Select value={period} onValueChange={(v) => setPeriod(v as Period)}>
+            <Select
+              value={period}
+              onValueChange={(v) => setPeriod(v as Period)}
+              disabled={editing}
+            >
               <SelectTrigger className="text-xs" style={{ height: 28 }}>
                 <SelectValue />
               </SelectTrigger>
@@ -1195,7 +1233,11 @@ function OverrideDrawer({
             {t('common.cancel')}
           </Button>
           <Button type="button" size="sm" onClick={submit} disabled={busy}>
-            {busy ? t('common.loading') : t('userLimitOverrides.apply')}
+            {busy
+              ? t('common.loading')
+              : forKey
+                ? t('common.save')
+                : t('userLimitOverrides.apply')}
           </Button>
         </div>
       </div>

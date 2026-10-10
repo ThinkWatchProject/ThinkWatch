@@ -14,7 +14,6 @@ use crate::cost_tracker::CostTracker;
 use crate::error::GatewayError;
 use crate::health::HealthTracker;
 use crate::model_mapping::ModelMapper;
-use crate::rate_limiter::RateLimiter;
 use crate::router::ModelRouter;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::SurfaceConstraints;
@@ -47,6 +46,7 @@ pub use early_cancel::{EarlyCancel, EarlyCancelSlot};
 pub use generate::{
     proxy_anthropic_messages, proxy_chat_completion, proxy_gemini, proxy_responses,
 };
+pub use identity::limits_for_ai_gateway;
 pub use models::{list_gemini_models_handler, list_models_handler};
 pub use responses_ws::proxy_responses_ws;
 
@@ -61,7 +61,6 @@ pub struct GatewayState {
     pub guards: Arc<ArcSwap<crate::guards::Guards>>,
     pub cache: Arc<ResponseCache>,
     pub cost_tracker: Arc<CostTracker>,
-    pub rate_limiter: Arc<RateLimiter>,
     /// PG pool — used to query enabled rate-limit rules and budget caps
     /// per request. Cached above the proxy via `WeightCache` for the
     /// model weights; raw rules go through a separate cache later.
@@ -129,6 +128,10 @@ pub struct GatewayRequestIdentity {
     /// every `gateway_logs` row carries it without each handler reading
     /// headers themselves. `None` only if extraction failed.
     pub ip_address: Option<String>,
+    /// When the calling key stops authenticating: its expiry, or the end
+    /// of its rotation grace period, whichever comes first. `None` when
+    /// it has neither.
+    pub key_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Thin wrapper kept for call-site readability; delegates to

@@ -190,22 +190,50 @@ pub async fn current_spend(
     let now = Utc::now();
     let mut out = Vec::with_capacity(caps.len());
     for cap in caps {
-        let key = build_key(
-            cap.subject_kind.as_str(),
-            cap.subject_id,
-            cap.period.as_str(),
-            now,
-        );
-        let v: Option<i64> = redis.get(&key).await?;
-        out.push(CapStatus {
-            cap_id: cap.id,
-            subject_kind: cap.subject_kind,
-            subject_id: cap.subject_id,
-            current: v.unwrap_or(0),
-            limit: cap.limit_tokens,
-        });
+        out.push(cap_status(cap, spend(redis, cap, now).await?));
     }
     Ok(out)
+}
+
+/// [`current_spend`] at `now`, except that a Redis error is returned
+/// rather than read as nothing spent.
+pub async fn read_spend(
+    redis: &Client,
+    caps: &[BudgetCap],
+    now: DateTime<Utc>,
+) -> Result<Vec<CapStatus>, fred::error::Error> {
+    let mut out = Vec::with_capacity(caps.len());
+    for cap in caps {
+        out.push(cap_status(cap, spend(redis, cap, now).await?));
+    }
+    Ok(out)
+}
+
+/// The counter of `cap`'s period containing `now`; a period nothing has
+/// been spent in yet has no counter.
+async fn spend(
+    redis: &Client,
+    cap: &BudgetCap,
+    now: DateTime<Utc>,
+) -> Result<i64, fred::error::Error> {
+    let key = build_key(
+        cap.subject_kind.as_str(),
+        cap.subject_id,
+        cap.period.as_str(),
+        now,
+    );
+    let v: Option<i64> = redis.get(&key).await?;
+    Ok(v.unwrap_or(0))
+}
+
+fn cap_status(cap: &BudgetCap, current: i64) -> CapStatus {
+    CapStatus {
+        cap_id: cap.id,
+        subject_kind: cap.subject_kind,
+        subject_id: cap.subject_id,
+        current,
+        limit: cap.limit_tokens,
+    }
 }
 
 /// Add `weighted_tokens` to every cap counter in the slice and

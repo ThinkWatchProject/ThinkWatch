@@ -249,9 +249,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         // this the proxy would PUT into one configuration and the
         // viewer would try to GET from another.
         blob_store: state.blob_store.clone(),
-        rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
-            state.redis.clone(),
-        )),
         db: state.db.clone(),
         redis: state.redis.clone(),
         weight_cache,
@@ -289,6 +286,17 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             crate::middleware::api_key_auth::require_api_key("ai_gateway"),
         ))
         .with_state(gateway_state);
+
+    // Reads about the calling key itself: the same key checks as the
+    // routes above, but not a use of the key — nothing is charged, and
+    // neither `last_used_at` nor the request log moves.
+    let key_routes = Router::new()
+        .route("/v1/usage", get(handlers::key_usage::get_key_usage))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::api_key_auth::require_api_key_to_read("ai_gateway"),
+        ))
+        .with_state(state.clone());
 
     // MCP Gateway: /mcp
     //
@@ -398,6 +406,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     let app = Router::new()
         .merge(health)
         .merge(ai_routes)
+        .merge(key_routes)
         .merge(mcp_routes)
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
         .layer(TimeoutLayer::with_status_code(

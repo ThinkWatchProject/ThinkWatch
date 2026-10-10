@@ -503,14 +503,26 @@ pub async fn record_at(
 /// Returns 0 on Redis error so the UI can fall back to "no data"
 /// rather than 500. Real failures are logged.
 pub async fn current_count(redis: &Client, rule: &ResolvedRule) -> i64 {
-    use fred::interfaces::HashesInterface;
-    match redis.hgetall::<HashMap<String, i64>, _>(&rule.key).await {
-        Ok(buckets) => window_sum(&buckets, chrono::Utc::now().timestamp(), rule.bucket_secs),
+    match read_count(redis, rule, chrono::Utc::now().timestamp()).await {
+        Ok(count) => count,
         Err(e) => {
             tracing::warn!(key = %rule.key, "rate-limit usage read failed: {e}");
             0
         }
     }
+}
+
+/// What the window that ends at `now_secs` holds — the sum [`admit`]
+/// compares with the limit — without changing it. A Redis error is
+/// returned, not read as an empty window.
+pub async fn read_count(
+    redis: &Client,
+    rule: &ResolvedRule,
+    now_secs: i64,
+) -> Result<i64, fred::error::Error> {
+    use fred::interfaces::HashesInterface;
+    let buckets = redis.hgetall::<HashMap<String, i64>, _>(&rule.key).await?;
+    Ok(window_sum(&buckets, now_secs, rule.bucket_secs))
 }
 
 /// The sum of the buckets inside the window that ends at `now_secs`.

@@ -48,6 +48,10 @@ pub(crate) async fn post_flight_account(
         return;
     }
 
+    // The key's and its owner's day and month, counted whether or not
+    // they have limits.
+    record_usage_tokens(&redis, request_limits, weighted).await;
+
     // Token-metric sliding rules — the user's and the key's, the same
     // rules the pre-flight checked. Recorded whatever they come to: a
     // window this request overshoots refuses the next one. Post-flight
@@ -118,5 +122,30 @@ pub(crate) async fn post_flight_account(
                 }
             }
         }
+    }
+}
+
+/// Add `weighted` tokens to the day and month usage counters of the
+/// request's key and its owner (`limits::usage`). Fail-open: the counts
+/// are for reading.
+async fn record_usage_tokens(
+    redis: &fred::clients::Client,
+    request_limits: &RequestLimits,
+    weighted: i64,
+) {
+    let Some(lineage) = request_limits.key_lineage else {
+        return;
+    };
+    if let Err(e) = limits::usage::record_tokens(
+        redis,
+        request_limits.owner,
+        lineage,
+        weighted,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        metrics::counter!("gateway_usage_count_fail_open_total").increment(1);
+        tracing::warn!("usage token count failed: {e}");
     }
 }

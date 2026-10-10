@@ -12,7 +12,6 @@ pub mod metrics_labels;
 pub mod model_mapping;
 pub mod protocol;
 pub mod proxy;
-pub mod rate_limiter;
 pub mod redaction;
 pub mod route_caps;
 pub mod router;

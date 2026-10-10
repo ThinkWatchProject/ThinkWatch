@@ -785,6 +785,10 @@ export function GuidePage() {
                 <Badge variant="outline" className="mr-2 font-mono text-xs">GET</Badge>
                 {t('guide.modelsEndpoint')}
               </p>
+              <p>
+                <Badge variant="outline" className="mr-2 font-mono text-xs">GET</Badge>
+                {t('guide.usageEndpoint')}
+              </p>
             </CardContent>
           </Card>
 
