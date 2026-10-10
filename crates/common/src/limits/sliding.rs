@@ -338,39 +338,97 @@ pub async fn admit_at(
     now_ms: i64,
     fail_open: bool,
 ) -> Result<CheckOutcome, fred::error::Error> {
-    if rules.is_empty() {
-        return Ok(CheckOutcome::open());
-    }
-    let mut keys = Vec::with_capacity(rules.len());
-    let mut args = Vec::with_capacity(1 + rules.len() * 3);
-    args.push(now_ms.to_string());
-    for rule in rules {
-        let r = ResolvedRule::new(rule, owner);
-        keys.push(r.key);
-        args.push(r.bucket_secs.to_string());
-        args.push(r.max_count.to_string());
-        args.push(match rule.metric {
-            RateMetric::Requests => "1".to_string(),
-            RateMetric::Tokens => "0".to_string(),
-        });
-    }
+    let counters: Vec<Counter> = rules
+        .iter()
+        .map(|rule| {
+            let r = ResolvedRule::new(rule, owner);
+            Counter {
+                key: r.key,
+                bucket_secs: r.bucket_secs,
+                max_count: r.max_count,
+                charge: match rule.metric {
+                    RateMetric::Requests => 1,
+                    RateMetric::Tokens => 0,
+                },
+            }
+        })
+        .collect();
 
-    let reply = match run(redis, LUA_ADMIT, &ADMIT_SHA, keys, args).await {
-        Ok(v) => v,
+    match admit_counters_at(redis, &counters, now_ms).await {
+        Ok(outcome) => Ok(outcome),
         Err(e) if fail_open => {
             tracing::warn!("rate-limit check failed: {e}; failing open");
             metrics::counter!("gateway_rate_limiter_fail_open_total").increment(1);
-            return Ok(CheckOutcome::open());
+            Ok(CheckOutcome::open())
         }
         Err(e) => {
             tracing::error!(
                 "rate-limit check failed: {e}; failing closed per security.rate_limit_fail_closed"
             );
             metrics::counter!("gateway_rate_limiter_fail_closed_total").increment(1);
-            return Err(e);
+            Err(e)
         }
-    };
+    }
+}
+
+/// One counter for [`admit_counters_at`]: its Redis key, its bucket
+/// size, its limit, and what an admitted request adds to it (1 for a
+/// request count, 0 for a token count, which is only read).
+#[derive(Debug, Clone)]
+pub struct Counter {
+    pub key: String,
+    pub bucket_secs: i32,
+    pub max_count: i64,
+    pub charge: i64,
+}
+
+/// The `admit` script on counters the caller names itself — for limits
+/// that are not a user's or a key's (a route's capacity). Same
+/// semantics as [`admit_at`]: refuse when any window is full, otherwise
+/// charge each counter, all or nothing. Every key must carry the same
+/// Redis Cluster hash tag. A Redis error is returned as is; failing
+/// open or closed is the caller's decision.
+pub async fn admit_counters_at(
+    redis: &Client,
+    counters: &[Counter],
+    now_ms: i64,
+) -> Result<CheckOutcome, fred::error::Error> {
+    if counters.is_empty() {
+        return Ok(CheckOutcome::open());
+    }
+    let mut keys = Vec::with_capacity(counters.len());
+    let mut args = Vec::with_capacity(1 + counters.len() * 3);
+    args.push(now_ms.to_string());
+    for c in counters {
+        keys.push(c.key.clone());
+        args.push(c.bucket_secs.to_string());
+        args.push(c.max_count.to_string());
+        args.push(c.charge.to_string());
+    }
+    let reply = run(redis, LUA_ADMIT, &ADMIT_SHA, keys, args).await?;
     Ok(parse_admit_reply(&reply))
+}
+
+/// The `record` script on counters the caller names itself: add
+/// `amount` to each `(key, bucket_secs)`, past its limit or not. Every
+/// key must carry the same hash tag.
+pub async fn record_counters_at(
+    redis: &Client,
+    counters: &[(String, i32)],
+    amount: i64,
+    now_ms: i64,
+) -> Result<(), fred::error::Error> {
+    if counters.is_empty() || amount <= 0 {
+        return Ok(());
+    }
+    let mut args = Vec::with_capacity(2 + counters.len());
+    args.push(now_ms.to_string());
+    args.push(amount.to_string());
+    args.extend(counters.iter().map(|(_, b)| b.to_string()));
+    let keys = counters.iter().map(|(k, _)| k.clone()).collect();
+    run(redis, LUA_RECORD, &RECORD_SHA, keys, args)
+        .await
+        .map(|_| ())
 }
 
 /// Reply shape: `[allowed, limiting rule (1-based, 0 = none), wait_ms,
@@ -427,22 +485,15 @@ pub async fn record_at(
     amount: i64,
     now_ms: i64,
 ) -> Result<(), fred::error::Error> {
-    let resolved: Vec<ResolvedRule> = rules
+    let counters: Vec<(String, i32)> = rules
         .iter()
         .filter(|r| r.metric == metric)
-        .map(|r| ResolvedRule::new(r, owner))
+        .map(|r| {
+            let r = ResolvedRule::new(r, owner);
+            (r.key, r.bucket_secs)
+        })
         .collect();
-    if resolved.is_empty() || amount <= 0 {
-        return Ok(());
-    }
-    let mut args = Vec::with_capacity(2 + resolved.len());
-    args.push(now_ms.to_string());
-    args.push(amount.to_string());
-    args.extend(resolved.iter().map(|r| r.bucket_secs.to_string()));
-    let keys = resolved.into_iter().map(|r| r.key).collect();
-    run(redis, LUA_RECORD, &RECORD_SHA, keys, args)
-        .await
-        .map(|_| ())
+    record_counters_at(redis, &counters, amount, now_ms).await
 }
 
 /// Read-only "what's the current sum for this rule" helper. Used by

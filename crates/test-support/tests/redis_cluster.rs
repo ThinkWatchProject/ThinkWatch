@@ -61,10 +61,9 @@ async fn the_limit_scripts_run_on_a_cluster() {
 
 #[ignore = "integration test — needs TEST_REDIS_CLUSTER_URL"]
 #[tokio::test]
-async fn budgets_route_health_and_quotas_run_on_a_cluster() {
+async fn budgets_and_route_health_run_on_a_cluster() {
     use think_watch_common::limits::{BudgetCap, BudgetPeriod, BudgetSubject, budget};
     use think_watch_gateway::health::{CircuitBreakerConfig, HealthTracker};
-    use think_watch_gateway::quota::QuotaManager;
 
     let Some(url) = cluster_url() else { return };
     let redis = cluster(&url).await;
@@ -121,15 +120,14 @@ async fn budgets_route_health_and_quotas_run_on_a_cluster() {
     assert_eq!(format!("{:?}", health.state(route, cfg).await), "Open");
     health.forget(route).await;
     assert_eq!(health.snapshot(route, cfg).await.lifetime_requests, 0);
+}
 
-    // Quotas: limit and usage in one script.
-    let quota = QuotaManager::new(redis.clone());
-    let key = format!("{}:gpt-test", Uuid::new_v4());
-    quota.set_limit(&key, 100).await.unwrap();
-    assert_eq!(quota.consume(&key, 30).await.unwrap(), 70);
-    assert_eq!(quota.check_and_consume(&key, 20).await.unwrap(), 50);
-    assert!(quota.check_and_consume(&key, 60).await.is_err());
-    assert_eq!(quota.get_usage(&key).await.unwrap().used, 50);
+#[ignore = "integration test — needs TEST_REDIS_CLUSTER_URL"]
+#[tokio::test]
+async fn the_route_cap_scripts_run_on_a_cluster() {
+    let Some(url) = cluster_url() else { return };
+    let redis = cluster(&url).await;
+    think_watch_test_support::redis_scripts::exercise_the_route_cap_scripts(&redis).await;
 }
 
 #[ignore = "integration test — needs TEST_REDIS_CLUSTER_URL"]

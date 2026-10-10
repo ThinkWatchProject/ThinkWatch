@@ -2,7 +2,7 @@
 //! Checks every rate-limit rule the request is held to, in one atomic
 //! step, and either:
 //!
-//! * passes through to [`LimitsChecked`] (carrying the post-charge
+//! * passes through to [`Authorized`] (carrying the post-charge
 //!   currents for downstream audit), having charged 1 to every
 //!   `requests` rule, or
 //! * short-circuits with `S::rate_limited_response(label, retry_after)`
@@ -12,6 +12,10 @@
 //! A `tokens` rule refuses the request once its window's recorded
 //! usage has reached the limit; the tokens the call uses are added
 //! after it, by the surface's `record_usage` hook.
+//!
+//! It is the last pre-call gate and takes [`AccessChecked`]: only a
+//! request the identity may make reaches it, so a refused model or
+//! tool never spends a request.
 //!
 //! No surface-specific logic lives here — the stage takes
 //! pre-built `RateLimitRule`s. The surface's pipeline runner is
@@ -25,7 +29,7 @@ use crate::audit::AuditLogger;
 use crate::limits::{RateLimitRule, sliding};
 
 use super::super::Surface;
-use super::super::state::{LimitCheckRecord, LimitsChecked, Raw};
+use super::super::state::{AccessChecked, Authorized, LimitCheckRecord};
 
 /// Check the rules and charge the request's `requests` counters. See
 /// module-level docs. `owner` is the user the request runs as: every
@@ -42,18 +46,18 @@ use super::super::state::{LimitCheckRecord, LimitsChecked, Raw};
     fields(trace_id = %state.trace_id, rule_count = rules.len()),
 )]
 pub async fn check_limits<S: Surface>(
-    state: Raw<S>,
+    state: AccessChecked<S>,
     rules: &[RateLimitRule],
     owner: Uuid,
     redis: &Client,
     fail_closed: bool,
     audit: &AuditLogger,
-) -> Result<LimitsChecked<S>, S::Response> {
+) -> Result<Authorized<S>, S::Response> {
     // No rules configured ⇒ trivially pass. Skip Redis entirely so
     // a misconfigured surface (no rules attached) doesn't pay a
     // round-trip per request.
     if rules.is_empty() {
-        return Ok(LimitsChecked {
+        return Ok(Authorized {
             identity: state.identity,
             trace_id: state.trace_id,
             started_at: state.started_at,
@@ -61,6 +65,7 @@ pub async fn check_limits<S: Surface>(
             limit_check: LimitCheckRecord {
                 currents: Vec::new(),
             },
+            access_candidate: state.access_candidate,
         });
     }
 
@@ -105,7 +110,7 @@ pub async fn check_limits<S: Surface>(
         return Err(S::rate_limited_response(&label, outcome.retry_after_secs));
     }
 
-    Ok(LimitsChecked {
+    Ok(Authorized {
         identity: state.identity,
         trace_id: state.trace_id,
         started_at: state.started_at,
@@ -113,23 +118,62 @@ pub async fn check_limits<S: Surface>(
         limit_check: LimitCheckRecord {
             currents: outcome.currents,
         },
+        access_candidate: state.access_candidate,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::test_surface::{TestSurface, make_raw};
+    use super::super::super::test_surface::{TestResponse, TestSurface, make_raw};
     use super::*;
+    use crate::limits::{RateLimitSubject, RateMetric, Surface as LimitSurface};
     use fred::types::Builder;
     use fred::types::config::Config as RedisConfig;
     use uuid::Uuid;
 
-    /// Build a disconnected fred client. The `no_rules_…` test
-    /// never reaches a Redis call so this is fine; tests that need
-    /// real Redis live in `crates/test-support/tests/limits*.rs`.
+    /// Build a disconnected fred client: it is never connected, so
+    /// every command it is given fails — a Redis outage, for the tests
+    /// that need one. Tests that need real Redis live in
+    /// `crates/test-support/tests/limits*.rs`.
     fn dummy_redis() -> fred::clients::Client {
+        // Never connected, so a command waits for a connection that
+        // never comes; the timeout turns that into the error an outage
+        // gives.
         let cfg = RedisConfig::from_url("redis://127.0.0.1:6379").expect("parse url");
-        Builder::from_config(cfg).build().expect("build client")
+        Builder::from_config(cfg)
+            .with_performance_config(|c| {
+                c.default_command_timeout = std::time::Duration::from_millis(50)
+            })
+            .build()
+            .expect("build client")
+    }
+
+    /// What `check_access` hands on.
+    fn make_access_checked(user_id: Uuid) -> AccessChecked<TestSurface> {
+        let raw = make_raw(user_id);
+        AccessChecked {
+            identity: raw.identity,
+            trace_id: raw.trace_id,
+            started_at: raw.started_at,
+            client_ip: raw.client_ip,
+            access_candidate: "allowed_model".to_owned(),
+        }
+    }
+
+    fn one_rule(user_id: Uuid) -> RateLimitRule {
+        RateLimitRule {
+            id: Uuid::nil(),
+            subject_kind: RateLimitSubject::User,
+            subject_id: user_id,
+            surface: LimitSurface::AiGateway,
+            metric: RateMetric::Requests,
+            window_secs: 60,
+            max_count: 10,
+            enabled: true,
+            expires_at: None,
+            reason: None,
+            created_by: None,
+        }
     }
 
     fn dummy_audit() -> crate::audit::AuditLogger {
@@ -142,10 +186,10 @@ mod tests {
     #[tokio::test]
     async fn passes_through_with_no_rules() {
         // No rules ⇒ stage skips Redis entirely and emits
-        // LimitsChecked with empty currents. Verifies the type
+        // Authorized with empty currents. Verifies the type
         // transition and field-preservation contract.
         let user_id = Uuid::new_v4();
-        let raw = make_raw(user_id);
+        let raw = make_access_checked(user_id);
         let trace_id = raw.trace_id.clone();
         let started_at = raw.started_at;
 
@@ -167,5 +211,41 @@ mod tests {
             limits.limit_check.currents.is_empty(),
             "no rules ⇒ no currents to report"
         );
+        assert_eq!(limits.access_candidate, "allowed_model");
+    }
+
+    /// Redis down, failing closed: the request is refused as
+    /// unavailable, not let through and not reported as over a limit.
+    #[tokio::test]
+    async fn an_unreachable_store_refuses_when_failing_closed() {
+        let user_id = Uuid::new_v4();
+        let result = check_limits::<TestSurface>(
+            make_access_checked(user_id),
+            &[one_rule(user_id)],
+            user_id,
+            &dummy_redis(),
+            true,
+            &dummy_audit(),
+        )
+        .await;
+        assert_eq!(result.err(), Some(TestResponse::RateLimiterUnavailable));
+    }
+
+    /// Redis down, failing open: the request passes, with nothing
+    /// counted.
+    #[tokio::test]
+    async fn an_unreachable_store_passes_when_failing_open() {
+        let user_id = Uuid::new_v4();
+        let result = check_limits::<TestSurface>(
+            make_access_checked(user_id),
+            &[one_rule(user_id)],
+            user_id,
+            &dummy_redis(),
+            false,
+            &dummy_audit(),
+        )
+        .await;
+        let passed = result.expect("fail-open lets the request through");
+        assert!(passed.limit_check.currents.is_empty());
     }
 }

@@ -501,3 +501,123 @@ async fn role_attached_to_a_team_gives_its_members_gateway_access() {
         .unwrap()
         .assert_status(403);
 }
+
+// ---------------------------------------------------------------------------
+// A role's limits apply exactly where its gateway grant does
+// ---------------------------------------------------------------------------
+
+/// A role granting model-a at the AI gateway, held to one request a
+/// minute — the limit sits in the same Allow statement as the grant.
+async fn model_a_once_a_minute(db: &sqlx::PgPool) -> Uuid {
+    sqlx::query_scalar(
+        r#"INSERT INTO rbac_roles (name, is_system, policy_document)
+           VALUES ($1, FALSE, '{"Version":"2024-01-01","Statement":[{"Effect":"Allow",
+             "Action":["ai_gateway:use"],"Resource":["model:tm-model-a"],
+             "Constraints":{"RateLimits":[{"Metric":"requests","Window":"1m","MaxCount":1}]}}]}')
+           RETURNING id"#,
+    )
+    .bind(unique_name("model-a-once"))
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_role_attached_to_the_team_grants_and_limits() {
+    // Attached to the user's team, the role is a working role: it opens
+    // model-a, and its limit holds the member to one request a minute.
+    let app = TestApp::spawn().await;
+    let _upstream = two_routed_models(&app).await;
+    let role = model_a_once_a_minute(&app.db).await;
+    let team = make_team(&app.db, "tm-lim-attached").await;
+    sqlx::query("INSERT INTO team_role_assignments (team_id, role_id) VALUES ($1, $2)")
+        .bind(team)
+        .bind(role)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let member = fixtures::create_user(&app.db, &unique_email(), "Member", "MemberPwd_12345!")
+        .await
+        .unwrap();
+    add_to_team(&app.db, team, member.user.id).await;
+    let gw = gateway_key(&app, member.user.id).await;
+
+    gw.post("/v1/chat/completions", call(GW_MODEL_A))
+        .await
+        .unwrap()
+        .assert_ok();
+    let limited = gw
+        .post("/v1/chat/completions", call(GW_MODEL_A))
+        .await
+        .unwrap();
+    assert_eq!(limited.status.as_u16(), 429, "{}", limited.text());
+    assert!(
+        limited.text().contains("user:requests/1m"),
+        "{}",
+        limited.text()
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_role_granted_at_team_scope_neither_grants_nor_limits() {
+    // Granted at the scope of the user's team, the same role administers
+    // the team only: it opens no model at the gateway, and its limit
+    // holds none of the requests another role lets through.
+    let app = TestApp::spawn().await;
+    let _upstream = two_routed_models(&app).await;
+    let role = model_a_once_a_minute(&app.db).await;
+    let open_b: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO rbac_roles (name, is_system, policy_document)
+           VALUES ($1, FALSE, '{"Version":"2024-01-01","Statement":[{"Effect":"Allow",
+             "Action":["ai_gateway:use"],"Resource":["model:tm-model-b"]}]}')
+           RETURNING id"#,
+    )
+    .bind(unique_name("model-b-open"))
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    let user = fixtures::create_user(&app.db, &unique_email(), "Scoped", "ScopedPwd_12345!")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+         VALUES ($1, $2, 'global', $1)",
+    )
+    .bind(user.user.id)
+    .bind(open_b)
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let team = make_team(&app.db, "tm-lim-scoped").await;
+    add_to_team(&app.db, team, user.user.id).await;
+    sqlx::query(
+        "INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, scope_id, assigned_by)
+         VALUES ($1, $2, 'team', $3, $1)",
+    )
+    .bind(user.user.id)
+    .bind(role)
+    .bind(team)
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let gw = gateway_key(&app, user.user.id).await;
+
+    let refused = gw
+        .post("/v1/chat/completions", call(GW_MODEL_A))
+        .await
+        .unwrap();
+    assert!(
+        !refused.status.is_success() && refused.status.as_u16() != 429,
+        "model-a is not granted by a team-scoped role: {} {}",
+        refused.status,
+        refused.text()
+    );
+    for _ in 0..3 {
+        gw.post("/v1/chat/completions", call(GW_MODEL_B))
+            .await
+            .unwrap()
+            .assert_ok();
+    }
+}

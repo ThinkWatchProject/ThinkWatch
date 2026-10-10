@@ -8,7 +8,8 @@ use xxhash_rust::xxh3::xxh3_128;
 /// A cached answer, in the caller's format with redaction placeholders intact.
 pub struct Cached {
     pub body: Vec<u8>,
-    /// Kept so a hit can debit quota the way the original call did.
+    /// Kept so a hit counts toward token limits and budgets the way the
+    /// original call did.
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
 }

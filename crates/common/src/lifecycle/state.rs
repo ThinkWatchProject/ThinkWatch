@@ -1,21 +1,22 @@
 //! Per-stage state structs. Each stage consumes one struct and
 //! returns the next, encoding the lifecycle progression in the
-//! type system: you literally cannot call `check_access` against a
-//! [`Raw`] state because the signature takes `LimitsChecked`.
+//! type system: you literally cannot call `check_limits` against a
+//! [`Raw`] state because the signature takes [`AccessChecked`] — a
+//! request is checked against what it may do before it is counted.
 //!
 //! The transitions move ownership, not clone. Each subsequent
 //! struct destructures the previous one and adds the new field(s).
 //! Stage code looks like:
 //!
 //! ```ignore
-//! let Raw { identity, trace_id, started_at, client_ip } = state;
+//! let AccessChecked { identity, trace_id, started_at, client_ip, access_candidate } = state;
 //! let limit_check = run_limit_check(&identity, &redis, &rules).await?;
-//! Ok(LimitsChecked { identity, trace_id, started_at, client_ip, limit_check })
+//! Ok(Authorized { identity, trace_id, started_at, client_ip, limit_check, access_candidate })
 //! ```
 //!
 //! Verbose by design — the destructure makes every field carried
 //! across the transition visible at the call site. Adding a field
-//! to `Raw` that should also live in `LimitsChecked` is a localised
+//! to `Raw` that should also live in `Authorized` is a localised
 //! edit (one struct + one transition fn).
 
 use std::pin::Pin;
@@ -60,25 +61,25 @@ impl<S: Surface> Raw<S> {
     }
 }
 
-/// Output of `check_limits`. Carries everything from [`Raw`] plus
-/// the materialised limit-check result so downstream stages (in
-/// particular `emit_audit`) can record what budgets / counters
-/// this request charged.
-pub struct LimitsChecked<S: Surface> {
+/// Output of `check_access`: everything from [`Raw`] plus the
+/// `candidate` the access decision was made against (tool name for
+/// MCP, model name for the AI gateway). Access is decided before the
+/// limits are checked, so a request the identity may not make is
+/// refused without charging any counter.
+pub struct AccessChecked<S: Surface> {
     pub identity: S::Identity,
     pub trace_id: String,
     pub started_at: Instant,
     pub client_ip: Option<String>,
-    /// Outcome of the rate-limit check. For `check_limits` to
-    /// emit `LimitsChecked` at all, the check must have *passed*;
-    /// this field records the per-window currents the audit row
-    /// surfaces in its `limits` block.
-    pub limit_check: LimitCheckRecord,
+    /// Surface-specific candidate the access check ran against —
+    /// a tool name (`stream__test_tool`) for MCP, a model id
+    /// (`gpt-4o-mini`) for the AI gateway.
+    pub access_candidate: String,
 }
 
 /// Successful-check trace data. Mirrors the shape
 /// [`crate::limits::sliding::CheckOutcome`] returns, minus the
-/// "allowed: bool" — if we're carrying this in a `LimitsChecked`
+/// "allowed: bool" — if we're carrying this in an [`Authorized`]
 /// we already know it was allowed.
 #[derive(Debug, Clone)]
 pub struct LimitCheckRecord {
@@ -88,17 +89,21 @@ pub struct LimitCheckRecord {
     pub currents: Vec<i64>,
 }
 
-/// Output of `check_access`. Same field set as
-/// [`LimitsChecked`] — the access stage doesn't add new data, it
-/// just narrows the type so subsequent stages can't be reached
-/// without it. Carries the `candidate` string the access decision
-/// was made against (tool name for MCP, model name for the AI
-/// gateway) so downstream audit can record what was authorized.
+/// Output of `check_limits`, the last pre-call gate: access was
+/// granted and every rate limit passed. Carries the materialised
+/// limit-check result so downstream stages (in particular
+/// `emit_audit`) can record what counters this request charged, and
+/// the `candidate` string the access decision was made against so
+/// downstream audit can record what was authorized.
 pub struct Authorized<S: Surface> {
     pub identity: S::Identity,
     pub trace_id: String,
     pub started_at: Instant,
     pub client_ip: Option<String>,
+    /// Outcome of the rate-limit check. For `check_limits` to emit
+    /// `Authorized` at all, the check must have *passed*; this field
+    /// records the per-window currents the audit row surfaces in its
+    /// `limits` block.
     pub limit_check: LimitCheckRecord,
     /// Surface-specific candidate the access check ran against —
     /// a tool name (`stream__test_tool`) for MCP, a model id

@@ -8,7 +8,10 @@ pub struct Team {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
-    // Budget caps live in `budget_caps` (subject_kind = 'team').
+    // A team has no limits of its own: rate limits and budgets attach to
+    // users and API keys (`rate_limit_rules` / `budget_caps` take
+    // `subject_kind` 'user' or 'api_key_lineage'), and a team's members
+    // get the limits of the roles the team grants them.
     pub created_at: DateTime<Utc>,
 }
 

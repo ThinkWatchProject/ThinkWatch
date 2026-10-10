@@ -59,7 +59,7 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Rate-limited + quota-exceeded (per sec)",
+      "title": "Rate-limited + routes at cap (per sec)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "x": 0, "y": 7, "w": 12, "h": 7 },
       "targets": [
@@ -69,8 +69,8 @@
           "refId": "A"
         },
         {
-          "expr": "rate(gateway_quota_overflow_total[1m])",
-          "legendFormat": "quota overflow",
+          "expr": "sum by (metric) (rate(gateway_route_capped_total[1m]))",
+          "legendFormat": "route at {{metric}} cap",
           "refId": "B"
         }
       ],
