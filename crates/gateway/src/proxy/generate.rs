@@ -357,6 +357,13 @@ impl Outbound {
     /// compaction would be recorded as a failed one. A request the
     /// conversion layer cannot read at all can still be forwarded, and its
     /// answer is assembled knowing only the model and whether it streams.
+    ///
+    /// A Chat upstream can write a tool call into its answer text instead
+    /// of `tool_calls`. A converted answer turns such a call, when the
+    /// request defined the tool, into a structured one (see
+    /// `tw_dialect::chat::text_calls`); a forwarded answer reaches the
+    /// caller as the upstream wrote it, text included, and is assembled as
+    /// that (`Session::keep_text_calls`).
     fn forwarded_session(&self, body: &Value, model: &str, target: &Target) -> Session {
         let client = self.surface.dialect;
         let request =
@@ -368,7 +375,9 @@ impl Outbound {
                     ..Default::default()
                 },
             };
-        tw_dialect::convert::encode(&request, target).session
+        tw_dialect::convert::encode(&request, target)
+            .session
+            .keep_text_calls()
     }
 
     /// Address the request to `protocol`, naming `model` upstream.
@@ -1271,6 +1280,63 @@ mod tests {
             .address(UpstreamProtocol::OpenAiChat, "gpt-5.5", true)
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(converted.convert.as_ref().unwrap().is_compaction());
+    }
+
+    /// A Chat upstream that writes a tool call into its text: a converted
+    /// answer carries it as a structured call, a forwarded one is assembled
+    /// as the caller received it — text.
+    #[test]
+    fn a_tool_call_written_into_text_is_assembled_as_the_caller_received_it() {
+        const STREAM: &str = concat!(
+            "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"role\":\"assistant\",\"content\":\"<tool_call>{\\\"name\\\": \\\"ls\\\", ",
+            "\\\"arguments\\\": {\\\"path\\\": \\\"/\\\"}}</tool_call>\"}}]}\n\n",
+            "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,",
+            "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {"name": "ls", "parameters": {"type": "object"}}
+        }]);
+        let assemble = |session: &Session| -> Value {
+            let mut c = session.collector();
+            c.process(STREAM.as_bytes());
+            serde_json::from_slice(&c.finish().unwrap()).unwrap()
+        };
+
+        let ask = serde_json::json!({
+            "model": "m", "stream": true, "tools": tools,
+            "messages": [{"role": "user", "content": "list /"}]
+        });
+        let forwarded = outbound(CHAT, "/v1/chat/completions", ask, None)
+            .address(UpstreamProtocol::OpenAiChat, "m", false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(forwarded.convert.is_none());
+        let message = &assemble(&forwarded.collect)["choices"][0]["message"];
+        assert!(
+            message["content"].as_str().unwrap().contains("<tool_call>"),
+            "{message}"
+        );
+        assert!(message.get("tool_calls").is_none(), "{message}");
+
+        let ask = serde_json::json!({
+            "model": "m", "stream": true, "max_tokens": 100,
+            "tools": [{"name": "ls", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "list /"}]
+        });
+        let converted = outbound(MESSAGES, "/v1/messages", ask, None)
+            .address(UpstreamProtocol::OpenAiChat, "m", false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let content = &assemble(converted.convert.as_ref().unwrap())["content"];
+        assert!(
+            content
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "tool_use" && b["name"] == "ls"),
+            "{content}"
+        );
     }
 
     /// Only breakpoints the conversion added may be taken out when an

@@ -91,6 +91,8 @@ fn text_len(v: &Value, skip: &[&str]) -> usize {
         "call_id",
         "tool_call_id",
         "signature",
+        "thoughtSignature",
+        "thought_signature",
         "encrypted_content",
     ];
     match v {
@@ -173,6 +175,15 @@ mod tests {
                 {"type": "thinking", "thinking": "abcd", "signature": "x".repeat(4000)},
                 {"type": "text", "text": "efgh"},
             ],
+        });
+        assert_eq!(answer_tokens(body.to_string().as_bytes()), 2);
+        // Gemini's, on a thought and on the function call it led to.
+        let body = json!({
+            "candidates": [{"content": {"parts": [
+                {"text": "abcd", "thought": true, "thoughtSignature": "x".repeat(4000)},
+                {"functionCall": {"name": "ls", "args": {}}, "thoughtSignature": "x".repeat(4000)},
+                {"functionCall": {"name": "ls", "args": {}}, "thought_signature": "x".repeat(4000)}
+            ]}}],
         });
         assert_eq!(answer_tokens(body.to_string().as_bytes()), 2);
     }

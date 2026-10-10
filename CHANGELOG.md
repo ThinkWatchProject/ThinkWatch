@@ -11,6 +11,78 @@ target.
 
 ## [Unreleased]
 
+## [3.4.0] — 2026-10-11
+
+Conversations with reasoning models behind Chat-format upstreams keep their
+reasoning from turn to turn, Gemini's tool loops keep their thought
+signatures through a conversion, and a tool call that a Chat-format model
+writes into its answer text reaches the caller as a tool call. The
+thinkwatch-core crates move from v0.68.0 to v0.69.0.
+
+### Read before upgrading
+
+- **Converted answers from Chat-format upstreams can carry tool calls that
+  arrived as text before.** Self-hosted and relayed Chat-format models
+  (DeepSeek, GLM, Qwen, Llama and others) sometimes write a tool call into
+  `content` in the template they were trained on instead of answering with
+  `tool_calls`. On a route that converts the request to the Chat format,
+  such a call to a tool the request defined now reaches the caller as a
+  structured tool call, which the caller executes, where it used to be a
+  tagged piece of prose the caller showed and did nothing with. Tool-call
+  inspection sees these calls like any other and refuses or cuts them under
+  the same rules; the request log's response body records them as tool
+  calls, and a recovered call ends the answer with the tool-use stop reason
+  instead of `stop`. A request that defined no tools, a name the request
+  did not define, and a bare JSON object in prose stay text. A Chat caller
+  on a Chat-format route is forwarded as sent and unchanged. No setting,
+  schema, API route, Helm value or Redis key changes.
+
+### Fixed
+
+- **Gemini thought signatures are not counted as answer text.** When a
+  request's usage has to be estimated (`usage_estimated`), the
+  `thoughtSignature` on a Gemini thought or function call — an opaque blob
+  of up to several kilobytes — was counted as output text; it is left out
+  now, as the other formats' reasoning signatures were.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.68.0 → v0.69.0. Only tw-dialect changes:
+  - **Reasoning from a Chat-format upstream round-trips** (tw-dialect).
+    Reasoning a Chat-format upstream returned (`reasoning_content`, or
+    `reasoning` as OpenRouter and vLLM call it) was dropped from the next
+    turn's request on every route, so a Claude Code or Codex conversation
+    with tools against DeepSeek, which requires the reasoning of a
+    tool-calling turn on the following requests of that turn, lost it every
+    turn. Such reasoning is now carried in the caller's own format with a
+    `tw1.ch.` signature, read back on the next turn, and written as
+    `reasoning_content` only to a Chat-format upstream; to an upstream of
+    another format it is left out as before, and reasoning another vendor
+    signed is still not sent to a Chat-format upstream. Consecutive
+    assistant messages are merged before a request is written in the Chat
+    format, so a Responses caller's reasoning, text and tool call of one
+    turn arrive as one message. The reasoning history a request carries
+    back counts as its input, so the input tokens of those turns grow by
+    it, as the upstream charges them.
+  - **Gemini thought signatures on function calls are kept** (tw-dialect).
+    Gemini with thinking puts a turn's thought signature on the first
+    `functionCall` part, and the conversion only read signatures from
+    thought parts, so a converted Gemini tool loop lost the signature and
+    with it the model's reasoning continuity. The signature on a function
+    call is now carried through a conversion and written back on the
+    `functionCall` part; a call with no real signature gets the
+    `skip_thought_signature_validator` placeholder as before. A Gemini
+    request forwarded as sent that carries a signature from another route
+    on a `functionCall` part keeps the part with the placeholder, where the
+    part was removed and the tool loop broke.
+  - **Tool calls written into a Chat-format upstream's answer text are
+    recognised** (tw-dialect): see Read before upgrading. In this edition
+    the answer assembled for the request log and the cache of a Chat
+    caller's stream forwarded as sent to a Chat-format upstream keeps such
+    a call as the text the caller received, rather than the structured call
+    the conversion would have made of it.
+
 ## [3.3.1] — 2026-10-10
 
 Streams are logged as they ended. A caller that hangs up once it has read
@@ -1696,7 +1768,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.3.1...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.4.0...HEAD
+[3.4.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.4.0
 [3.3.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.1
 [3.3.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.0
 [3.2.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.1
