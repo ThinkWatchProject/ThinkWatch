@@ -1,9 +1,10 @@
 //! Post-flight accounting + token resolution for streaming responses.
 //!
 //! [`post_flight_account`] adds what a request used to its token-metric
-//! sliding rules and budget caps, from the token counts the upstream
-//! returned — or the estimate, when it returned none — with cache reads
-//! and writes weighted apart from plain input. Used from BOTH the
+//! sliding rules, its budget caps and the token cap of the route that
+//! answered, from the token counts the upstream returned — or the
+//! estimate, when it returned none — with cache reads and writes
+//! weighted apart from plain input. Used from BOTH the
 //! non-streaming branch (called inline after the upstream future
 //! resolves) and the streaming branch (called from the post-invoke
 //! pipeline after the SSE stream is drained).
@@ -28,6 +29,9 @@ pub(crate) async fn post_flight_account(
     model: String,
     tokens: weight::TokenCounts,
     request_limits: &RequestLimits,
+    // The route that answered, for its token cap. `None` when no route
+    // did (an answer from the response cache).
+    route: Option<&crate::route_caps::RouteCaps>,
     // Actor attribution for `budget.threshold_crossed` audit entries.
     // Without these the crossing log carries only `cap_id`, and
     // operators investigating a 100 %-cross had to time-join against
@@ -60,6 +64,11 @@ pub(crate) async fn post_flight_account(
     .await
     {
         tracing::warn!("token rate-limit accounting failed: {e}");
+    }
+
+    // The answering route's tokens-per-minute cap, counted the same way.
+    if let Some(caps) = route {
+        crate::route_caps::record_tokens(&redis, caps, weighted).await;
     }
 
     // Natural-period budget caps — the user's and the key's.

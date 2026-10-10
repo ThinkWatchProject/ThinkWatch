@@ -1777,8 +1777,8 @@
     "xffDepthHint": "1-based position from the chosen direction",
     "rateLimiter": {
       "title": "Rate Limiter",
-      "failClosed": "Fail closed on Redis outage",
-      "failClosedHint": "Default is fail-open: a Redis blip lets requests through and bumps gateway_rate_limiter_fail_open_total. With this on, the gateway returns 429 (rate_limiter_unavailable) for any request the engine couldn't check, and bumps gateway_rate_limiter_fail_closed_total. Turn on if missing accounting is worse than denying traffic."
+      "failClosed": "Fail closed when limits can't be checked",
+      "failClosedHint": "Default is fail-open: when a request's limits can't be checked — Redis is unreachable, or the database fails while the limits are loaded — the request goes through and a warning is logged (gateway_rate_limiter_fail_open_total and related metrics). With this on, such a request is refused with 429 (rate_limiter_unavailable, budget_unavailable or limits_unavailable), and gateway_rate_limiter_fail_closed_total and related metrics count it. Turn on if missing accounting is worse than denying traffic."
     }
   },
   "logs": {

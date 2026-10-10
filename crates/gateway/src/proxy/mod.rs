@@ -14,7 +14,6 @@ use crate::cost_tracker::CostTracker;
 use crate::error::GatewayError;
 use crate::health::HealthTracker;
 use crate::model_mapping::ModelMapper;
-use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::ModelRouter;
 use think_watch_common::dynamic_config::DynamicConfig;
@@ -60,7 +59,6 @@ pub struct GatewayState {
     /// tool-call inspection. Hot-swapped whole when an admin changes a
     /// policy; each request runs on the snapshot it took on arrival.
     pub guards: Arc<ArcSwap<crate::guards::Guards>>,
-    pub quota: Arc<QuotaManager>,
     pub cache: Arc<ResponseCache>,
     pub cost_tracker: Arc<CostTracker>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -69,8 +67,8 @@ pub struct GatewayState {
     /// model weights; raw rules go through a separate cache later.
     pub db: PgPool,
     /// Redis client used by the bucketed sliding-window engine and the
-    /// natural-period budget counters. Same connection used by `quota`,
-    /// `cache`, and the rest of the gateway.
+    /// natural-period budget counters. Same connection used by `cache`
+    /// and the rest of the gateway.
     pub redis: fred::clients::Client,
     /// LRU cache mapping `model_id → (input_weight, output_weight)`.
     /// Looked up once per request to convert raw token counts into
@@ -169,7 +167,7 @@ impl From<GatewayError> for GatewayErrorResponse {
 
 impl GatewayErrorResponse {
     /// Answer in `client`'s format.
-    pub(crate) fn in_dialect(mut self, client: tw_dialect::ir::Dialect) -> Self {
+    pub fn in_dialect(mut self, client: tw_dialect::ir::Dialect) -> Self {
         self.client = client;
         self
     }

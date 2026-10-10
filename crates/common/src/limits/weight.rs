@@ -21,10 +21,11 @@
 //
 // Cache invalidation: by TTL only (5 minutes). Weights change rarely
 // (admin tunes them in the model management page) so a brief
-// staleness window is acceptable. We do NOT subscribe to the limits
-// pubsub for this — the channel is for rule / cap changes, not
-// model rows. If we need faster propagation later, the caller can
-// call `WeightCache::invalidate_all` from the model PATCH handler.
+// staleness window is acceptable. Nothing notifies the cache of a
+// model edit (the `limits:changed` notice is about rules and caps,
+// and nothing subscribes to it). If we need faster propagation later,
+// the caller can call `WeightCache::invalidate_all` from the model
+// PATCH handler.
 //
 // Cache shape: `RwLock<HashMap<String, (Weights, expires_at)>>`.
 // 5-min TTL on entries. Bounded to 1024 distinct model_ids — beyond

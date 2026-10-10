@@ -1,9 +1,9 @@
 //! Pipeline stages — each surface-agnostic stage is a plain
 //! `async fn` here. See [`super`] for the full pipeline shape.
 //!
-//! Short-circuit stages (`check_budget`, `check_limits`,
-//! `check_access`) live as standalone fns that take the previous
-//! state struct and return either the next state or
+//! Short-circuit stages (`check_budget`, `check_access`,
+//! `check_limits`, in that order) live as standalone fns that take the
+//! previous state struct and return either the next state or
 //! `Err(S::Response)`. The four post-invoke stages
 //! (`record_outcome` → `write_cache` → `record_usage` →
 //! `emit_audit`) live in [`run_post_invoke`] and are dispatched in

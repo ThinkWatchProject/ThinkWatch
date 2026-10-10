@@ -545,9 +545,10 @@ impl McpProxy {
         let allowed_mcp_tools = ctx.allowed_mcp_tools;
         let trace_id = ctx.trace_id;
         // Resolve params + tool target up front so we know which MCP
-        // server this call belongs to. The rate-limit subjects need
-        // the server id, so the rate-limit gate runs AFTER the
-        // server lookup but BEFORE access control + the real call.
+        // server this call belongs to. Then access control, then the
+        // rate-limit gate, then the real call: the gate charges the
+        // request counters, so a tool the key may not call is refused
+        // before it counts.
 
         let params = match &request.params {
             Some(p) => p,
@@ -584,13 +585,6 @@ impl McpProxy {
                 }
             };
 
-        // Rate-limit pre-flight — runs the lifecycle's shared
-        // `check_limits` stage. The stage emits its own audit row
-        // on short-circuit and the response shape comes from
-        // `McpSurface::rate_limited_response` so the deny payload
-        // stays identical to the pre-migration version. We bind
-        // the `request.id` onto the response after the fact
-        // because the stage doesn't know the wire-level id.
         let limits = crate::lifecycle::rate_limits(
             user_id,
             surface_constraints,
@@ -609,35 +603,41 @@ impl McpProxy {
             trace_id.to_owned(),
             ctx.ip_address.map(|s| s.to_owned()),
         );
-        let limits_checked = match think_watch_common::lifecycle::stages::check_limits::<
+
+        // Access control via the shared `check_access` stage. The
+        // candidate is the namespaced tool name we extracted at the
+        // top of the handler; the surface impl
+        // (`McpSurface::is_access_allowed`) calls `is_tool_allowed`
+        // with the identity's `allowed_mcp_tools` patterns. Each stage
+        // emits its own audit row on short-circuit; we bind the
+        // inbound JSON-RPC `id` onto the response after the fact so
+        // the client can correlate the deny to its request — the stage
+        // doesn't know the wire-level id.
+        let access_checked = match think_watch_common::lifecycle::stages::check_access::<
+            crate::lifecycle::McpSurface,
+        >(raw, namespaced_name, &self.audit)
+        .await
+        {
+            Ok(s) => s,
+            Err(mut resp) => {
+                resp.id = request.id;
+                return HandleOutcome::Buffered(resp);
+            }
+        };
+
+        // Rate-limit pre-flight — the lifecycle's shared `check_limits`
+        // stage, on a call the key may make. The response shape comes
+        // from `McpSurface::rate_limited_response`.
+        let authorized = match think_watch_common::lifecycle::stages::check_limits::<
             crate::lifecycle::McpSurface,
         >(
-            raw,
+            access_checked,
             &limits.rules,
             limits.owner,
             &self.redis,
             fail_closed,
             &self.audit,
         )
-        .await
-        {
-            Ok(s) => s,
-            Err(mut resp) => {
-                // Bind the inbound JSON-RPC `id` so the client
-                // can correlate the deny response to its request.
-                resp.id = request.id;
-                return HandleOutcome::Buffered(resp);
-            }
-        };
-
-        // Access control via the shared `check_access` stage. The
-        // candidate is the namespaced tool name we extracted at the
-        // top of the handler; the surface impl
-        // (`McpSurface::is_access_allowed`) calls `is_tool_allowed`
-        // with the identity's `allowed_mcp_tools` patterns.
-        let authorized = match think_watch_common::lifecycle::stages::check_access::<
-            crate::lifecycle::McpSurface,
-        >(limits_checked, namespaced_name, &self.audit)
         .await
         {
             Ok(s) => s,

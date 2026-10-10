@@ -11,7 +11,7 @@
 // And the corresponding submodules in this folder:
 //
 //   sliding              — bucketed Lua admit (before) / record (after) over Redis
-//   budget               — natural-period add_weighted_tokens / check_cap
+//   budget               — natural-period current_spend (before) / add_weighted_tokens (after)
 //   weight               — model_id → weighted token converter (LRU cached)
 //
 // Subject identification: every rule / cap is keyed by a (subject_kind,
@@ -48,7 +48,11 @@
 // Budget counters are read and written one key per command and need no
 // tag.
 //
-// See `plan.md` (limits chapter) for the full design.
+// Nothing caches these rows: the API-key middleware loads a request's
+// rules and caps from Postgres on every request
+// (`rbac::compute_user_surface_constraints` /
+// `compute_key_surface_constraints`), so an edit applies to the next
+// request.
 // ============================================================================
 
 use serde::{Deserialize, Serialize};
@@ -737,8 +741,8 @@ pub struct BudgetCap {
 }
 
 // ----------------------------------------------------------------------------
-// CRUD — straight DB reads / writes. The hot read path goes through
-// `LimitsCache` (below) instead of these helpers.
+// CRUD — straight DB reads / writes. The request path uses them too:
+// there is no cache in front of them (see the module header).
 // ----------------------------------------------------------------------------
 
 /// Permitted sliding-window lengths (seconds). Anything outside this
@@ -1245,11 +1249,12 @@ impl RequestLimits {
 }
 
 // ----------------------------------------------------------------------------
-// Cache-invalidation pubsub
+// Change notice
 //
-// Same shape as `dynamic_config::notify_config_changed`, but on its
-// own channel so a settings change doesn't force every gateway to
-// drop its limits cache.
+// Published on `limits:changed` after every rule / cap write. Nothing
+// subscribes to it: no process caches limits (they are read per
+// request, see the module header), so a change needs no notice to take
+// effect.
 // ----------------------------------------------------------------------------
 
 const LIMITS_CHANGED_CHANNEL: &str = "limits:changed";

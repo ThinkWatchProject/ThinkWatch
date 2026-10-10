@@ -14,13 +14,16 @@
 //!
 //! No mutation, so failure of the Redis read defaults to fail-open
 //! (request allowed) unless the caller passes `fail_closed = true`
-//! — matching the [`super::check_limits`] semantics.
+//! — matching the [`super::check_limits`] semantics. A failed read is
+//! never taken for an unspent budget (`budget::current_spend` returns
+//! the error).
 //!
-//! Ordering note: this stage runs BEFORE `check_limits`, on the
-//! [`Raw`] state. `check_limits` charges the `requests` counters, so
-//! running it first would charge a request this stage then refuses.
-//! Since this stage charges nothing, a request refused by either
-//! charges nothing.
+//! Ordering note: this stage runs first, on the [`Raw`] state, then
+//! `check_access`, then `check_limits`. `check_limits` charges the
+//! `requests` counters, so running it before either of the others
+//! would charge a request they then refuse. Neither of them charges
+//! anything, so a request refused before `check_limits` charges
+//! nothing.
 
 use chrono::Utc;
 use fred::clients::Client;
@@ -141,8 +144,16 @@ mod tests {
     use uuid::Uuid;
 
     fn dummy_redis() -> fred::clients::Client {
+        // Never connected, so a command waits for a connection that
+        // never comes; the timeout turns that into the error an outage
+        // gives.
         let cfg = RedisConfig::from_url("redis://127.0.0.1:6379").expect("parse url");
-        Builder::from_config(cfg).build().expect("build client")
+        Builder::from_config(cfg)
+            .with_performance_config(|c| {
+                c.default_command_timeout = std::time::Duration::from_millis(50)
+            })
+            .build()
+            .expect("build client")
     }
 
     fn dummy_audit() -> crate::audit::AuditLogger {
@@ -166,6 +177,50 @@ mod tests {
         assert_eq!(passed.identity.user_id, user_id);
         assert_eq!(passed.trace_id, trace_id);
         assert_eq!(passed.started_at, started_at);
+    }
+
+    fn one_cap() -> BudgetCap {
+        BudgetCap {
+            id: Uuid::nil(),
+            subject_kind: BudgetSubject::User,
+            subject_id: Uuid::nil(),
+            period: BudgetPeriod::Daily,
+            limit_tokens: 1000,
+            enabled: true,
+            expires_at: None,
+            reason: None,
+            created_by: None,
+        }
+    }
+
+    /// The budget can't be read and the gateway fails closed: refused
+    /// as unavailable. (The disconnected client fails every command.)
+    #[tokio::test]
+    async fn an_unreadable_budget_refuses_when_failing_closed() {
+        let result = check_budget::<TestSurface>(
+            make_raw(Uuid::new_v4()),
+            &[one_cap()],
+            &dummy_redis(),
+            true,
+            &dummy_audit(),
+        )
+        .await;
+        assert_eq!(result.err(), Some(TestResponse::BudgetUnavailable));
+    }
+
+    /// The budget can't be read and the gateway fails open: the request
+    /// goes on.
+    #[tokio::test]
+    async fn an_unreadable_budget_passes_when_failing_open() {
+        let result = check_budget::<TestSurface>(
+            make_raw(Uuid::new_v4()),
+            &[one_cap()],
+            &dummy_redis(),
+            false,
+            &dummy_audit(),
+        )
+        .await;
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -1777,8 +1777,8 @@
     "xffDepthHint": "从选定方向起的第 N 个（从 1 开始）",
     "rateLimiter": {
       "title": "限速引擎",
-      "failClosed": "Redis 故障时拒绝请求",
-      "failClosedHint": "默认为 fail-open:Redis 抖动时请求照常放行,并增加 gateway_rate_limiter_fail_open_total 指标。打开后,引擎无法检查的请求会返回 429 (rate_limiter_unavailable),并增加 gateway_rate_limiter_fail_closed_total。如果漏算比拒绝流量更糟,就把它打开。"
+      "failClosed": "限额无法检查时拒绝请求",
+      "failClosedHint": "默认为 fail-open：请求的限额无法检查时（Redis 不可达，或加载限额时数据库出错），请求照常放行并记录警告（gateway_rate_limiter_fail_open_total 等指标）。打开后，这类请求会返回 429（rate_limiter_unavailable、budget_unavailable 或 limits_unavailable），并计入 gateway_rate_limiter_fail_closed_total 等指标。如果漏算比拒绝流量更糟，就把它打开。"
     }
   },
   "logs": {
