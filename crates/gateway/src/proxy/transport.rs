@@ -217,17 +217,33 @@ pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
     }
 }
 
-/// Turn a non-2xx upstream answer into the error the caller sees.
+/// The error an upstream status other than 2xx becomes — for an answer
+/// (see [`check_status`]) and for an error the upstream reports partway
+/// through a stream with the same meaning.
 ///
-/// 429 keeps the upstream's `Retry-After` so a client's retry policy does
-/// not hammer the same quota window. 401/403 become an auth error: the
-/// gateway's own credential for this upstream was refused, which is
-/// about the route, not the caller.
+/// 429 keeps the upstream's `Retry-After`, if it gave one, so a client's
+/// retry policy does not hammer the same quota window. 401/403 become an
+/// auth error: the gateway's own credential for this upstream was
+/// refused, which is about the route, not the caller.
 ///
 /// Every other status is kept as it is, in `ProviderHttpError`. Whether
 /// it is the upstream failing (5xx, 408) or the upstream refusing this
 /// request (any other 4xx) decides failover and the circuit breaker —
 /// see `routing::is_upstream_failure`.
+pub(crate) fn status_error(
+    status: u16,
+    retry_after_secs: Option<u32>,
+    message: String,
+) -> GatewayError {
+    match status {
+        429 => GatewayError::UpstreamRateLimited { retry_after_secs },
+        401 | 403 => GatewayError::UpstreamAuthError { status, message },
+        _ => GatewayError::ProviderHttpError { status, message },
+    }
+}
+
+/// Turn a non-2xx upstream answer into the error the caller sees (see
+/// [`status_error`]).
 ///
 /// The upstream's body goes to the caller **truncated**: error bodies
 /// have carried stack traces, AWS account ids and full debug strings,
@@ -245,7 +261,7 @@ async fn check_status(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(crate::error::parse_retry_after_seconds);
-        return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
+        return Err(status_error(429, retry_after_secs, String::new()));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -261,12 +277,11 @@ async fn check_status(
         } else {
             body
         };
-        let (status, message) = (status.as_u16(), format!("{label}: {shown}"));
-        return Err(if status == 401 || status == 403 {
-            GatewayError::UpstreamAuthError { status, message }
-        } else {
-            GatewayError::ProviderHttpError { status, message }
-        });
+        return Err(status_error(
+            status.as_u16(),
+            None,
+            format!("{label}: {shown}"),
+        ));
     }
     Ok(resp)
 }

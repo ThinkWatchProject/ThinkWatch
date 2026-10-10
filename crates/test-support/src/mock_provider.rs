@@ -117,6 +117,81 @@ impl MockProvider {
     }
 }
 
+/// The events of a streamed Responses answer, "ok". It ends in
+/// `response.completed` with usage of 23 input and 5 output tokens, or,
+/// when `failed`, in `response.failed` with the error "The model crashed."
+pub fn responses_answer(model: &str, failed: bool) -> String {
+    let event = |kind: &str, mut v: Value| {
+        v["type"] = json!(kind);
+        format!("event: {kind}\ndata: {v}\n\n")
+    };
+    let last = if failed {
+        event(
+            "response.failed",
+            json!({"response": {
+                "id": "resp_1", "model": model, "status": "failed",
+                "error": {"code": "server_error", "message": "The model crashed."}
+            }}),
+        )
+    } else {
+        event(
+            "response.completed",
+            json!({"response": {
+                "id": "resp_1", "model": model, "status": "completed",
+                "output": [{"type": "message", "id": "msg_1", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": {"input_tokens": 23, "output_tokens": 5, "total_tokens": 28}
+            }}),
+        )
+    };
+    [
+        event(
+            "response.created",
+            json!({"response": {"id": "resp_1", "model": model, "status": "in_progress"}}),
+        ),
+        event(
+            "response.output_text.delta",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "ok"}),
+        ),
+        last,
+    ]
+    .concat()
+}
+
+/// An upstream that answers every `POST {path}` with `frames` as an event
+/// stream, then keeps the stream open for `linger` before it ends it — as
+/// the ChatGPT Codex backend often does after its last event. Returns its
+/// base URL.
+///
+/// wiremock sends a body in one piece and ends it, so this is a server
+/// of its own.
+pub async fn sse_upstream_lingering(
+    path: &str,
+    frames: String,
+    linger: std::time::Duration,
+) -> String {
+    let answer = axum::routing::post(move || {
+        let frames = frames.clone();
+        async move {
+            let body = async_stream::stream! {
+                yield Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frames));
+                tokio::time::sleep(linger).await;
+            };
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(body))
+                .unwrap()
+        }
+    });
+    let app = axum::Router::new().route(path, answer);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 fn openai_sse_chunks(model: &str) -> Vec<u8> {
     let chunk = |delta: Value| {
         format!(
