@@ -10,6 +10,7 @@
 
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
+use think_watch_test_support::mock_provider::{responses_answer, sse_upstream_lingering};
 use think_watch_test_support::prelude::*;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -253,4 +254,63 @@ async fn a_turn_continues_from_the_connections_last_response() {
     assert_eq!(said[1].0, "assistant", "{body}");
     assert!(said[1].1.contains("hi there"), "{body}");
     assert_eq!(said[2], ("user", "two".to_string()), "{body}");
+}
+
+/// An upstream can keep its stream open a while after `response.completed`,
+/// as the ChatGPT Codex backend's often does. The turn is over at that
+/// event: the next one on the connection does not wait for the upstream's
+/// stream to end, and each is billed and logged as finished.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_turn_ends_at_its_last_event_while_the_upstream_stream_stays_open() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let upstream = sse_upstream_lingering(
+        "/v1/responses",
+        responses_answer("ws-linger", false),
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let (user_id, key) = seed(&app, &upstream, "ws-linger").await;
+    sqlx::query(
+        "UPDATE model_routes SET upstream_protocol = 'openai_responses' WHERE model_id = $1",
+    )
+    .bind("ws-linger")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+
+    let mut socket = connect(&app, &key).await;
+    for _ in 0..2 {
+        socket.send(create("ws-linger", "hi")).await.unwrap();
+        // `turn` gives each event 10s: a turn that waited for the previous
+        // one's stream to end would get nothing for 30.
+        let events = turn(&mut socket).await;
+        assert_eq!(
+            events.last().unwrap()["type"],
+            "response.completed",
+            "{events:?}"
+        );
+        assert_eq!(text_of(&events), "ok", "{events:?}");
+    }
+    socket.close(None).await.unwrap();
+
+    let ch = app.state.clickhouse.as_ref().expect("CH wired up");
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        rows = ch
+            .query(
+                "SELECT ifNull(input_tokens, -1), ifNull(output_tokens, -1), ifNull(status_code, -1) \
+                   FROM gateway_logs WHERE user_id = ?",
+            )
+            .bind(user_id.to_string())
+            .fetch_all::<(i64, i64, i64)>()
+            .await
+            .expect("CH query");
+        if rows.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(rows, vec![(23, 5, 200), (23, 5, 200)], "gateway_logs rows");
 }

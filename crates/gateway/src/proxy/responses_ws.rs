@@ -226,7 +226,13 @@ fn continue_from(
 /// Send the turn's SSE to the client, a frame per event, and hand back the
 /// `response` of its `response.completed`, if it got that far.
 ///
-/// Dropping the response body cancels the turn: the pipeline's tail then
+/// The turn is over at its last event (`response.completed`,
+/// `response.incomplete` or `response.failed`), not when the upstream's
+/// stream ends: an upstream can keep its stream open a while after that
+/// event, and the client's next turn does not wait for it. The pipeline's
+/// tail records such a turn as finished.
+///
+/// Dropping the response body before that cancels the turn: the tail then
 /// records it as cancelled by the client, as for an HTTP stream.
 async fn relay(
     resp: axum::response::Response,
@@ -240,7 +246,7 @@ async fn relay(
     loop {
         tokio::select! {
             chunk = body.next() => {
-                let (frames, end) = match chunk {
+                let (frames, mut end) = match chunk {
                     Some(Ok(bytes)) => (decoder.feed(&bytes), false),
                     _ => (decoder.flush(), true),
                 };
@@ -253,6 +259,7 @@ async fn relay(
                     if event.get("type").and_then(Value::as_str) == Some("response.completed") {
                         completed = event.get_mut("response").map(Value::take);
                     }
+                    end |= tw_dialect::convert::ends_answer(Dialect::Responses, &f);
                     if tx.send(Message::Text(f.data.into())).await.is_err() {
                         return (Turn::Gone, None);
                     }

@@ -11,6 +11,133 @@ target.
 
 ## [Unreleased]
 
+## [3.3.1] — 2026-10-10
+
+Streams are logged as they ended. A caller that hangs up once it has read
+the whole answer, as Codex does, finished the request; an error the
+upstream or Bedrock reports partway through a stream is logged with the
+status the same error has as an answer, and counts against the route only
+when that answer would; a Responses WebSocket turn ends at its last event.
+The thinkwatch-core crates move from v0.67.1 to v0.68.0.
+
+### Read before upgrading
+
+- **Request logs and error rates change for streams.** Codex streams that
+  were logged as cancelled (`499`) are logged as finished (`200`) and
+  billed on the reported usage. Streams the upstream failed partway are
+  logged with a `4xx` or `5xx` `status_code` instead of `200`, so error
+  rates that count `status_code` ≥ 400 include them; `client_status`
+  keeps the `200` the caller received. No configuration, database schema,
+  API or Helm value changes.
+
+### Fixed
+
+- **A caller that hangs up on the answer's last event finished the
+  request.** Codex closes the connection as soon as it has read
+  `response.completed`, without waiting for the stream to end, and an
+  upstream can end its stream a while after that event: the ChatGPT Codex
+  backend often does, and so can a relay in front of it. A stream forwarded
+  in its own format whose caller left in that window was logged as
+  cancelled (`499`, `stream_outcome: client_cancelled`), though the caller
+  had read the whole answer. Once the answer's last event has gone out —
+  Responses `response.completed`, `response.incomplete` or
+  `response.failed`, Anthropic `message_stop`, Chat `[DONE]` — a caller
+  that leaves is logged as if the stream had run to its end: `200`, billed
+  on the usage the upstream reported, or, after `response.failed`, the
+  upstream's failure (see the next entry). Converted streams were not
+  affected: their last event is written once the upstream's stream has
+  ended.
+- **An error the upstream reports partway through a stream fails the
+  request.** An upstream that has answered `200` can still report an error
+  in the stream: an Anthropic `error` event (an `overloaded_error` arrives
+  this way), Responses `response.failed`, an `error` in a Chat or Gemini
+  chunk. When the stream then ended normally, the request was logged as a
+  success (`200`) and counted as one by the route's circuit breaker. It is
+  now logged as the error it would have been as an answer, with what the
+  upstream said: `stream_outcome` `upstream_error`, `client_status` `200`
+  (the status the caller's response went out with), and the `status_code`
+  and `error_type` that answer would have had, read off the error's own
+  type or code. A rate limit or a spent quota is `429`
+  (`UpstreamRateLimited`); a context too long or another invalid request
+  `400`, an unknown model `404`, an overload `529` or `503`
+  (`ProviderHttpError`); an error that names no status `502`
+  (`ProviderError`). The route's health and circuit breaker treat it as
+  they treat that answer: a `5xx`, a `429` or a refused credential counts
+  against the route, so a route whose streams keep failing this way opens
+  its breaker, while a request the upstream refuses, such as one past the
+  model's context window, does not. This holds for streams forwarded as
+  sent and converted ones, and for a caller that leaves after the error.
+  Billing is unchanged: such a request is billed on the usage the upstream
+  reported.
+  - Error rates that count `status_code` ≥ 400 now include these requests.
+  - The rows of other streams that failed after the response went out as
+    `200` — broken off, cut by tool-call inspection, refused by the
+    upstream before its first byte — carry `client_status` too.
+- **An exception Bedrock reports partway through a stream is logged as
+  the same exception as an answer.** Bedrock reports a failure in a
+  stream it has started as an exception event: `throttlingException` when
+  it throttles partway through, `validationException`,
+  `internalServerException`, `serviceUnavailableException` and others.
+  Each was logged as the stream breaking off in transit (`502`,
+  `error_type` `transport`) and counted against the route's circuit
+  breaker. Each is now logged with the status the desktop gateway gives
+  that exception and with what Bedrock said: throttling `429`
+  (`UpstreamRateLimited`), an invalid request `400`, a model timeout
+  `504`, the service unavailable `503`, any other exception `500`
+  (`ProviderHttpError`). Access denied is logged as a refused credential
+  (`UpstreamAuthError`), without Bedrock's words, which name the IAM
+  principal, as for a `403` answer. The route's health and circuit breaker treat it
+  as they treat that answer (see the previous entry), so a request Bedrock
+  refuses as invalid no longer counts against the route. What the caller
+  receives is unchanged, and a damaged event-stream frame is still logged
+  as `transport` `502`.
+- **A Responses WebSocket turn ends at its last event.** On
+  `GET /v1/responses` over a WebSocket, a turn lasted until the upstream's
+  stream ended, and the connection took the next turn only then, so an
+  upstream that keeps its stream open after `response.completed` held up
+  every following turn by that long. The next turn now starts at once.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.67.1 → v0.68.0. tw-dialect changes what the gateway does, tw-guard
+  only adds to its API, and tw-bedrock and tw-breaker do not change:
+  - **Long usage objects are read** (tw-dialect). The usage reader skipped
+    a usage object longer than 8 KB. The ChatGPT Codex backend's usage
+    carries an `attribution` breakdown that grows with the conversation, so
+    behind an upstream that passes it on, a longer Codex session's requests
+    were billed on an estimate (`usage_estimated`) instead of the reported
+    counts. Usage objects up to 1 MiB are now read. One cut across chunks
+    is read on from where it stopped, nothing nested inside a usage object
+    is counted as a second usage, and a stream that arrives in chunks
+    shorter than the `"usage"` key no longer loses it.
+  - **A `null` error in a stream chunk is not an error** (tw-dialect).
+    Some OpenAI-compatible relays and Gemini-format upstreams write
+    `"error": null` in every streamed chunk, and the Chat and Gemini stream
+    readers took each such chunk for an error the upstream reported. A
+    stream converted to another format ended in an error and lost its
+    text, and for such a stream forwarded as sent, no assembled answer was
+    cached or captured as the response body. A Gemini caller's tool result
+    carrying `"error": null` and no `output` went to an upstream of
+    another format as a failed one. A `null` error is now ignored, and a
+    Chat chunk's error without a message reaches the caller of a converted
+    stream as a fixed sentence instead of the whole chunk, which could hold
+    answer text. The gateway's own check for an error partway through a
+    stream (see Fixed) ignores a `null` error as well.
+  - `tw_dialect::convert::ends_answer` recognises an answer's last event.
+    The gateway uses it to tell a caller that left after the whole answer
+    from one that left partway, and to end a WebSocket turn (see Fixed).
+  - tw-guard adds, for the desktop gateway's security log, the `locate`
+    module, `content::places`, `content::places_text` and `RulePlaces`,
+    `content::Rule::draw`, `Ledger::placeholder_of`,
+    `RuleSet::custom_pattern`, `tools::Rule::find_all`, and the fields
+    `pattern`, `arguments`, `capped`, `places` and `path` on
+    `tools::wall::Verdict`. Secret redaction, the content filter and
+    tool-call inspection find, replace, refuse and cut exactly what they
+    did before. `Verdict::arguments` is a flagged tool call's arguments
+    with redacted values restored; the gateway does not log it, and its
+    tool-call audit entries keep the fields they had.
+
 ## [3.3.0] — 2026-10-09
 
 Requests converted for Claude now use prompt caching, and Codex works
@@ -1569,7 +1696,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.3.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.3.1...HEAD
+[3.3.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.1
 [3.3.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.0
 [3.2.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.1
 [3.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.0
