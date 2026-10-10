@@ -59,7 +59,7 @@ jobs:
                       /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
           df -h /
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: stable
       # Save only on pushes (dev, main). A PR can read its own caches, its
@@ -69,7 +69,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' }}
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cargo-nextest
 
@@ -123,7 +123,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       clickhouse:
-        image: clickhouse/clickhouse-server:26.8-alpine@sha256:652d6997949183f3493f8ff601149e3df4d476be829f0d02b9861454d040c410
+        image: clickhouse/clickhouse-server:26.8-alpine@sha256:11f32c76f576b5fd993cbcfffe4349caac6a67c2e58bb846f4da421889573a69
         env:
           CLICKHOUSE_USER: default
           CLICKHOUSE_PASSWORD: chtest
@@ -160,14 +160,14 @@ jobs:
                       /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
           df -h /
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # See the `rust` job.
           save-if: ${{ github.event_name == 'push' }}
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cargo-nextest
 
@@ -189,8 +189,8 @@ jobs:
         with:
           # Pinned — matches `packageManager` in web/package.json.
           # Bump together with that field, never alone.
-          version: 12.9.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          version: 12.11.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -274,7 +274,7 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: server-digest-${{ strategy.job-index }}
           path: ${{ runner.temp }}/digests
@@ -294,7 +294,7 @@ jobs:
         run: echo "IMAGE_PREFIX=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: server-digest-*
           merge-multiple: true
