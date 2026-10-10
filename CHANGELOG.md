@@ -63,12 +63,13 @@ target.
 ### Changed
 
 - thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
-  v0.67.1 → vX.Y.Z. Only tw-dialect changes:
-  - **Long usage objects are read.** The usage reader skipped a usage
-    object longer than 8 KB. The ChatGPT Codex backend's usage carries an
-    `attribution` breakdown that grows with the conversation, so behind an
-    upstream that passes it on, a longer Codex session's requests were
-    billed on an estimate (`usage_estimated`) instead of the reported
+  v0.67.1 → v0.68.0. tw-dialect changes what the gateway does, tw-guard
+  only adds to its API, and tw-bedrock and tw-breaker do not change:
+  - **Long usage objects are read** (tw-dialect). The usage reader skipped
+    a usage object longer than 8 KB. The ChatGPT Codex backend's usage
+    carries an `attribution` breakdown that grows with the conversation, so
+    behind an upstream that passes it on, a longer Codex session's requests
+    were billed on an estimate (`usage_estimated`) instead of the reported
     counts. Usage objects up to 1 MiB are now read. One cut across chunks
     is read on from where it stopped, nothing nested inside a usage object
     is counted as a second usage, and a stream that arrives in chunks
@@ -76,6 +77,16 @@ target.
   - `tw_dialect::convert::ends_answer` recognises an answer's last event.
     The gateway uses it to tell a caller that left after the whole answer
     from one that left partway, and to end a WebSocket turn (see Fixed).
+  - tw-guard adds, for the desktop gateway's security log, the `locate`
+    module, `content::places`, `content::places_text` and `RulePlaces`,
+    `content::Rule::draw`, `Ledger::placeholder_of`,
+    `RuleSet::custom_pattern`, `tools::Rule::find_all`, and the fields
+    `pattern`, `arguments`, `capped`, `places` and `path` on
+    `tools::wall::Verdict`. Secret redaction, the content filter and
+    tool-call inspection find, replace, refuse and cut exactly what they
+    did before. `Verdict::arguments` is a flagged tool call's arguments
+    with redacted values restored; the gateway does not log it, and its
+    tool-call audit entries keep the fields they had.
 
 ## [3.3.0] — 2026-10-09
 
