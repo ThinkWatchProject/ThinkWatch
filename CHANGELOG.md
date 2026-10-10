@@ -11,11 +11,16 @@ target.
 
 ## [Unreleased]
 
+## [3.5.0] — 2026-10-11
+
 Limits hold where they used to leak: route caps are enforced, a limits
 store that cannot be read follows `security.rate_limit_fail_closed`, a
 refused model or tool no longer spends a request, a team-scoped role no
 longer limits the gateway it does not open, and cached answers count their
-tokens. The legacy monthly token quota is gone.
+tokens. A client can ask the gateway what room its API key has left
+(`GET /v1/usage`), and an API key's own limits are edited in the console.
+The legacy monthly token quota is gone, and the thinkwatch-core crates move
+from v0.69.0 to v0.70.0.
 
 ### Read before upgrading
 
@@ -26,9 +31,11 @@ tokens. The legacy monthly token quota is gone.
   response). A route at either cap is skipped and the model's next route
   serves the request; when every route left is at its cap, the request gets
   429 with `Retry-After`, labelled `route:requests/1m` or
-  `route:tokens/1m`. Review the caps already set on your routes: a cap that
-  did nothing until now takes effect on upgrade. Routes with a cap write new
-  Redis keys, `ratelimit:{route:<route_id>}:ai_gateway:route:…`.
+  `route:tokens/1m`. Such a request has passed the caller's own limits and
+  counts on them, as a request every upstream fails does. Review the caps
+  already set on your routes: a cap that did nothing until now takes effect
+  on upgrade. Routes with a cap write new Redis keys,
+  `ratelimit:{route:<route_id>}:ai_gateway:route:…`.
 - **A limits store that cannot be read follows
   `security.rate_limit_fail_closed`.** When the database failed while a
   request's rate limits and budgets were being loaded, the request ran with
@@ -37,9 +44,13 @@ tokens. The legacy monthly token quota is gone.
   in the rate limiter always has, and so do the route caps: off (the
   default), the request goes on and a warning with the error is logged
   (`gateway_limits_load_fail_open_total`,
-  `lifecycle_budget_fail_open_total`); on, the request is refused with 429,
-  `Retry-After: 30`, labelled `limits_unavailable`, `budget_unavailable` or
-  `rate_limiter_unavailable`.
+  `lifecycle_budget_fail_open_total`); on, the request is refused, labelled
+  `limits_unavailable`, `budget_unavailable` or `rate_limiter_unavailable`
+  (on the AI gateway, 429 with `Retry-After: 30`). With the setting off, a
+  Redis error used to fail every AI-gateway request anyway, with 502
+  `Quota exceeded`, at the legacy quota check (see Changed); such a request
+  now goes on, as the setting says. Turn the setting on to keep refusing
+  requests while Redis is down.
 - **A role granted at team scope no longer limits gateway requests.** Such
   a grant administers that team and has never opened a model or an MCP tool
   at the gateways, but its rate limits and budgets were applied to every
@@ -107,8 +118,9 @@ tokens. The legacy monthly token quota is gone.
   `weekly`, `monthly`, with its end in `resets_at`, UTC). Limits on the MCP
   gateway are not listed. `expires_at` is the key's expiry or the end of
   its rotation grace period, whichever comes first. A key a model request
-  would refuse gets the same `401` or `403`, and `503` means the counters
-  could not be read. Calling it charges no limit, writes no request log row
+  would refuse gets the same `401` or `403`, and `503` means the key's
+  limits or their counters could not be read, whichever way
+  `security.rate_limit_fail_closed` is set. Calling it charges no limit, writes no request log row
   and is not a use of the key: `last_used_at` stays as it was, so polling
   does not keep an idle key from its inactivity timeout. Whoever holds a key
   without limits of its own sees its owner's totals and limits; a key handed
@@ -150,6 +162,8 @@ tokens. The legacy monthly token quota is gone.
   instead.
 - The `security.rate_limit_fail_closed` hint in Settings names everything
   the setting now covers.
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.69.0 → v0.70.0. The four crates do not change beyond their version.
 
 
 ## [3.4.0] — 2026-10-11
@@ -1909,7 +1923,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.4.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.5.0...HEAD
+[3.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.5.0
 [3.4.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.4.0
 [3.3.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.1
 [3.3.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.0

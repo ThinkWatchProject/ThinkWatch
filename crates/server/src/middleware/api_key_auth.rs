@@ -292,7 +292,9 @@ pub fn require_api_key(
 /// about a key is not a use of it. `last_used_at`, which the inactivity
 /// cutoff reads, stays as it was — a client polling its usage does not
 /// keep an otherwise idle key alive — and a client that leaves early
-/// leaves no `gateway_logs` row.
+/// leaves no `gateway_logs` row. Limits that can't be loaded make the
+/// read a 503 whatever `security.rate_limit_fail_closed` says: failing
+/// open lets a call run without them, but a read would report none.
 pub fn require_api_key_to_read(
     surface: &'static str,
 ) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {
@@ -472,6 +474,21 @@ fn authenticate(
                         "API key owner holds no role granting gateway use"
                     );
                     return Ok(gateway_use_refused(surface, request.uri().path()));
+                }
+
+                // A read about the key reports the limits that hold its
+                // requests. Without them it has nothing true to report —
+                // an empty list would say the key has none — so it is
+                // unavailable, whatever the setting below lets a call do.
+                if key_use == KeyUse::Read
+                    && let Err(e) = &loaded_limits
+                {
+                    tracing::warn!(
+                        api_key_id = %row.id,
+                        error = %e,
+                        "loading the key's limits failed; its usage can't be reported"
+                    );
+                    return Ok(crate::handlers::key_usage::unavailable_response());
                 }
 
                 // Limits that could not be loaded are not "no limits":

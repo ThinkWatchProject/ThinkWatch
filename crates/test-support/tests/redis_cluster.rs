@@ -258,6 +258,18 @@ async fn the_gateway_enforces_limits_on_a_cluster() {
         .json()
         .unwrap();
     assert_eq!(usage["rules"][0]["current"], 2, "{usage}");
+
+    // The key's and its owner's day and month usage: one script over four
+    // hashes (the owner's hash tag), read back by `GET /v1/usage`. The
+    // refused request counted nothing.
+    let reported: Json = gw.get("/v1/usage").await.unwrap().json().unwrap();
+    assert_eq!(reported["scope"], "key", "{reported}");
+    assert_eq!(reported["usage"]["requests_today"], 2, "{reported}");
+    assert_eq!(reported["usage"]["requests_month"], 2, "{reported}");
+    assert!(
+        reported["usage"]["tokens_today"].as_i64().unwrap() > 0,
+        "the key's tokens were counted: {reported}"
+    );
 }
 
 #[ignore = "integration test — needs TEST_REDIS_CLUSTER_URL"]
