@@ -10,7 +10,7 @@ use think_watch_common::limits::{RequestLimits, Surface};
 /// user's counters, and the calling key's own limits on its lineage's
 /// counters — both apply. A request with no user (never past the auth
 /// middleware today) is held to nothing.
-pub(super) fn limits_for_ai_gateway(identity: &GatewayRequestIdentity) -> RequestLimits {
+pub fn limits_for_ai_gateway(identity: &GatewayRequestIdentity) -> RequestLimits {
     let parse = |s: &Option<String>| s.as_deref().and_then(|s| Uuid::parse_str(s).ok());
     let Some(user_id) = parse(&identity.user_id) else {
         return RequestLimits::default();

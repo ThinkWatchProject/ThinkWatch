@@ -872,3 +872,88 @@ async fn cached_input_is_billed_at_the_cache_prices() {
     // 0.000002 × (100 + 5 000 + 2 500) + 0.0004
     assert_eq!(second, Decimal::from_str("0.0156").unwrap());
 }
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_reports_the_cost_this_month_from_the_request_log() {
+    // Two keys of one owner. Key b has a limit of its own, so it answers
+    // with its own cost; key a has none, so it answers with the owner's,
+    // over both keys.
+    let app = TestApp::spawn_with_clickhouse().await;
+    let (key_a, user_id) = seed_runtime(&app).await;
+    let key_b = fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("ck-key-b"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key_b.row.lineage_id,
+        "ai_gateway",
+        "requests",
+        60,
+        100,
+    )
+    .await
+    .unwrap();
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse wired up");
+
+    let gw_a = app.gateway_client();
+    gw_a.set_bearer(&key_a);
+    let gw_b = app.gateway_client();
+    gw_b.set_bearer(&key_b.plaintext);
+    for (gw, n) in [(&gw_a, 1), (&gw_b, 2), (&gw_b, 3)] {
+        gw.post(
+            "/v1/chat/completions",
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": format!("x{n}")}]}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+    }
+    let (one_call, _, _) = wait_for_gateway_log(ch, user_id).await;
+    let one_call: f64 = one_call.to_string().parse().unwrap();
+    // Wait until all three rows have landed.
+    for _ in 0..200 {
+        let n: u64 = ch
+            .query("SELECT count() FROM gateway_logs WHERE user_id = ? AND cost_usd IS NOT NULL")
+            .bind(user_id.to_string())
+            .fetch_one()
+            .await
+            .unwrap();
+        if n == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let usage = |gw: &TestClient| {
+        let gw = gw.clone();
+        async move {
+            let r = gw.get("/v1/usage").await.unwrap();
+            r.assert_ok();
+            let v: Value = r.json().unwrap();
+            let cost = v["usage"]["cost_usd_month"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("cost_usd_month is a number: {v:#}"));
+            (v["scope"].as_str().unwrap().to_string(), cost)
+        }
+    };
+    let ((scope_a, a), (scope_b, b)) = (usage(&gw_a).await, usage(&gw_b).await);
+    assert_eq!((scope_a.as_str(), scope_b.as_str()), ("user", "key"));
+    assert!(one_call > 0.0);
+    assert!(
+        (a - 3.0 * one_call).abs() < 1e-9,
+        "a={a} one call={one_call}"
+    );
+    assert!(
+        (b - 2.0 * one_call).abs() < 1e-9,
+        "b={b} one call={one_call}"
+    );
+}

@@ -119,6 +119,9 @@ pub(crate) struct ChatPickedRoute {
     pub upstream_model: Option<String>,
     /// Used by `finalize_health` inside `record_outcome`.
     pub sel_record: SelectionRecord,
+    /// The route's capacity caps: its token cap counts the answer's
+    /// tokens in `record_usage`.
+    pub caps: crate::route_caps::RouteCaps,
 }
 
 /// Everything the post-invoke hooks read. Built once before the upstream
@@ -928,6 +931,7 @@ impl Surface for ChatCompletionSurface {
             deps.request.mapped_model.clone(),
             priced(&extract_usage(&invoked.view)),
             &deps.preflight.limits,
+            Some(&deps.route.caps),
             deps.request.identity.user_id.clone(),
             deps.request.identity.user_email.clone(),
             deps.request.identity.api_key_id.clone(),

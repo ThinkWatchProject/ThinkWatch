@@ -11,6 +11,161 @@ target.
 
 ## [Unreleased]
 
+## [3.5.0] — 2026-10-11
+
+Limits hold where they used to leak: route caps are enforced, a limits
+store that cannot be read follows `security.rate_limit_fail_closed`, a
+refused model or tool no longer spends a request, a team-scoped role no
+longer limits the gateway it does not open, and cached answers count their
+tokens. A client can ask the gateway what room its API key has left
+(`GET /v1/usage`), and an API key's own limits are edited in the console.
+The legacy monthly token quota is gone, and the thinkwatch-core crates move
+from v0.69.0 to v0.70.0.
+
+### Read before upgrading
+
+- **Route caps are enforced.** A route's RPM cap and TPM cap
+  (`model_routes.rpm_cap` / `tpm_cap`, set in the route editor) were saved
+  but never applied. They now are, per route over a sliding minute, the TPM
+  cap in weighted tokens like every other token limit (counted after the
+  response). A route at either cap is skipped and the model's next route
+  serves the request; when every route left is at its cap, the request gets
+  429 with `Retry-After`, labelled `route:requests/1m` or
+  `route:tokens/1m`. Such a request has passed the caller's own limits and
+  counts on them, as a request every upstream fails does. Review the caps
+  already set on your routes: a cap that did nothing until now takes effect
+  on upgrade. Routes with a cap write new Redis keys,
+  `ratelimit:{route:<route_id>}:ai_gateway:route:…`.
+- **A limits store that cannot be read follows
+  `security.rate_limit_fail_closed`.** When the database failed while a
+  request's rate limits and budgets were being loaded, the request ran with
+  no limits at all; when Redis failed while a budget was being read, the
+  budget read as unspent. Both now follow the setting, as a Redis failure
+  in the rate limiter always has, and so do the route caps: off (the
+  default), the request goes on and a warning with the error is logged
+  (`gateway_limits_load_fail_open_total`,
+  `lifecycle_budget_fail_open_total`); on, the request is refused, labelled
+  `limits_unavailable`, `budget_unavailable` or `rate_limiter_unavailable`
+  (on the AI gateway, 429 with `Retry-After: 30`). With the setting off, a
+  Redis error used to fail every AI-gateway request anyway, with 502
+  `Quota exceeded`, at the legacy quota check (see Changed); such a request
+  now goes on, as the setting says. Turn the setting on to keep refusing
+  requests while Redis is down.
+- **A role granted at team scope no longer limits gateway requests.** Such
+  a grant administers that team and has never opened a model or an MCP tool
+  at the gateways, but its rate limits and budgets were applied to every
+  gateway request of the user who held it. A role's limits now apply
+  exactly where its gateway grant does: roles assigned globally, and roles
+  attached to a team the user is a member of. A user who held a limiting
+  role only at team scope is no longer held to its limits; assign the role
+  globally, attach it to the team, or set a user limit if they were meant.
+- **Answers from the response cache count their tokens.** A cache hit
+  counted toward request limits but added no tokens to token limits and
+  budgets, so repeating a cached request got round them. It now adds the
+  tokens the cached answer records, weighted like any answer (all of its
+  input as plain input). The cost a cache hit reports stays 0. Callers that
+  lean on the cache reach their token limits and budgets sooner.
+- **Each API key and each user get day and month usage counters in Redis.**
+  An AI-gateway request made with a key now also counts on the key's
+  `usage:{user:<owner id>}:api_key_lineage:<lineage id>:daily:<date>` and
+  `…:monthly:<month>` and on its owner's
+  `usage:{user:<owner id>}:user:<owner id>:daily:<date>` and
+  `…:monthly:<month>`, hashes that expire two periods after their last write.
+  That is one more Redis script per request once it passes the rate limits,
+  and one when its tokens are counted, after the call or when it is answered
+  from the response cache. The counters start empty, so the `usage` that
+  `GET /v1/usage` reports counts from the upgrade on. No setting, database
+  schema or Helm value changes.
+
+### Added
+
+- **`GET /v1/usage` tells a client what room its API key has left.** Called
+  on the gateway port with a gateway API key, as a model request is, it
+  answers about one of two subjects, named in `scope`:
+
+  - `"key"` when the key has limits of its own on the AI gateway: `limits`
+    lists only the key's limits, each with `used` counted for the key, and
+    `usage` is the key's own (across its rotations).
+  - `"user"` when it has none: `limits` lists its owner's effective limits
+    (roles, including those a team grants, merged most-restrictive, then
+    the user's overrides), each with `used` counted for everything the
+    owner does, and `usage` is the owner's total over all of their keys.
+    With no limits on the owner either, `limits` is empty.
+
+  ```json
+  {
+    "scope": "key",
+    "usage": {"requests_today": 12, "tokens_today": 48210,
+              "requests_month": 340, "tokens_month": 1290455,
+              "cost_usd_month": 3.82},
+    "limits": [
+      {"scope": "key", "kind": "tokens", "window": "daily", "window_secs": null,
+       "limit": 100000, "used": 48210, "resets_at": "2026-10-12T00:00:00Z"},
+      {"scope": "key", "kind": "requests", "window": "1m", "window_secs": 60,
+       "limit": 60, "used": 4, "resets_at": null}
+    ],
+    "expires_at": "2026-12-31T00:00:00Z"
+  }
+  ```
+
+  `usage` holds the requests the rate limits let through and the weighted
+  tokens limits count, answers from the response cache included, for the
+  UTC day and month, and the cost this month from the request log (`null`
+  without ClickHouse). Every limit's `used` is read from the counter that
+  refuses requests, and the one with the least left comes first. `window`
+  is a rate limit's sliding window (`1m`, `5m`, `1h`, `5h`, `1d`, `1w`, with
+  its length in `window_secs`) or a budget's calendar period (`daily`,
+  `weekly`, `monthly`, with its end in `resets_at`, UTC). Limits on the MCP
+  gateway are not listed. `expires_at` is the key's expiry or the end of
+  its rotation grace period, whichever comes first. A key a model request
+  would refuse gets the same `401` or `403`, and `503` means the key's
+  limits or their counters could not be read, whichever way
+  `security.rate_limit_fail_closed` is set. Calling it charges no limit, writes no request log row
+  and is not a use of the key: `last_used_at` stays as it was, so polling
+  does not keep an idle key from its inactivity timeout. Whoever holds a key
+  without limits of its own sees its owner's totals and limits; a key handed
+  to someone else should carry limits of its own. The console's
+  Configuration Guide lists the endpoint with the other gateway endpoints.
+- **An API key's own limits are edited in the console.** The key's edit
+  dialog has a Limits tab: rate limits (requests or weighted tokens over
+  1m, 5m, 1h, 5h, 1d or 1w) and budgets (daily, weekly or monthly weighted
+  tokens), each with what it has used, added, changed and removed through
+  the existing limits endpoints. They follow the key across rotations.
+  Reading needs `rate_limits:read` and changing `rate_limits:write`, in a
+  scope that covers the key, as before; without write access the tab is
+  read-only, and without read access the dialog is unchanged.
+
+### Fixed
+
+- **A request the key may not make no longer spends a request limit.** The
+  rate-limit check, which counts the request, ran before the model check on
+  the AI gateway and before the tool check on the MCP gateway, so a refused
+  model or tool used up the caller's `requests` limits. Access is now
+  checked first (after the budget check, which counts nothing).
+- **Route caps are applied**, **limits and budgets that cannot be read
+  follow the fail-closed setting**, **team-scoped roles no longer limit**
+  and **cached answers count their tokens**: see Read before upgrading.
+- Comments that described a limits cache, a `limits:changed` subscriber and
+  team-level budget caps, none of which exist, now say what happens: limits
+  are read from the database on every request, nothing subscribes to
+  `limits:changed`, and teams carry no limits of their own.
+
+### Changed
+
+- **The legacy monthly token quota is removed.** Every request counted its
+  tokens into `quota:{<user or key>:<model>}:used:<YYYY-MM>` in Redis
+  against a limit nothing could set, so it never refused anything. The
+  gateway no longer reads or writes these keys; existing `quota:*` keys can
+  be deleted. Monthly limits are budgets. Its metric,
+  `gateway_quota_overflow_total`, is gone too: the Grafana overview panel
+  that plotted it shows routes at their cap (`gateway_route_capped_total`)
+  instead.
+- The `security.rate_limit_fail_closed` hint in Settings names everything
+  the setting now covers.
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.69.0 → v0.70.0. The four crates do not change beyond their version.
+
+
 ## [3.4.0] — 2026-10-11
 
 Conversations with reasoning models behind Chat-format upstreams keep their
@@ -1768,7 +1923,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.4.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.5.0...HEAD
+[3.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.5.0
 [3.4.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.4.0
 [3.3.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.1
 [3.3.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.0

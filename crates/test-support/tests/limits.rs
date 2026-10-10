@@ -938,3 +938,528 @@ async fn a_keys_mcp_limits_count_on_the_key_not_on_its_owner() {
     );
     assert_eq!(usage(&con, "api_key", keys[0].row.id).await.0, vec![1]);
 }
+
+// ----------------------------------------------------------------------------
+// GET /v1/usage: what the calling key has used, and every limit binding it
+// ----------------------------------------------------------------------------
+
+/// `GET /v1/usage` with the client's key, as JSON.
+async fn key_usage(gw: &TestClient) -> Json {
+    let r = gw.get("/v1/usage").await.unwrap();
+    r.assert_ok();
+    r.json().unwrap()
+}
+
+/// The `limits` entries as `(scope, kind, window, limit, used)`, in the
+/// order the endpoint gives them.
+fn limit_rows(v: &Json) -> Vec<(String, String, String, i64, i64)> {
+    v["limits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no limits array: {v:#}"))
+        .iter()
+        .map(|l| {
+            (
+                l["scope"].as_str().unwrap().to_string(),
+                l["kind"].as_str().unwrap().to_string(),
+                l["window"].as_str().unwrap().to_string(),
+                l["limit"].as_i64().unwrap(),
+                l["used"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn row(
+    scope: &str,
+    kind: &str,
+    window: &str,
+    limit: i64,
+    used: i64,
+) -> (String, String, String, i64, i64) {
+    (scope.into(), kind.into(), window.into(), limit, used)
+}
+
+/// A role whose statement carries `constraints`, granted to `user_id`
+/// through a new team (`via_team`) or directly at global scope.
+async fn role_with_constraints(app: &TestApp, user_id: Uuid, constraints: Json, via_team: bool) {
+    let doc = json!({
+        "Version": "2024-01-01",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": ["ai_gateway:use"],
+            "Resource": ["*"],
+            "Constraints": constraints,
+        }],
+    });
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO rbac_roles (name, is_system, policy_document) VALUES ($1, FALSE, $2) RETURNING id",
+    )
+    .bind(unique_name("usage-role"))
+    .bind(doc)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    if via_team {
+        let team: Uuid = sqlx::query_scalar(
+            "INSERT INTO teams (name, description) VALUES ($1, '') RETURNING id",
+        )
+        .bind(unique_name("usage-team"))
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO team_role_assignments (team_id, role_id) VALUES ($1, $2)")
+            .bind(team)
+            .bind(role)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2)")
+            .bind(team)
+            .bind(user_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    } else {
+        sqlx::query(
+            "INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by) \
+             VALUES ($1, $2, 'global', $1)",
+        )
+        .bind(user_id)
+        .bind(role)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+}
+
+/// A chat request whose prompt no other request in the test repeats, so
+/// it is never answered from the response cache.
+fn distinct_chat(n: u32) -> Json {
+    json!({"model": "gpt-test", "messages": [{"role": "user", "content": format!("x{n}")}]})
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_of_a_key_with_limits_answers_for_the_key_alone() {
+    // The key has limits of its own; its owner has limits too, one with
+    // less left than any of the key's, and another key of the owner is
+    // used as well. The answer is the key's limits on the key's counters
+    // and the key's own usage, nothing of the owner's.
+    let app = TestApp::spawn().await;
+    let (other_key, user_id) = seed_runtime(&app).await;
+    let key = fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("usage-key"),
+        &["ai_gateway"],
+        None,
+        Some(chrono::Utc::now() + chrono::Duration::days(30)),
+    )
+    .await
+    .unwrap();
+    let lineage = key.row.lineage_id;
+    fixtures::create_budget_cap(&app.db, "api_key_lineage", lineage, "daily", 1_000_000)
+        .await
+        .unwrap();
+    for (metric, window, max) in [("tokens", 18_000, 1_000_000), ("requests", 60, 100)] {
+        fixtures::create_rate_limit_rule(
+            &app.db,
+            "api_key_lineage",
+            lineage,
+            "ai_gateway",
+            metric,
+            window,
+            max,
+        )
+        .await
+        .unwrap();
+    }
+    // An MCP-surface limit binds no model request.
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        lineage,
+        "mcp_gateway",
+        "requests",
+        60,
+        7,
+    )
+    .await
+    .unwrap();
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 5)
+        .await
+        .unwrap();
+    fixtures::create_budget_cap(&app.db, "user", user_id, "monthly", 9_000_000)
+        .await
+        .unwrap();
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    for n in 0..2 {
+        gw.post("/v1/chat/completions", distinct_chat(n))
+            .await
+            .unwrap()
+            .assert_ok();
+    }
+    let other = app.gateway_client();
+    other.set_bearer(&other_key);
+    other
+        .post("/v1/chat/completions", distinct_chat(2))
+        .await
+        .unwrap()
+        .assert_ok();
+
+    let v = key_usage(&gw).await;
+    assert_eq!(v["scope"], "key");
+    // The console reads the same counters: the AI rules ordered requests
+    // then tokens (the MCP rule last), then the cap.
+    let (rules, caps) = usage(&con, "api_key", key.row.id).await;
+    assert_eq!(rules[0], 2);
+    let tokens = rules[1];
+    assert!(tokens > 0 && caps[0] == tokens, "{rules:?} {caps:?}");
+    // Least left first: requests 98 %, then the token window and the
+    // budget, equal, sliding before calendar.
+    assert_eq!(
+        limit_rows(&v),
+        vec![
+            row("key", "requests", "1m", 100, 2),
+            row("key", "tokens", "5h", 1_000_000, tokens),
+            row("key", "tokens", "daily", 1_000_000, tokens),
+        ]
+    );
+    let midnight = think_watch_common::limits::budget::period_end(
+        think_watch_common::limits::BudgetPeriod::Daily,
+        chrono::Utc::now(),
+    );
+    assert_eq!(v["limits"][0]["window_secs"], 60);
+    assert_eq!(v["limits"][0]["resets_at"], Json::Null);
+    assert_eq!(v["limits"][2]["window_secs"], Json::Null);
+    assert_eq!(v["limits"][2]["resets_at"], json!(midnight));
+    assert_eq!(
+        v["usage"],
+        json!({"requests_today": 2, "tokens_today": tokens,
+               "requests_month": 2, "tokens_month": tokens,
+               "cost_usd_month": null})
+    );
+    let reported: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(v["expires_at"].clone()).unwrap();
+    assert_eq!(Some(reported), key.row.expires_at);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_of_a_key_without_limits_answers_for_its_owner() {
+    // Neither key has limits of its own. The owner's limits come from a
+    // role, from a role its team grants, and from an override; both keys
+    // answer with them, counted over everything the owner does, and with
+    // the owner's usage over both keys.
+    let app = TestApp::spawn().await;
+    let (key_a, user_id) = seed_runtime(&app).await;
+    let key_b = second_key(&app, user_id).await;
+    role_with_constraints(
+        &app,
+        user_id,
+        json!({"Budgets": [{"Period": "monthly", "MaxTokens": 9_000_000}]}),
+        false,
+    )
+    .await;
+    role_with_constraints(
+        &app,
+        user_id,
+        json!({"Budgets": [{"Period": "daily", "MaxTokens": 5_000_000}],
+               "RateLimits": [{"Metric": "tokens", "Window": "1h", "MaxCount": 4_000_000},
+                              {"Metric": "requests", "Window": "1m", "MaxCount": 20}]}),
+        true,
+    )
+    .await;
+    // The override replaces the team role's requests/min.
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 50)
+        .await
+        .unwrap();
+    // A limit only on the MCP gateway does not make the answer the key's.
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key_b.row.lineage_id,
+        "mcp_gateway",
+        "requests",
+        60,
+        7,
+    )
+    .await
+    .unwrap();
+
+    let gw_a = app.gateway_client();
+    gw_a.set_bearer(&key_a);
+    let gw_b = app.gateway_client();
+    gw_b.set_bearer(&key_b.plaintext);
+    gw_a.post("/v1/chat/completions", distinct_chat(1))
+        .await
+        .unwrap()
+        .assert_ok();
+    // Every request against the mock comes to the same tokens.
+    let one = key_usage(&gw_a).await["usage"]["tokens_today"]
+        .as_i64()
+        .unwrap();
+    assert!(one > 0);
+    for n in 2..4 {
+        gw_b.post("/v1/chat/completions", distinct_chat(n))
+            .await
+            .unwrap()
+            .assert_ok();
+    }
+
+    let a = key_usage(&gw_a).await;
+    let b = key_usage(&gw_b).await;
+    assert_eq!(a["scope"], "user");
+    let all = 3 * one;
+    let expected = vec![
+        row("user", "requests", "1m", 50, 3),
+        row("user", "tokens", "1h", 4_000_000, all),
+        row("user", "tokens", "daily", 5_000_000, all),
+        row("user", "tokens", "monthly", 9_000_000, all),
+    ];
+    assert_eq!(limit_rows(&a), expected);
+    assert_eq!(
+        a["usage"],
+        json!({"requests_today": 3, "tokens_today": all,
+               "requests_month": 3, "tokens_month": all,
+               "cost_usd_month": null})
+    );
+    assert_eq!(a, b, "both keys answer for the same owner");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_with_no_limits_anywhere_answers_for_the_owner() {
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    let other = second_key(&app, user_id).await;
+
+    // Anthropic's SDKs send the key in x-api-key.
+    let gw = app.gateway_client();
+    gw.set_header("x-api-key", &api_key);
+    assert_eq!(
+        key_usage(&gw).await,
+        json!({"scope": "user",
+               "usage": {"requests_today": 0, "tokens_today": 0,
+                         "requests_month": 0, "tokens_month": 0,
+                         "cost_usd_month": null},
+               "limits": [], "expires_at": null})
+    );
+    gw.post("/v1/chat/completions", distinct_chat(1))
+        .await
+        .unwrap()
+        .assert_ok();
+    let one = key_usage(&gw).await["usage"]["tokens_today"]
+        .as_i64()
+        .unwrap();
+    assert!(one > 0);
+    // The owner's other key counts too.
+    let gw_other = app.gateway_client();
+    gw_other.set_bearer(&other.plaintext);
+    gw_other
+        .post("/v1/chat/completions", distinct_chat(2))
+        .await
+        .unwrap()
+        .assert_ok();
+
+    let v = key_usage(&gw).await;
+    assert_eq!(v["scope"], "user");
+    assert_eq!(v["limits"], json!([]));
+    assert_eq!(v["usage"]["requests_today"], 2);
+    assert_eq!(v["usage"]["requests_month"], 2);
+    let tokens = v["usage"]["tokens_today"].as_i64().unwrap();
+    assert_eq!(tokens, 2 * one, "{v:#}");
+    assert_eq!(v["usage"]["tokens_month"], tokens);
+    assert_eq!(key_usage(&gw_other).await, v);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_refuses_a_key_a_model_request_refuses() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = seed_runtime(&app).await;
+    let expired = fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("usage-expired"),
+        &["ai_gateway"],
+        None,
+        Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
+    )
+    .await
+    .unwrap();
+    let mcp_only = fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("usage-mcp"),
+        &["mcp_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let gw = app.gateway_client();
+    let unknown = format!("tw-{}", Uuid::new_v4().simple());
+    for (key, status) in [
+        (None, 401),
+        (Some(unknown.as_str()), 401),
+        (Some("sk-not-a-gateway-key"), 401),
+        (Some(expired.plaintext.as_str()), 401),
+        (Some(mcp_only.plaintext.as_str()), 403),
+    ] {
+        match key {
+            Some(k) => gw.set_bearer(k),
+            None => gw.clear_bearer(),
+        }
+        let usage = gw.get("/v1/usage").await.unwrap();
+        let model = gw.post("/v1/chat/completions", chat()).await.unwrap();
+        assert_eq!(usage.status.as_u16(), status, "{key:?}: {}", usage.text());
+        assert_eq!(model.status.as_u16(), status, "{key:?}: {}", model.text());
+        assert_eq!(usage.body, model.body, "{key:?}");
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn calling_v1_usage_moves_no_counter() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = seed_runtime(&app).await;
+    let key = second_key(&app, user_id).await;
+    let lineage = key.row.lineage_id;
+    for (metric, max) in [("requests", 2), ("tokens", 1_000_000)] {
+        fixtures::create_rate_limit_rule(
+            &app.db,
+            "api_key_lineage",
+            lineage,
+            "ai_gateway",
+            metric,
+            60,
+            max,
+        )
+        .await
+        .unwrap();
+    }
+    fixtures::create_budget_cap(&app.db, "api_key_lineage", lineage, "daily", 1_000_000)
+        .await
+        .unwrap();
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 2)
+        .await
+        .unwrap();
+    let con = admin_session(&app).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // The model request's `last_used_at` write is spawned; wait for it,
+    // then pin the column to a known value.
+    let last_used = || async {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT last_used_at FROM api_keys WHERE id = $1",
+        )
+        .bind(key.row.id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap()
+    };
+    for _ in 0..50 {
+        if last_used().await.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let pinned: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "UPDATE api_keys SET last_used_at = date_trunc('second', now()) - interval '1 hour' \
+         WHERE id = $1 RETURNING last_used_at",
+    )
+    .bind(key.row.id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+
+    let key_before = usage(&con, "api_key", key.row.id).await;
+    let user_before = usage(&con, "user", user_id).await;
+    let reported = key_usage(&gw).await;
+    assert_eq!(reported["usage"]["requests_today"], 1);
+    for _ in 0..5 {
+        assert_eq!(key_usage(&gw).await, reported);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(usage(&con, "api_key", key.row.id).await, key_before);
+    assert_eq!(usage(&con, "user", user_id).await, user_before);
+    assert_eq!(last_used().await, Some(pinned));
+
+    // The second model request the limits allow still goes through.
+    gw.post("/v1/chat/completions", chat())
+        .await
+        .unwrap()
+        .assert_ok();
+    let r = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
+    // The refused request counted nothing.
+    assert_eq!(key_usage(&gw).await["usage"]["requests_today"], 2);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_counts_the_tokens_of_an_answer_from_the_cache() {
+    // A key with a limit of its own answers for itself; the owner's other
+    // key, without one, for the owner. An answer from the response cache
+    // counts as a request and its tokens on both.
+    let app = TestApp::spawn().await;
+    let (other_key, user_id) = seed_runtime(&app).await;
+    let key = second_key(&app, user_id).await;
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key.row.lineage_id,
+        "ai_gateway",
+        "requests",
+        60,
+        100,
+    )
+    .await
+    .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    let x_cache = |r: &think_watch_test_support::client::TestResponse| {
+        r.headers
+            .get("x-cache")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let first = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    first.assert_ok();
+    assert_eq!(x_cache(&first), "MISS");
+    let one = key_usage(&gw).await["usage"]["tokens_today"]
+        .as_i64()
+        .unwrap();
+    assert!(one > 0);
+    let second = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    second.assert_ok();
+    assert_eq!(x_cache(&second), "HIT");
+
+    let v = key_usage(&gw).await;
+    assert_eq!(v["scope"], "key");
+    assert_eq!(limit_rows(&v), vec![row("key", "requests", "1m", 100, 2)]);
+    assert_eq!(
+        v["usage"],
+        json!({"requests_today": 2, "tokens_today": 2 * one,
+               "requests_month": 2, "tokens_month": 2 * one,
+               "cost_usd_month": null})
+    );
+    let owner = app.gateway_client();
+    owner.set_bearer(&other_key);
+    let o = key_usage(&owner).await;
+    assert_eq!(o["scope"], "user");
+    assert_eq!(o["usage"], v["usage"]);
+}

@@ -1,5 +1,6 @@
 //! Multi-route selection: strategy-driven weights + circuit-breaker
-//! filter + per-model session affinity (none / provider / route).
+//! filter + per-route capacity caps (`crate::route_caps`) + per-model
+//! session affinity (none / provider / route).
 
 use rand::RngExt;
 use std::str::FromStr;
@@ -9,6 +10,7 @@ use super::GatewayState;
 use crate::call_ctx::CallCtx;
 use crate::error::GatewayError;
 use crate::health::{CircuitBreakerConfig, RouteHealth};
+use crate::route_caps::{self, Admission, CappedRoutes, RouteCaps};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
 
@@ -121,6 +123,8 @@ pub(super) struct SelectionCtx<'a> {
     pub(super) affinity_ttl_secs: u32,
     pub(super) latency_k: f64,
     pub(super) breaker: CircuitBreakerConfig,
+    /// `security.rate_limit_fail_closed`, for the route caps.
+    pub(super) fail_closed: bool,
     pub(super) state: &'a GatewayState,
 }
 
@@ -133,6 +137,7 @@ pub(super) async fn build_selection_ctx<'a>(
         resolve_routing_config(state, model_id).await;
     let latency_k = state.dynamic_config.latency_strategy_k().await;
     let breaker = resolve_breaker_config(state).await;
+    let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
     SelectionCtx {
         model_id,
         user_id,
@@ -141,16 +146,19 @@ pub(super) async fn build_selection_ctx<'a>(
         affinity_ttl_secs,
         latency_k,
         breaker,
+        fail_closed,
         state,
     }
 }
 
 /// One selection attempt over the candidate set: snapshot health,
-/// drop circuit-broken / already-tried candidates, compute strategy
-/// weights, pick.
+/// drop circuit-broken / already-tried (`tried`: provider ids) /
+/// capped (`capped`: route ids) candidates, compute strategy weights,
+/// pick.
 async fn pick_with_strategy<'a>(
     group: &[&'a RouteEntry],
     tried: &[Uuid],
+    capped: &[Uuid],
     ctx: &SelectionCtx<'_>,
 ) -> Option<&'a RouteEntry> {
     if group.is_empty() {
@@ -178,7 +186,9 @@ async fn pick_with_strategy<'a>(
     let mut excluded: Vec<bool> = Vec::with_capacity(group.len());
     for (i, entry) in group.iter().enumerate() {
         let h = &healths[i];
-        let excl = h.state == tw_breaker::State::Open || tried.contains(&entry.provider_id);
+        let excl = h.state == tw_breaker::State::Open
+            || tried.contains(&entry.provider_id)
+            || capped.contains(&entry.route_id);
         excluded.push(excl);
         let success_rate = if h.total > 0 {
             Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
@@ -316,11 +326,47 @@ pub(super) type Answered<'a> = (
     SelectionRecord,
 );
 
+/// Pick a candidate the request may be sent to: one the strategy picks
+/// among those not excluded, and under its caps — the pick is counted
+/// against them. A pick at a cap is added to `capped` and another is
+/// picked. `None` when no candidate is left.
+async fn pick_admitted<'a>(
+    group: &[&'a RouteEntry],
+    tried: &[Uuid],
+    capped: &mut CappedRoutes,
+    ctx: &SelectionCtx<'_>,
+) -> Result<Option<&'a RouteEntry>, GatewayError> {
+    // Each pass excludes one more route, so this many passes see them all.
+    for _ in 0..group.len() {
+        let Some(entry) = pick_with_strategy(group, tried, capped.routes(), ctx).await else {
+            return Ok(None);
+        };
+        match route_caps::admit(&ctx.state.redis, &RouteCaps::of(entry), ctx.fail_closed).await? {
+            Admission::Admitted => return Ok(Some(entry)),
+            Admission::Capped {
+                label,
+                retry_after_secs,
+            } => {
+                tracing::info!(
+                    provider = %entry.provider_name,
+                    route_id = %entry.route_id,
+                    cap = %label,
+                    retry_after_secs,
+                    "Route at its cap, trying next"
+                );
+                capped.add(entry.route_id, label, retry_after_secs);
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Non-streaming selection + failover. All routes are peers (no
 /// priority tier in v2): `pick_with_strategy` picks one healthy
-/// candidate, the proxy calls it, and when the upstream fails (see
-/// [`is_upstream_failure`]) tries another candidate from the remaining
-/// set until exhausted.
+/// candidate under its caps, the proxy calls it, and when the upstream
+/// fails (see [`is_upstream_failure`]) tries another candidate from the
+/// remaining set until exhausted. When every candidate left is at its
+/// cap and none failed, the answer is the caps' 429.
 pub(super) async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
     outbound: &super::generate::Outbound,
@@ -333,9 +379,10 @@ pub(super) async fn select_route_with_failover<'a>(
 
     let mut last_error: Option<GatewayError> = None;
     let mut tried: Vec<Uuid> = Vec::new();
+    let mut capped = CappedRoutes::default();
 
     for _ in 0..candidates.len() {
-        let Some(entry) = pick_with_strategy(&candidates, &tried, ctx).await else {
+        let Some(entry) = pick_admitted(&candidates, &tried, &mut capped, ctx).await? else {
             break;
         };
         tried.push(entry.provider_id);
@@ -427,24 +474,28 @@ pub(super) async fn select_route_with_failover<'a>(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| {
+    // An upstream that failed is the answer's cause even when the rest
+    // were capped; with no failure, the caps are.
+    Err(last_error.or_else(|| capped.refusal()).unwrap_or_else(|| {
         GatewayError::ProviderError(format!("All routes failed for model: {}", ctx.model_id))
     }))
 }
 
-/// Streaming variant: pick via strategy + health filter, but don't
-/// call the provider — caller wires up the SSE stream and once the
+/// Streaming variant: pick via strategy + health filter + caps, but
+/// don't call the provider — caller wires up the SSE stream and once the
 /// first chunk lands a retry is no longer possible. Returns the
 /// chosen entry plus a `SelectionRecord` so the streaming caller can
-/// record health on stream completion.
+/// record health on stream completion. Every candidate at its cap: the
+/// caps' 429.
 pub(super) async fn select_route_for_stream<'a>(
     routes: &'a [RouteEntry],
     ctx: &SelectionCtx<'_>,
 ) -> Result<(&'a RouteEntry, SelectionRecord), GatewayError> {
     let started_at = std::time::Instant::now();
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
+    let mut capped = CappedRoutes::default();
 
-    if let Some(entry) = pick_with_strategy(&candidates, &[], ctx).await {
+    if let Some(entry) = pick_admitted(&candidates, &[], &mut capped, ctx).await? {
         return Ok((
             entry,
             SelectionRecord {
@@ -458,8 +509,7 @@ pub(super) async fn select_route_for_stream<'a>(
         ));
     }
 
-    Err(GatewayError::ProviderError(format!(
-        "No provider found for model: {}",
-        ctx.model_id
-    )))
+    Err(capped.refusal().unwrap_or_else(|| {
+        GatewayError::ProviderError(format!("No provider found for model: {}", ctx.model_id))
+    }))
 }

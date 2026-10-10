@@ -704,7 +704,11 @@
     "expired": "Expired",
     "rotated": "Rotated",
     "gracePeriod": "Grace Period",
-    "inactiveTab": "Inactive"
+    "inactiveTab": "Inactive",
+    "tab": {
+      "settings": "Settings",
+      "limits": "Limits"
+    }
   },
   "models": {
     "upstreamRefuses": "upstream refuses",
@@ -1283,6 +1287,21 @@
       "reason": "Reason"
     }
   },
+  "keyLimits": {
+    "title": "Limits of this key",
+    "hint": "Requests made with this key are held to these limits as well as to its owner's.",
+    "none": "This key has no limits of its own.",
+    "add": "Add limit",
+    "saved": "Limit saved",
+    "deleted": "Limit deleted",
+    "disabled": "Disabled",
+    "confirmDeleteTitle": "Delete this limit?",
+    "confirmDeleteBody": "Requests made with this key are no longer held to it.",
+    "drawer": {
+      "createTitle": "Add limit",
+      "editTitle": "Edit limit"
+    }
+  },
   "userLimitsTab": {
     "effectiveTitle": "Effective limits",
     "effectiveHint": "What's actually enforced for this user right now — role defaults merged with any active per-user overrides.",
@@ -1777,8 +1796,8 @@
     "xffDepthHint": "1-based position from the chosen direction",
     "rateLimiter": {
       "title": "Rate Limiter",
-      "failClosed": "Fail closed on Redis outage",
-      "failClosedHint": "Default is fail-open: a Redis blip lets requests through and bumps gateway_rate_limiter_fail_open_total. With this on, the gateway returns 429 (rate_limiter_unavailable) for any request the engine couldn't check, and bumps gateway_rate_limiter_fail_closed_total. Turn on if missing accounting is worse than denying traffic."
+      "failClosed": "Fail closed when limits can't be checked",
+      "failClosedHint": "Default is fail-open: when a request's limits can't be checked — Redis is unreachable, or the database fails while the limits are loaded — the request goes through and a warning is logged (gateway_rate_limiter_fail_open_total and related metrics). With this on, such a request is refused with 429 (rate_limiter_unavailable, budget_unavailable or limits_unavailable), and gateway_rate_limiter_fail_closed_total and related metrics count it. Turn on if missing accounting is worse than denying traffic."
     }
   },
   "logs": {
@@ -1942,6 +1961,7 @@
     "responsesEndpoint": "OpenAI Responses (new): /v1/responses",
     "responsesWsEndpoint": "OpenAI Responses over WebSocket: /v1/responses (one response.create frame per turn)",
     "modelsEndpoint": "List models: /v1/models",
+    "usageEndpoint": "Usage and limits: /v1/usage (the calling key's when it has limits of its own, otherwise its owner's)",
     "claudeDesktop": "Claude Desktop",
     "claudeDesktopDesc": "Configure Claude Desktop to use MCP tools through ThinkWatch.",
     "claudeCodeMcpDesc": "Register ThinkWatch as an MCP server directly from the Claude Code CLI.",

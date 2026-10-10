@@ -5,7 +5,7 @@
 //! are surface-specific. What's factored out here is the boilerplate
 //! that was duplicated verbatim across all three:
 //!
-//! * [`run_preflight_stages`] — rate-limit + budget + access tower
+//! * [`run_preflight_stages`] — budget + access + rate-limit tower
 //! * [`launch_stream_pump`]   — build_chat_pump + detached post-invoke task
 //! * [`run_buffered_post_invoke`] — Invoked construction + post-invoke + unwrap
 //!
@@ -24,7 +24,7 @@ use think_watch_common::lifecycle::stages::{
     check_access, check_budget, check_limits, run_post_invoke,
 };
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord, Raw};
-use think_watch_common::limits::RequestLimits;
+use think_watch_common::limits::{RequestLimits, usage};
 use tw_dialect::ir::Dialect;
 
 /// Pre-flight result threaded through to `ChatPostInvokeDeps` later
@@ -35,9 +35,10 @@ pub(super) struct Preflight {
 }
 
 /// Run the three shared pre-flight stages — `check_budget` →
-/// `check_limits` → `check_access` — that each AI surface gates on.
-/// The budget peek goes first because it charges nothing: a request a
-/// spent budget refuses must not have used up a request limit.
+/// `check_access` → `check_limits` — that each AI surface gates on.
+/// `check_limits` charges the request counters, so it goes last: a
+/// request a spent budget or the key's model list refuses must not
+/// have used up a request limit. The other two charge nothing.
 ///
 /// Returns the resolved rule + cap lists so the caller can feed them
 /// into [`ChatPostInvokeDeps`] without re-walking the identity.
@@ -68,8 +69,11 @@ pub(super) async fn run_preflight_stages(
     )
     .await
     .map_err(short_circuit_to_response)?;
-    let limits_checked = check_limits::<ChatCompletionSurface>(
-        raw,
+    let access_checked = check_access::<ChatCompletionSurface>(raw, model, &state.audit)
+        .await
+        .map_err(short_circuit_to_response)?;
+    let _authorized = check_limits::<ChatCompletionSurface>(
+        access_checked,
         &limits.rules,
         limits.owner,
         &state.redis,
@@ -78,9 +82,16 @@ pub(super) async fn run_preflight_stages(
     )
     .await
     .map_err(short_circuit_to_response)?;
-    let _authorized = check_access::<ChatCompletionSurface>(limits_checked, model, &state.audit)
-        .await
-        .map_err(short_circuit_to_response)?;
+    // Past the rate limits, the request counts on its key and its owner,
+    // as it has on every `requests` rule. Fail-open: the counts are for
+    // reading.
+    if let Some(lineage) = limits.key_lineage
+        && let Err(e) =
+            usage::record_request(&state.redis, limits.owner, lineage, chrono::Utc::now()).await
+    {
+        metrics::counter!("gateway_usage_count_fail_open_total").increment(1);
+        tracing::warn!("usage request count failed: {e}");
+    }
 
     Ok(Preflight { limits })
 }

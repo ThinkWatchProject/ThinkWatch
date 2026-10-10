@@ -1,9 +1,10 @@
 //! Post-flight accounting + token resolution for streaming responses.
 //!
 //! [`post_flight_account`] adds what a request used to its token-metric
-//! sliding rules and budget caps, from the token counts the upstream
-//! returned — or the estimate, when it returned none — with cache reads
-//! and writes weighted apart from plain input. Used from BOTH the
+//! sliding rules, its budget caps and the token cap of the route that
+//! answered, from the token counts the upstream returned — or the
+//! estimate, when it returned none — with cache reads and writes
+//! weighted apart from plain input. Used from BOTH the
 //! non-streaming branch (called inline after the upstream future
 //! resolves) and the streaming branch (called from the post-invoke
 //! pipeline after the SSE stream is drained).
@@ -28,6 +29,9 @@ pub(crate) async fn post_flight_account(
     model: String,
     tokens: weight::TokenCounts,
     request_limits: &RequestLimits,
+    // The route that answered, for its token cap. `None` when no route
+    // did (an answer from the response cache).
+    route: Option<&crate::route_caps::RouteCaps>,
     // Actor attribution for `budget.threshold_crossed` audit entries.
     // Without these the crossing log carries only `cap_id`, and
     // operators investigating a 100 %-cross had to time-join against
@@ -43,6 +47,10 @@ pub(crate) async fn post_flight_account(
     if weighted <= 0 {
         return;
     }
+
+    // The key's and its owner's day and month, counted whether or not
+    // they have limits.
+    record_usage_tokens(&redis, request_limits, weighted).await;
 
     // Token-metric sliding rules — the user's and the key's, the same
     // rules the pre-flight checked. Recorded whatever they come to: a
@@ -60,6 +68,11 @@ pub(crate) async fn post_flight_account(
     .await
     {
         tracing::warn!("token rate-limit accounting failed: {e}");
+    }
+
+    // The answering route's tokens-per-minute cap, counted the same way.
+    if let Some(caps) = route {
+        crate::route_caps::record_tokens(&redis, caps, weighted).await;
     }
 
     // Natural-period budget caps — the user's and the key's.
@@ -109,5 +122,30 @@ pub(crate) async fn post_flight_account(
                 }
             }
         }
+    }
+}
+
+/// Add `weighted` tokens to the day and month usage counters of the
+/// request's key and its owner (`limits::usage`). Fail-open: the counts
+/// are for reading.
+async fn record_usage_tokens(
+    redis: &fred::clients::Client,
+    request_limits: &RequestLimits,
+    weighted: i64,
+) {
+    let Some(lineage) = request_limits.key_lineage else {
+        return;
+    };
+    if let Err(e) = limits::usage::record_tokens(
+        redis,
+        request_limits.owner,
+        lineage,
+        weighted,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        metrics::counter!("gateway_usage_count_fail_open_total").increment(1);
+        tracing::warn!("usage token count failed: {e}");
     }
 }
