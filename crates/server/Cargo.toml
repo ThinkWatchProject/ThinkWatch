@@ -47,15 +47,15 @@ p256 = { workspace = true }
 ecdsa = { workspace = true }
 rand = { workspace = true }
 data-encoding = { workspace = true }
-serde_urlencoded = "0.7"
+serde_urlencoded = "0.7.1"
 subtle = { workspace = true }
 url = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-regex = "1"
+regex = "1.13.1"
 arc-swap = { workspace = true }
 clickhouse = { workspace = true }
 
 [dev-dependencies]
-wiremock = "0.6"
+wiremock = "0.6.5"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

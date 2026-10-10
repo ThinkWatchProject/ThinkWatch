@@ -24,7 +24,7 @@ axum = { workspace = true }
 sqlx = { workspace = true }
 openidconnect = { workspace = true }
 reqwest = { workspace = true }
-serde_urlencoded = "0.7"
+serde_urlencoded = "0.7.1"
 tokio = { workspace = true }
 totp-rs = { workspace = true }
 data-encoding = { workspace = true }

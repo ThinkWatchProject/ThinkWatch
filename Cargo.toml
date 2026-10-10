@@ -76,18 +76,18 @@ tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git",
 tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.69.0" }
 
 # Web framework
-axum = { version = "0.8", features = ["macros", "ws"] }
-tower = "0.5"
-tower-http = { version = "0.7", features = [
+axum = { version = "0.8.9", features = ["macros", "ws"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = [
     "cors", "trace", "compression-gzip", "request-id",
     "limit", "timeout", "catch-panic", "sensitive-headers", "set-header",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
 
 # Database
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "rust_decimal"] }
-rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
-clickhouse = { version = "0.15", features = ["time", "chrono"] }
+rust_decimal = { version = "1.43.0", features = ["serde", "serde-with-str"] }
+clickhouse = { version = "0.15.2", features = ["time", "chrono"] }
 
 # Redis
 # `enable-rustls` gives fred its rustls connector, for `rediss://` URLs.
@@ -95,9 +95,9 @@ clickhouse = { version = "0.15", features = ["time", "chrono"] }
 # with the same TLS stack the HTTP client uses (below): rustls on
 # aws-lc-rs, the platform's roots through rustls-platform-verifier. No
 # OpenSSL anywhere, so the static musl image needs nothing new.
-fred = { version = "10", features = ["subscriber-client", "i-scripts", "enable-rustls"] }
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-rustls-platform-verifier = "0.7"
+fred = { version = "10.1.0", features = ["subscriber-client", "i-scripts", "enable-rustls"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7.1"
 
 # Auth
 # Crypto-critical crates are pinned with `=` so a silent minor-release
@@ -105,51 +105,51 @@ rustls-platform-verifier = "0.7"
 # `cargo update`. Bumps are deliberate and reviewed.
 jsonwebtoken = { version = "=11.1.0", features = ["rust_crypto"] }
 argon2 = "=0.6.0"
-openidconnect = { version = "4", features = ["reqwest"] }
+openidconnect = { version = "4.0.1", features = ["reqwest"] }
 totp-rs = { version = "6", default-features = false, features = ["std", "gen_secret", "otpauth"] }
-data-encoding = "2"
+data-encoding = "2.11.1"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 # HTTP client (upstream proxy)
-reqwest = { version = "0.13", features = ["stream", "json", "rustls"] }
-hyper = { version = "1", features = ["full"] }
-hyper-util = "0.1"
-http-body-util = "0.1"
-bytes = "1"
+reqwest = { version = "0.13.5", features = ["stream", "json", "rustls"] }
+hyper = { version = "1.12.0", features = ["full"] }
+hyper-util = "0.1.21"
+http-body-util = "0.1.5"
+bytes = "1.12.1"
 
 # Async
-futures = "0.3"
-tokio-stream = "0.1"
-async-stream = "0.3"
+futures = "0.3.34"
+tokio-stream = "0.1.19"
+async-stream = "0.3.6"
 
 sha2 = "=0.11.0"
 sha1 = "=0.11.0"
 hmac = "=0.13.0"
 p256 = { version = "=0.14.0", features = ["ecdsa"] }
 ecdsa = { version = "=0.17.0", features = ["algorithm"] }
-rand = "0.10"
-hex = "0.4"
+rand = "0.10.3"
+hex = "0.4.3"
 # Crypto primitives are pinned exactly so a `cargo update` can never swap
 # a verification default underneath the at-rest envelope.
 aes-gcm = "=0.11.1"
 subtle = "=2.6.1"
-url = "2"
+url = "2.5.8"
 
 # Observability
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18", default-features = false }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 
 # Config
-dotenvy = "0.15"
+dotenvy = "0.15.7"
 
 # API documentation
 utoipa = { version = "6", features = ["axum_extras", "uuid", "chrono"] }
-utoipa-swagger-ui = { version = "10", features = ["axum"] }
+utoipa-swagger-ui = { version = "10.0.1", features = ["axum"] }
 
 # AWS SigV4 for the S3-compatible body store. Bedrock's signing,
 # eventstream unframing and model catalog come from tw-bedrock.
@@ -157,16 +157,16 @@ utoipa-swagger-ui = { version = "10", features = ["axum"] }
 # Credentials from explicit access_key/secret_key values (as opposed to the
 # default credential chain). This does NOT embed credentials in the binary —
 # they are loaded at runtime from encrypted configuration.
-aws-sigv4 = "1"
-aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-sigv4 = "1.6.0"
+aws-credential-types = { version = "1.3.0", features = ["hardcoded-credentials"] }
 
 # Utils
-arc-swap = "1"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-uuid = { version = "1", features = ["v4", "v5", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "2"
-anyhow = "1"
+arc-swap = "1.9.2"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+uuid = { version = "1.28.0", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+thiserror = "2.0.21"
+anyhow = "1.0.104"
 
 # Workspace crates
 think-watch-common = { path = "crates/common" }
