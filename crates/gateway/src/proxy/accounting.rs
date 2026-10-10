@@ -44,14 +44,9 @@ pub(crate) async fn post_flight_account(
         return;
     }
 
-    // The key's own day and month, counted whether or not it has limits.
-    if let Some(lineage) = request_limits.key_lineage
-        && let Err(e) =
-            limits::key_usage::record_tokens(&redis, lineage, weighted, chrono::Utc::now()).await
-    {
-        metrics::counter!("gateway_key_usage_fail_open_total").increment(1);
-        tracing::warn!("key usage token count failed: {e}");
-    }
+    // The key's and its owner's day and month, counted whether or not
+    // they have limits.
+    record_usage_tokens(&redis, request_limits, weighted).await;
 
     // Token-metric sliding rules — the user's and the key's, the same
     // rules the pre-flight checked. Recorded whatever they come to: a
@@ -118,5 +113,57 @@ pub(crate) async fn post_flight_account(
                 }
             }
         }
+    }
+}
+
+/// Add `weighted` tokens to the day and month usage counters of the
+/// request's key and its owner (`limits::usage`). Fail-open: the counts
+/// are for reading.
+async fn record_usage_tokens(
+    redis: &fred::clients::Client,
+    request_limits: &RequestLimits,
+    weighted: i64,
+) {
+    let Some(lineage) = request_limits.key_lineage else {
+        return;
+    };
+    if let Err(e) = limits::usage::record_tokens(
+        redis,
+        request_limits.owner,
+        lineage,
+        weighted,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        metrics::counter!("gateway_usage_count_fail_open_total").increment(1);
+        tracing::warn!("usage token count failed: {e}");
+    }
+}
+
+/// A request answered from the response cache: the tokens its stored
+/// answer records, weighted for `model` as a call's are, on the usage
+/// counters of its key and owner. The caller received those tokens. The
+/// store keeps only the input and output totals, so all of the input
+/// counts as plain input.
+pub(crate) async fn count_cache_hit_usage(
+    db: &PgPool,
+    redis: &fred::clients::Client,
+    weight_cache: &weight::WeightCache,
+    model: &str,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    request_limits: &RequestLimits,
+) {
+    let tokens = weight::TokenCounts {
+        input: i64::from(prompt_tokens),
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: false,
+        output: i64::from(completion_tokens),
+    };
+    let weighted = weight::weighted_tokens(&tokens, weight_cache.get(db, model).await);
+    if weighted > 0 {
+        record_usage_tokens(redis, request_limits, weighted).await;
     }
 }

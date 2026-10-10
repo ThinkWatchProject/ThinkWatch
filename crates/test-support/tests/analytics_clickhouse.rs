@@ -875,8 +875,10 @@ async fn cached_input_is_billed_at_the_cache_prices() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn v1_usage_reports_the_keys_cost_this_month_from_the_request_log() {
-    // Two keys of one owner: each key's month counts its own requests.
+async fn v1_usage_reports_the_cost_this_month_from_the_request_log() {
+    // Two keys of one owner. Key b has a limit of its own, so it answers
+    // with its own cost; key a has none, so it answers with the owner's,
+    // over both keys.
     let app = TestApp::spawn_with_clickhouse().await;
     let (key_a, user_id) = seed_runtime(&app).await;
     let key_b = fixtures::create_api_key(
@@ -886,6 +888,17 @@ async fn v1_usage_reports_the_keys_cost_this_month_from_the_request_log() {
         &["ai_gateway"],
         None,
         None,
+    )
+    .await
+    .unwrap();
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key_b.row.lineage_id,
+        "ai_gateway",
+        "requests",
+        60,
+        100,
     )
     .await
     .unwrap();
@@ -920,20 +933,25 @@ async fn v1_usage_reports_the_keys_cost_this_month_from_the_request_log() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    let cost = |gw: &TestClient| {
+    let usage = |gw: &TestClient| {
         let gw = gw.clone();
         async move {
             let r = gw.get("/v1/usage").await.unwrap();
             r.assert_ok();
             let v: Value = r.json().unwrap();
-            v["usage"]["cost_usd_month"]
+            let cost = v["usage"]["cost_usd_month"]
                 .as_f64()
-                .unwrap_or_else(|| panic!("cost_usd_month is a number: {v:#}"))
+                .unwrap_or_else(|| panic!("cost_usd_month is a number: {v:#}"));
+            (v["scope"].as_str().unwrap().to_string(), cost)
         }
     };
-    let (a, b) = (cost(&gw_a).await, cost(&gw_b).await);
+    let ((scope_a, a), (scope_b, b)) = (usage(&gw_a).await, usage(&gw_b).await);
+    assert_eq!((scope_a.as_str(), scope_b.as_str()), ("user", "key"));
     assert!(one_call > 0.0);
-    assert!((a - one_call).abs() < 1e-9, "a={a} one call={one_call}");
+    assert!(
+        (a - 3.0 * one_call).abs() < 1e-9,
+        "a={a} one call={one_call}"
+    );
     assert!(
         (b - 2.0 * one_call).abs() < 1e-9,
         "b={b} one call={one_call}"

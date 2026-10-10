@@ -1942,7 +1942,7 @@
     "responsesEndpoint": "OpenAI Responses（新版）：/v1/responses",
     "responsesWsEndpoint": "OpenAI Responses（WebSocket）：/v1/responses（每轮发一个 response.create 帧）",
     "modelsEndpoint": "模型列表：/v1/models",
-    "usageEndpoint": "调用密钥的用量与限额：/v1/usage",
+    "usageEndpoint": "用量与限额：/v1/usage（密钥有单独的限额时为该密钥，否则为所属用户）",
     "claudeDesktop": "Claude Desktop",
     "claudeDesktopDesc": "配置 Claude Desktop 通过 ThinkWatch 使用 MCP 工具。",
     "claudeCodeMcpDesc": "通过 Claude Code CLI 将 ThinkWatch 注册为 MCP 服务器。",

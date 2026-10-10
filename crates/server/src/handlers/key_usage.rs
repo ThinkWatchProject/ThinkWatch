@@ -1,17 +1,22 @@
 // ============================================================================
 // GET /v1/usage (gateway port)
 //
-// What the calling API key has used today and this month, every limit
-// that binds its AI-gateway requests with what has been used of it, and
-// when the key stops working.
+// What the calling API key may still do on the AI gateway, about one of
+// two subjects:
+//
+//   * `scope: "key"` — the key has limits of its own on the AI gateway.
+//     The answer is about the key alone: its limits, on its lineage's
+//     counters, and its own usage.
+//   * `scope: "user"` — the key has none. The answer is about its owner
+//     as a whole: the owner's effective limits — roles, including those a
+//     team grants, merged most-restrictive, then the user's overrides — on
+//     the owner's counters, and the owner's usage over all their keys.
+//     With no limits on either, `limits` is empty.
 //
 // The limits are the ones enforcement builds for a request with this key
-// (`limits_for_ai_gateway`): the key's own, on its lineage's counters, and
-// its owner's effective limits — roles, including those a team grants,
-// merged most-restrictive, then the user's overrides — on the owner's
-// counters, which count every key the owner has. They are read from the
-// same Redis counters, the same way, without charging them. MCP-surface
-// limits don't apply to model requests and are left out.
+// (`limits_for_ai_gateway`), read from the same Redis counters, the same
+// way, without charging them. MCP-surface limits don't apply to model
+// requests and are left out.
 //
 // Mounted behind `require_api_key_to_read`: the same key checks as a model
 // request, but calling it is not a use of the key.
@@ -30,7 +35,8 @@ use uuid::Uuid;
 
 use think_watch_common::limits::{
     BudgetCap, BudgetPeriod, BudgetSubject, RateLimitRule, RateLimitSubject, RequestLimits, budget,
-    key_usage, secs_to_window, sliding,
+    secs_to_window, sliding,
+    usage::{self, UsageCounts, UsageSubject},
 };
 use think_watch_gateway::proxy::{GatewayRequestIdentity, limits_for_ai_gateway};
 
@@ -38,21 +44,34 @@ use crate::app::AppState;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct KeyUsageResponse {
+    /// What the answer is about: the key, or its owner as a whole.
+    pub scope: Scope,
     pub usage: Usage,
+    /// The limits of `scope` that bind the key's model requests.
     pub limits: Vec<LimitUsage>,
     /// When the key stops authenticating; `null` when it does not.
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// What this key (its lineage, across rotations) has done, UTC day and
-/// month. Tokens are weighted tokens, as limits count them.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// The key has limits of its own: the key alone (its lineage, across
+    /// rotations).
+    Key,
+    /// The key has none: its owner, over all their keys.
+    User,
+}
+
+/// What the subject has done, UTC day and month. Tokens are weighted
+/// tokens, as limits count them.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Usage {
     pub requests_today: i64,
     pub tokens_today: i64,
     pub requests_month: i64,
     pub tokens_month: i64,
-    /// The key's cost this month from the request log, as the cost
+    /// The subject's cost this month from the request log, as the cost
     /// reports sum it; `null` without ClickHouse or when it can't be read.
     pub cost_usd_month: Option<f64>,
 }
@@ -60,9 +79,8 @@ pub struct Usage {
 /// One limit that binds the key's requests.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct LimitUsage {
-    /// `key`: set on the key, counted for it alone. `user`: its owner's,
-    /// counted for everything the owner does.
-    pub scope: &'static str,
+    /// Whose limit it is; always the answer's `scope`.
+    pub scope: Scope,
     /// `requests` or `tokens` (weighted).
     pub kind: &'static str,
     /// A rate limit's sliding window (`1m` … `1w`) or a budget's calendar
@@ -82,15 +100,16 @@ pub async fn get_key_usage(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
 ) -> Response {
-    let limits = limits_for_ai_gateway(&identity);
+    let (scope, limits) = scoped(limits_for_ai_gateway(&identity));
     let now = Utc::now();
+    let subject = match (scope, limits.key_lineage) {
+        (Scope::Key, Some(lineage)) => UsageSubject::ApiKeyLineage(lineage),
+        _ => UsageSubject::User,
+    };
 
-    let counts = match limits.key_lineage {
-        Some(lineage) => match key_usage::read(&state.redis, lineage, now).await {
-            Ok(c) => c,
-            Err(e) => return unavailable(&e),
-        },
-        None => key_usage::KeyUsageCounts::default(),
+    let counts = match usage::read(&state.redis, limits.owner, subject, now).await {
+        Ok(c) => c,
+        Err(e) => return unavailable(&e),
     };
     let mut rule_used = Vec::with_capacity(limits.rules.len());
     for rule in &limits.rules {
@@ -104,12 +123,10 @@ pub async fn get_key_usage(
         Ok(statuses) => statuses.into_iter().map(|s| s.current).collect(),
         Err(e) => return unavailable(&e),
     };
-    let cost = match limits.key_lineage {
-        Some(lineage) => cost_this_month(&state, lineage, now).await,
-        None => None,
-    };
+    let cost = cost_this_month(&state, limits.owner, subject, now).await;
 
     Json(response(
+        scope,
         &limits,
         &rule_used,
         &cap_used,
@@ -121,15 +138,53 @@ pub async fn get_key_usage(
     .into_response()
 }
 
-/// The answer for a request's limits and what each has used
+/// Which subject the answer is about, and the limits of that subject
+/// alone: the key's own when it has any on the AI gateway, its owner's
+/// otherwise.
+fn scoped(mut limits: RequestLimits) -> (Scope, RequestLimits) {
+    let key_has_limits = limits
+        .rules
+        .iter()
+        .any(|r| r.subject_kind == RateLimitSubject::ApiKeyLineage)
+        || limits
+            .caps
+            .iter()
+            .any(|c| c.subject_kind == BudgetSubject::ApiKeyLineage);
+    let scope = if key_has_limits {
+        Scope::Key
+    } else {
+        Scope::User
+    };
+    limits.rules.retain(|r| rule_scope(r) == scope);
+    limits.caps.retain(|c| cap_scope(c) == scope);
+    (scope, limits)
+}
+
+fn rule_scope(rule: &RateLimitRule) -> Scope {
+    match rule.subject_kind {
+        RateLimitSubject::ApiKeyLineage => Scope::Key,
+        RateLimitSubject::User => Scope::User,
+    }
+}
+
+fn cap_scope(cap: &BudgetCap) -> Scope {
+    match cap.subject_kind {
+        BudgetSubject::ApiKeyLineage => Scope::Key,
+        BudgetSubject::User => Scope::User,
+    }
+}
+
+/// The answer for one scope's limits and what each has used
 /// (`rule_used` pairs with `limits.rules`, `cap_used` with
-/// `limits.caps`), the key's counts and cost. Limits are ordered by the
-/// share of them left, least first.
+/// `limits.caps`), and that scope's counts and cost. Limits are ordered
+/// by the share of them left, least first.
+#[allow(clippy::too_many_arguments)]
 fn response(
+    scope: Scope,
     limits: &RequestLimits,
     rule_used: &[i64],
     cap_used: &[i64],
-    counts: key_usage::KeyUsageCounts,
+    counts: UsageCounts,
     cost_usd_month: Option<f64>,
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
@@ -149,6 +204,7 @@ fn response(
         .collect();
     entries.sort_by(by_share_left);
     KeyUsageResponse {
+        scope,
         usage: Usage {
             requests_today: counts.requests_today,
             tokens_today: counts.tokens_today,
@@ -163,10 +219,7 @@ fn response(
 
 fn rule_entry(rule: &RateLimitRule, used: i64) -> LimitUsage {
     LimitUsage {
-        scope: match rule.subject_kind {
-            RateLimitSubject::ApiKeyLineage => "key",
-            RateLimitSubject::User => "user",
-        },
+        scope: rule_scope(rule),
         kind: rule.metric.as_str(),
         window: secs_to_window(rule.window_secs)
             .map(str::to_string)
@@ -180,10 +233,7 @@ fn rule_entry(rule: &RateLimitRule, used: i64) -> LimitUsage {
 
 fn cap_entry(cap: &BudgetCap, used: i64, now: DateTime<Utc>) -> LimitUsage {
     LimitUsage {
-        scope: match cap.subject_kind {
-            BudgetSubject::ApiKeyLineage => "key",
-            BudgetSubject::User => "user",
-        },
+        scope: cap_scope(cap),
         kind: "tokens",
         window: cap.period.as_str().to_string(),
         window_secs: None,
@@ -193,16 +243,14 @@ fn cap_entry(cap: &BudgetCap, used: i64, now: DateTime<Utc>) -> LimitUsage {
     }
 }
 
-/// Least of its limit left first; on a tie, the key's before its
-/// owner's, sliding windows shortest first before calendar periods, and
-/// requests before tokens.
+/// Least of its limit left first; on a tie, sliding windows shortest
+/// first before calendar periods, and requests before tokens.
 fn by_share_left(a: &LimitUsage, b: &LimitUsage) -> Ordering {
     // (limit - used) / limit, compared without dividing; limits are > 0.
     let left = |e: &LimitUsage| i128::from(e.limit) - i128::from(e.used);
     let (la, lb) = (i128::from(a.limit.max(1)), i128::from(b.limit.max(1)));
     (left(a) * lb)
         .cmp(&(left(b) * la))
-        .then_with(|| (a.scope != "key").cmp(&(b.scope != "key")))
         .then_with(|| window_rank(a).cmp(&window_rank(b)))
         .then_with(|| (a.kind != "requests").cmp(&(b.kind != "requests")))
 }
@@ -219,11 +267,17 @@ fn window_rank(e: &LimitUsage) -> i64 {
     })
 }
 
-/// The key's cost since the 1st of this month, UTC, summed from the
-/// request log as the cost reports sum it. `None` without ClickHouse;
-/// a failed read is logged and also `None` — the cost is informational,
-/// the counters above are what limits use.
-async fn cost_this_month(state: &AppState, lineage: Uuid, now: DateTime<Utc>) -> Option<f64> {
+/// The subject's cost since the 1st of this month, UTC, summed from the
+/// request log as the cost reports sum it: the key's lineage, or every
+/// request of the owner. `None` without ClickHouse; a failed read is
+/// logged and also `None` — the cost is informational, the counters
+/// above are what limits use.
+async fn cost_this_month(
+    state: &AppState,
+    owner: Uuid,
+    subject: UsageSubject,
+    now: DateTime<Utc>,
+) -> Option<f64> {
     #[derive(clickhouse::Row, Deserialize)]
     struct Cost {
         cost: i128,
@@ -235,14 +289,18 @@ async fn cost_this_month(state: &AppState, lineage: Uuid, now: DateTime<Utc>) ->
         .expect("every month has a 1st")
         .and_time(NaiveTime::MIN)
         .and_utc();
+    let (column, id) = match subject {
+        UsageSubject::ApiKeyLineage(lineage) => ("api_key_lineage_id", lineage),
+        UsageSubject::User => ("user_id", owner),
+    };
     let row = ch
-        .query(
+        .query(&format!(
             "SELECT sum(ifNull(cost_usd, 0)) AS cost FROM gateway_logs \
              PREWHERE created_at >= parseDateTimeBestEffort(?) \
-                AND api_key_lineage_id = ?",
-        )
+                AND {column} = ?"
+        ))
         .bind(month_start.format("%Y-%m-%d %H:%M:%S").to_string())
-        .bind(lineage.to_string())
+        .bind(id.to_string())
         .fetch_one::<Cost>()
         .await;
     match row {
@@ -305,8 +363,8 @@ mod tests {
         }
     }
 
-    fn counts() -> key_usage::KeyUsageCounts {
-        key_usage::KeyUsageCounts {
+    fn counts() -> UsageCounts {
+        UsageCounts {
             requests_today: 3,
             tokens_today: 300,
             requests_month: 40,
@@ -314,18 +372,48 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_key_bound_by_nothing_still_reports_its_usage() {
-        let limits = RequestLimits::for_request(
+    /// The owner has a requests/min rule and a monthly budget; MCP rules
+    /// don't bind model requests.
+    fn owners() -> SurfaceConstraints {
+        SurfaceConstraints {
+            ai_gateway: Some(block(
+                &[(RateMetric::Requests, 60, 10)],
+                &[(BudgetPeriod::Monthly, 1_000_000)],
+            )),
+            mcp_gateway: Some(block(&[(RateMetric::Requests, 60, 1)], &[])),
+        }
+    }
+
+    fn limits_for(user: &SurfaceConstraints, key: &SurfaceConstraints) -> RequestLimits {
+        RequestLimits::for_request(
             Surface::AiGateway,
             Uuid::new_v4(),
+            user,
+            Some((Uuid::new_v4(), key)),
+        )
+    }
+
+    #[test]
+    fn neither_the_key_nor_its_owner_has_limits() {
+        let (scope, limits) = scoped(limits_for(
             &SurfaceConstraints::default(),
-            Some((Uuid::new_v4(), &SurfaceConstraints::default())),
+            &SurfaceConstraints::default(),
+        ));
+        assert_eq!(scope, Scope::User);
+        let body = response(
+            scope,
+            &limits,
+            &[],
+            &[],
+            counts(),
+            None,
+            None,
+            at(2026, 10, 14, 9),
         );
-        let body = response(&limits, &[], &[], counts(), None, None, at(2026, 10, 14, 9));
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
             serde_json::json!({
+                "scope": "user",
                 "usage": {"requests_today": 3, "tokens_today": 300,
                           "requests_month": 40, "tokens_month": 4000,
                           "cost_usd_month": null},
@@ -336,35 +424,20 @@ mod tests {
     }
 
     #[test]
-    fn the_keys_and_its_owners_limits_map_to_the_contract_shape() {
-        // Wednesday 2026-10-14, 09:00 UTC. The owner has a requests/min
-        // rule and a monthly budget (MCP rules don't bind model requests);
-        // the key a 5h token window and a daily budget.
-        let user = SurfaceConstraints {
-            ai_gateway: Some(block(
-                &[(RateMetric::Requests, 60, 10)],
-                &[(BudgetPeriod::Monthly, 1_000_000)],
-            )),
+    fn a_key_without_limits_of_its_own_answers_for_its_owner() {
+        // An MCP-only rule on the key is not a limit on its model requests.
+        let key = SurfaceConstraints {
+            ai_gateway: None,
             mcp_gateway: Some(block(&[(RateMetric::Requests, 60, 1)], &[])),
         };
-        let key = SurfaceConstraints {
-            ai_gateway: Some(block(
-                &[(RateMetric::Tokens, 18_000, 50_000)],
-                &[(BudgetPeriod::Daily, 100_000)],
-            )),
-            mcp_gateway: None,
-        };
-        let limits = RequestLimits::for_request(
-            Surface::AiGateway,
-            Uuid::new_v4(),
-            &user,
-            Some((Uuid::new_v4(), &key)),
-        );
-        // Input order: user rule, key rule; user cap, key cap.
+        let (scope, limits) = scoped(limits_for(&owners(), &key));
+        assert_eq!(scope, Scope::User);
+        // Wednesday 2026-10-14, 09:00 UTC. Input order: rule, cap.
         let body = response(
+            scope,
             &limits,
-            &[5, 45_000],
-            &[250_000, 100_500],
+            &[5],
+            &[250_000],
             counts(),
             Some(1.25),
             Some(at(2026, 12, 31, 0)),
@@ -373,16 +446,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
             serde_json::json!({
+                "scope": "user",
                 "usage": {"requests_today": 3, "tokens_today": 300,
                           "requests_month": 40, "tokens_month": 4000,
                           "cost_usd_month": 1.25},
                 "limits": [
-                    // Overshot: -0.5 % left.
-                    {"scope": "key", "kind": "tokens", "window": "daily", "window_secs": null,
-                     "limit": 100000, "used": 100500, "resets_at": "2026-10-15T00:00:00Z"},
-                    // 10 % left.
-                    {"scope": "key", "kind": "tokens", "window": "5h", "window_secs": 18000,
-                     "limit": 50000, "used": 45000, "resets_at": null},
                     // 50 % left.
                     {"scope": "user", "kind": "requests", "window": "1m", "window_secs": 60,
                      "limit": 10, "used": 5, "resets_at": null},
@@ -396,9 +464,64 @@ mod tests {
     }
 
     #[test]
-    fn ties_put_the_key_first_then_the_shorter_window_then_requests() {
-        let e = |scope, kind, window: &str, window_secs| LimitUsage {
+    fn a_key_with_limits_of_its_own_answers_for_itself_alone() {
+        // The owner's limits still bind the key's requests, but the answer
+        // is about the key: its limits only.
+        let key = SurfaceConstraints {
+            ai_gateway: Some(block(
+                &[(RateMetric::Tokens, 18_000, 50_000)],
+                &[(BudgetPeriod::Daily, 100_000)],
+            )),
+            mcp_gateway: None,
+        };
+        let (scope, limits) = scoped(limits_for(&owners(), &key));
+        assert_eq!(scope, Scope::Key);
+        let body = response(
             scope,
+            &limits,
+            &[45_000],
+            &[100_500],
+            counts(),
+            None,
+            None,
+            at(2026, 10, 14, 9),
+        );
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "scope": "key",
+                "usage": {"requests_today": 3, "tokens_today": 300,
+                          "requests_month": 40, "tokens_month": 4000,
+                          "cost_usd_month": null},
+                "limits": [
+                    // Overshot: -0.5 % left.
+                    {"scope": "key", "kind": "tokens", "window": "daily", "window_secs": null,
+                     "limit": 100000, "used": 100500, "resets_at": "2026-10-15T00:00:00Z"},
+                    // 10 % left.
+                    {"scope": "key", "kind": "tokens", "window": "5h", "window_secs": 18000,
+                     "limit": 50000, "used": 45000, "resets_at": null},
+                ],
+                "expires_at": null,
+            })
+        );
+    }
+
+    #[test]
+    fn a_key_budget_alone_makes_the_answer_the_keys() {
+        let key = SurfaceConstraints {
+            ai_gateway: Some(block(&[], &[(BudgetPeriod::Weekly, 7)])),
+            mcp_gateway: None,
+        };
+        let (scope, limits) = scoped(limits_for(&owners(), &key));
+        assert_eq!(scope, Scope::Key);
+        assert!(limits.rules.is_empty());
+        assert_eq!(limits.caps.len(), 1);
+    }
+
+    #[test]
+    fn ties_put_the_shorter_window_first_then_requests() {
+        let e = |kind, window: &str, window_secs| LimitUsage {
+            scope: Scope::Key,
             kind,
             window: window.to_string(),
             window_secs,
@@ -407,27 +530,22 @@ mod tests {
             resets_at: None,
         };
         let mut v = [
-            e("user", "requests", "1m", Some(60)),
-            e("key", "tokens", "monthly", None),
-            e("key", "tokens", "weekly", None),
-            e("key", "tokens", "1w", Some(604_800)),
-            e("key", "tokens", "1m", Some(60)),
-            e("key", "requests", "1m", Some(60)),
+            e("tokens", "monthly", None),
+            e("tokens", "weekly", None),
+            e("tokens", "1w", Some(604_800)),
+            e("tokens", "1m", Some(60)),
+            e("requests", "1m", Some(60)),
         ];
         v.sort_by(by_share_left);
-        let order: Vec<(&str, &str, &str)> = v
-            .iter()
-            .map(|e| (e.scope, e.kind, e.window.as_str()))
-            .collect();
+        let order: Vec<(&str, &str)> = v.iter().map(|e| (e.kind, e.window.as_str())).collect();
         assert_eq!(
             order,
             [
-                ("key", "requests", "1m"),
-                ("key", "tokens", "1m"),
-                ("key", "tokens", "1w"),
-                ("key", "tokens", "weekly"),
-                ("key", "tokens", "monthly"),
-                ("user", "requests", "1m"),
+                ("requests", "1m"),
+                ("tokens", "1m"),
+                ("tokens", "1w"),
+                ("tokens", "weekly"),
+                ("tokens", "monthly"),
             ]
         );
     }

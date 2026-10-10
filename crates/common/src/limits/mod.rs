@@ -56,8 +56,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub mod budget;
-pub mod key_usage;
 pub mod sliding;
+pub mod usage;
 pub mod weight;
 
 // ----------------------------------------------------------------------------
@@ -1160,8 +1160,8 @@ pub struct RequestLimits {
     /// carries their Redis Cluster hash tag (`sliding::counter_key`).
     pub owner: Uuid,
     /// The lineage of the API key the request came with, whether or not
-    /// it has limits of its own: its `key_usage` counters count the
-    /// request.
+    /// it has limits of its own: its `usage` counters, and its owner's,
+    /// count the request.
     pub key_lineage: Option<Uuid>,
     pub rules: Vec<RateLimitRule>,
     pub caps: Vec<BudgetCap>,

@@ -1032,11 +1032,21 @@ async fn role_with_constraints(app: &TestApp, user_id: Uuid, constraints: Json, 
     }
 }
 
+/// A chat request whose prompt no other request in the test repeats, so
+/// it is never answered from the response cache.
+fn distinct_chat(n: u32) -> Json {
+    json!({"model": "gpt-test", "messages": [{"role": "user", "content": format!("x{n}")}]})
+}
+
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn v1_usage_reports_a_keys_own_limits_on_its_own_counters() {
+async fn v1_usage_of_a_key_with_limits_answers_for_the_key_alone() {
+    // The key has limits of its own; its owner has limits too, one with
+    // less left than any of the key's, and another key of the owner is
+    // used as well. The answer is the key's limits on the key's counters
+    // and the key's own usage, nothing of the owner's.
     let app = TestApp::spawn().await;
-    let (_, user_id) = seed_runtime(&app).await;
+    let (other_key, user_id) = seed_runtime(&app).await;
     let key = fixtures::create_api_key(
         &app.db,
         user_id,
@@ -1076,18 +1086,32 @@ async fn v1_usage_reports_a_keys_own_limits_on_its_own_counters() {
     )
     .await
     .unwrap();
+    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 5)
+        .await
+        .unwrap();
+    fixtures::create_budget_cap(&app.db, "user", user_id, "monthly", 9_000_000)
+        .await
+        .unwrap();
     let con = admin_session(&app).await;
 
     let gw = app.gateway_client();
     gw.set_bearer(&key.plaintext);
-    for _ in 0..2 {
-        gw.post("/v1/chat/completions", chat())
+    for n in 0..2 {
+        gw.post("/v1/chat/completions", distinct_chat(n))
             .await
             .unwrap()
             .assert_ok();
     }
+    let other = app.gateway_client();
+    other.set_bearer(&other_key);
+    other
+        .post("/v1/chat/completions", distinct_chat(2))
+        .await
+        .unwrap()
+        .assert_ok();
 
     let v = key_usage(&gw).await;
+    assert_eq!(v["scope"], "key");
     // The console reads the same counters: the AI rules ordered requests
     // then tokens (the MCP rule last), then the cap.
     let (rules, caps) = usage(&con, "api_key", key.row.id).await;
@@ -1125,10 +1149,11 @@ async fn v1_usage_reports_a_keys_own_limits_on_its_own_counters() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn v1_usage_reports_the_owners_effective_limits_on_the_owners_counters() {
-    // The owner's limits from a role, from a role its team grants, and
-    // from an override, counting what every key of the owner does. The
-    // key's own usage counts only its own requests.
+async fn v1_usage_of_a_key_without_limits_answers_for_its_owner() {
+    // Neither key has limits of its own. The owner's limits come from a
+    // role, from a role its team grants, and from an override; both keys
+    // answer with them, counted over everything the owner does, and with
+    // the owner's usage over both keys.
     let app = TestApp::spawn().await;
     let (key_a, user_id) = seed_runtime(&app).await;
     let key_b = second_key(&app, user_id).await;
@@ -1152,19 +1177,34 @@ async fn v1_usage_reports_the_owners_effective_limits_on_the_owners_counters() {
     fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 50)
         .await
         .unwrap();
+    // A limit only on the MCP gateway does not make the answer the key's.
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key_b.row.lineage_id,
+        "mcp_gateway",
+        "requests",
+        60,
+        7,
+    )
+    .await
+    .unwrap();
 
     let gw_a = app.gateway_client();
     gw_a.set_bearer(&key_a);
     let gw_b = app.gateway_client();
     gw_b.set_bearer(&key_b.plaintext);
-    // Distinct prompts: a cached answer charges no tokens.
-    let prompt = |n: u32| json!({"model": "gpt-test", "messages": [{"role": "user", "content": format!("x{n}")}]});
-    gw_a.post("/v1/chat/completions", prompt(1))
+    gw_a.post("/v1/chat/completions", distinct_chat(1))
         .await
         .unwrap()
         .assert_ok();
+    // Every request against the mock comes to the same tokens.
+    let one = key_usage(&gw_a).await["usage"]["tokens_today"]
+        .as_i64()
+        .unwrap();
+    assert!(one > 0);
     for n in 2..4 {
-        gw_b.post("/v1/chat/completions", prompt(n))
+        gw_b.post("/v1/chat/completions", distinct_chat(n))
             .await
             .unwrap()
             .assert_ok();
@@ -1172,14 +1212,8 @@ async fn v1_usage_reports_the_owners_effective_limits_on_the_owners_counters() {
 
     let a = key_usage(&gw_a).await;
     let b = key_usage(&gw_b).await;
-    let (a_tokens, b_tokens) = (
-        a["usage"]["tokens_today"].as_i64().unwrap(),
-        b["usage"]["tokens_today"].as_i64().unwrap(),
-    );
-    assert!(a_tokens > 0 && b_tokens > a_tokens, "{a:#} {b:#}");
-    assert_eq!(a["usage"]["requests_today"], 1);
-    assert_eq!(b["usage"]["requests_today"], 2);
-    let all = a_tokens + b_tokens;
+    assert_eq!(a["scope"], "user");
+    let all = 3 * one;
     let expected = vec![
         row("user", "requests", "1m", 50, 3),
         row("user", "tokens", "1h", 4_000_000, all),
@@ -1188,75 +1222,58 @@ async fn v1_usage_reports_the_owners_effective_limits_on_the_owners_counters() {
     ];
     assert_eq!(limit_rows(&a), expected);
     assert_eq!(
-        limit_rows(&b),
-        expected,
-        "both keys are bound by the same limits"
+        a["usage"],
+        json!({"requests_today": 3, "tokens_today": all,
+               "requests_month": 3, "tokens_month": all,
+               "cost_usd_month": null})
     );
+    assert_eq!(a, b, "both keys answer for the same owner");
 }
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn v1_usage_lists_the_keys_and_the_owners_limits_least_left_first() {
+async fn v1_usage_with_no_limits_anywhere_answers_for_the_owner() {
     let app = TestApp::spawn().await;
-    let (_, user_id) = seed_runtime(&app).await;
-    let key = second_key(&app, user_id).await;
-    fixtures::create_rate_limit_rule(&app.db, "user", user_id, "ai_gateway", "requests", 60, 50)
-        .await
-        .unwrap();
-    fixtures::create_rate_limit_rule(
-        &app.db,
-        "api_key_lineage",
-        key.row.lineage_id,
-        "ai_gateway",
-        "requests",
-        300,
-        5,
-    )
-    .await
-    .unwrap();
-
-    let gw = app.gateway_client();
-    gw.set_bearer(&key.plaintext);
-    gw.post("/v1/chat/completions", chat())
-        .await
-        .unwrap()
-        .assert_ok();
-    assert_eq!(
-        limit_rows(&key_usage(&gw).await),
-        vec![
-            row("key", "requests", "5m", 5, 1),
-            row("user", "requests", "1m", 50, 1),
-        ]
-    );
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn v1_usage_of_a_key_bound_by_nothing_still_reports_its_usage() {
-    let app = TestApp::spawn().await;
-    let (api_key, _) = seed_runtime(&app).await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+    let other = second_key(&app, user_id).await;
 
     // Anthropic's SDKs send the key in x-api-key.
     let gw = app.gateway_client();
     gw.set_header("x-api-key", &api_key);
     assert_eq!(
         key_usage(&gw).await,
-        json!({"usage": {"requests_today": 0, "tokens_today": 0,
+        json!({"scope": "user",
+               "usage": {"requests_today": 0, "tokens_today": 0,
                          "requests_month": 0, "tokens_month": 0,
                          "cost_usd_month": null},
                "limits": [], "expires_at": null})
     );
-    gw.post("/v1/chat/completions", chat())
+    gw.post("/v1/chat/completions", distinct_chat(1))
         .await
         .unwrap()
         .assert_ok();
+    let one = key_usage(&gw).await["usage"]["tokens_today"]
+        .as_i64()
+        .unwrap();
+    assert!(one > 0);
+    // The owner's other key counts too.
+    let gw_other = app.gateway_client();
+    gw_other.set_bearer(&other.plaintext);
+    gw_other
+        .post("/v1/chat/completions", distinct_chat(2))
+        .await
+        .unwrap()
+        .assert_ok();
+
     let v = key_usage(&gw).await;
+    assert_eq!(v["scope"], "user");
     assert_eq!(v["limits"], json!([]));
-    assert_eq!(v["usage"]["requests_today"], 1);
-    assert_eq!(v["usage"]["requests_month"], 1);
+    assert_eq!(v["usage"]["requests_today"], 2);
+    assert_eq!(v["usage"]["requests_month"], 2);
     let tokens = v["usage"]["tokens_today"].as_i64().unwrap();
-    assert!(tokens > 0, "{v:#}");
+    assert_eq!(tokens, 2 * one, "{v:#}");
     assert_eq!(v["usage"]["tokens_month"], tokens);
+    assert_eq!(key_usage(&gw_other).await, v);
 }
 
 #[ignore = "integration test — run via `make test-it`"]
@@ -1388,4 +1405,61 @@ async fn calling_v1_usage_moves_no_counter() {
     assert_eq!(r.status.as_u16(), 429, "body={}", r.text());
     // The refused request counted nothing.
     assert_eq!(key_usage(&gw).await["usage"]["requests_today"], 2);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_counts_the_tokens_of_an_answer_from_the_cache() {
+    // A key with a limit of its own answers for itself; the owner's other
+    // key, without one, for the owner. An answer from the response cache
+    // counts as a request and its tokens on both.
+    let app = TestApp::spawn().await;
+    let (other_key, user_id) = seed_runtime(&app).await;
+    let key = second_key(&app, user_id).await;
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        key.row.lineage_id,
+        "ai_gateway",
+        "requests",
+        60,
+        100,
+    )
+    .await
+    .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key.plaintext);
+    let x_cache = |r: &think_watch_test_support::client::TestResponse| {
+        r.headers
+            .get("x-cache")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let first = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    first.assert_ok();
+    assert_eq!(x_cache(&first), "MISS");
+    let one = key_usage(&gw).await["usage"]["tokens_today"]
+        .as_i64()
+        .unwrap();
+    assert!(one > 0);
+    let second = gw.post("/v1/chat/completions", chat()).await.unwrap();
+    second.assert_ok();
+    assert_eq!(x_cache(&second), "HIT");
+
+    let v = key_usage(&gw).await;
+    assert_eq!(v["scope"], "key");
+    assert_eq!(limit_rows(&v), vec![row("key", "requests", "1m", 100, 2)]);
+    assert_eq!(
+        v["usage"],
+        json!({"requests_today": 2, "tokens_today": 2 * one,
+               "requests_month": 2, "tokens_month": 2 * one,
+               "cost_usd_month": null})
+    );
+    let owner = app.gateway_client();
+    owner.set_bearer(&other_key);
+    let o = key_usage(&owner).await;
+    assert_eq!(o["scope"], "user");
+    assert_eq!(o["usage"], v["usage"]);
 }

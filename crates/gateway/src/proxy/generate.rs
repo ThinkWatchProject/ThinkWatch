@@ -850,6 +850,16 @@ async fn run(
         if let Err(e) = state.quota.consume(&quota_key, total).await {
             tracing::warn!(quota_key = %quota_key, tokens = total, "quota consume on cache hit failed: {e}");
         }
+        super::accounting::count_cache_hit_usage(
+            &state.db,
+            &state.redis,
+            &state.weight_cache,
+            &mapped_model,
+            cached.prompt_tokens,
+            cached.completion_tokens,
+            &preflight.limits,
+        )
+        .await;
 
         // Same capture pipeline as a fresh request — redaction toggle,
         // byte cap and offload all apply — with the status marked.
