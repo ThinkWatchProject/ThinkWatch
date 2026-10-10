@@ -38,7 +38,8 @@ own boards without grepping the source.
 |---|---|
 | `gateway_cache_total{result}` | `result=hit` / `miss`. Cache hit rate = `hit / (hit + miss)`. |
 | `gateway_rate_limited_total` | Per-key rate-limit denials at the proxy. |
-| `gateway_quota_overflow_total` | Token quota exceeded. |
+| `gateway_route_capped_total{metric}` | A route was skipped at its RPM (`metric=requests`) or TPM (`metric=tokens`) cap. Sustained = the route's caps are below its traffic. |
+| `gateway_limits_load_fail_open_total` / `..._fail_closed_total` | A request's limits could not be loaded from Postgres; it ran without them (open) or was refused (closed, `security.rate_limit_fail_closed`). Should be 0. |
 | `gateway_budget_fail_open_total` | Budget check couldn't reach Redis and fell open. Should be 0 in steady state. |
 | `gateway_rate_limiter_fail_open_total` / `..._fail_closed_total` | Mirror, for the per-key rate limiter. |
 | `gateway_sse_buffer_overflow_total` | An SSE event exceeded 8 MiB without a delimiter — stream torn down. Non-zero = a misbehaving upstream provider; investigate. |

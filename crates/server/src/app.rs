@@ -22,7 +22,6 @@ use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_gateway::cache::ResponseCache;
 use think_watch_gateway::model_mapping::ModelMapper;
 use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
-use think_watch_gateway::quota::QuotaManager;
 use think_watch_gateway::router::{ModelRouter, RouteEntry};
 use think_watch_mcp_gateway::proxy::McpProxy;
 use think_watch_mcp_gateway::session::SessionManager;
@@ -234,7 +233,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         model_mapper: Arc::new(ModelMapper::new()),
         // Share the hot-swappable guards with the gateway state.
         guards: state.guards.clone(),
-        quota: Arc::new(QuotaManager::new(state.redis.clone())),
         cache: Arc::new(ResponseCache::new(
             state.redis.clone(),
             state.dynamic_config.clone(),
@@ -251,9 +249,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         // this the proxy would PUT into one configuration and the
         // viewer would try to GET from another.
         blob_store: state.blob_store.clone(),
-        rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
-            state.redis.clone(),
-        )),
         db: state.db.clone(),
         redis: state.redis.clone(),
         weight_cache,

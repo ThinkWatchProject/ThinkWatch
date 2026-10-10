@@ -15,6 +15,10 @@ use uuid::Uuid;
 // (a role granted at team scope administers that team only).
 // Rate limits: per (metric, window) take MIN MaxCount — most restrictive.
 // Budgets: per Period take MIN MaxTokens — most restrictive.
+// Rate limits and budgets come from the same roles as the model / tool
+// scope (`load_gateway_policy_documents`), and from the same statements
+// (the `Constraints` of the Allow for `*_gateway:use`): a role's limits
+// apply exactly when its gateway grant does.
 // Deny statements: win over Allow across all roles.
 //
 // `compute_user_permissions` is the single source of truth for the
@@ -49,8 +53,9 @@ pub async fn compute_user_permissions(
 }
 
 /// Load all `policy_document` JSONB values from roles assigned to
-/// `user_id` (direct + team-inherited). Shared helper for permission
-/// extraction, resource limit computation, and constraint aggregation.
+/// `user_id` (direct at any scope + team-inherited). The console's
+/// permission checks start from these; the gateways do not (see
+/// [`load_gateway_policy_documents`]).
 async fn load_user_policy_documents(
     pool: &PgPool,
     user_id: Uuid,
@@ -72,14 +77,18 @@ async fn load_user_policy_documents(
     Ok(rows.into_iter().map(|(v,)| v).collect())
 }
 
-/// The policy documents that decide gateway access for `user_id`:
-/// roles assigned at global scope, plus roles attached to a team the
-/// user is a member of (a team's roles are its members' working roles).
+/// The policy documents that apply to `user_id`'s gateway requests —
+/// the one place that decides it, for access (models, MCP tools) and
+/// for the role-level rate limits and budgets alike: roles assigned at
+/// global scope, plus roles attached to a team the user is a member of
+/// (a team's roles are its members' working roles).
 ///
 /// Roles granted at `scope_kind = 'team'` are left out. Such a grant
 /// lets the holder administer that team from the console; gateway
 /// requests carry no team, so honouring it here would turn a team
-/// grant into platform-wide model and tool access.
+/// grant into platform-wide model and tool access — or, for its limits,
+/// hold the holder's every request to a role that grants them nothing
+/// at the gateway.
 async fn load_gateway_policy_documents(
     pool: &PgPool,
     user_id: Uuid,
@@ -126,26 +135,6 @@ pub async fn load_user_role_names(
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(n,)| n).collect())
-}
-
-/// Load the distinct role IDs assigned to `user_id`, including
-/// roles inherited through team membership.
-/// Used by the rate-limit engine so role-level quotas apply to the user.
-pub async fn load_user_role_ids(pool: &PgPool, user_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT DISTINCT role_id FROM ( \
-           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
-           UNION \
-           SELECT tra.role_id \
-             FROM team_members tm \
-             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-            WHERE tm.user_id = $1 \
-         ) combined",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
 /// Load every `(role_id, scope_kind, scope_id)` row for `user_id`,
@@ -315,11 +304,16 @@ fn resource_limits_from_documents(docs: &[serde_json::Value]) -> UserResourceLim
 /// `compute_user_surface_constraints` so callers that need both the
 /// pre-override and post-override view (the admin dashboard) can avoid
 /// re-running the role document load.
+///
+/// From the roles that decide gateway access
+/// ([`load_gateway_policy_documents`]), the same set
+/// [`compute_user_resource_limits`] reads: a role granted at team scope
+/// neither opens the gateway nor limits it.
 pub async fn compute_user_role_constraints(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
-    let docs = load_user_policy_documents(pool, user_id).await?;
+    let docs = load_gateway_policy_documents(pool, user_id).await?;
     let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = docs
         .iter()
         .map(think_watch_common::limits::extract_surface_constraints)
@@ -329,9 +323,9 @@ pub async fn compute_user_role_constraints(
     ))
 }
 
-/// Aggregate surface constraints from policy_documents across every
-/// role assigned to `user_id` (direct + team-inherited) using "most
-/// restrictive wins": per `(surface, metric, window_secs)` take the
+/// Aggregate surface constraints from the policy_documents of the roles
+/// that apply at the gateway (see [`compute_user_role_constraints`])
+/// using "most restrictive wins": per `(surface, metric, window_secs)` take the
 /// MIN `max_count`; per `(surface, period)` take the MIN
 /// `limit_tokens`. Disabled or non-positive entries are ignored, then
 /// any active side-table overrides for the user are applied on top.

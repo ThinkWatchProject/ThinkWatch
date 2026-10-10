@@ -10,6 +10,8 @@ use think_watch_auth::rbac;
 use think_watch_gateway::proxy::GatewayRequestIdentity;
 use think_watch_mcp_gateway::transport::streamable_http::McpRequestIdentity;
 
+use think_watch_common::limits::SurfaceConstraints;
+
 use crate::app::AppState;
 
 /// Intersect a per-API-key allow-list with a per-role allow-list.
@@ -73,13 +75,27 @@ fn mcp_entry_covers(general: &str, specific: &str) -> bool {
     is_tool_allowed(Some(&[general.to_string()]), specific)
 }
 
+/// The format an AI-gateway caller reads errors in, from the path it
+/// called.
+fn client_dialect(path: &str) -> tw_dialect::ir::Dialect {
+    use tw_dialect::ir::Dialect;
+    if path == "/v1/messages" {
+        Dialect::Anthropic
+    } else if path.starts_with("/v1beta/") || path.starts_with("/v1/models/") {
+        Dialect::Gemini
+    } else if path == "/v1/responses" {
+        Dialect::Responses
+    } else {
+        Dialect::Chat
+    }
+}
+
 /// 403 for a key whose owner holds no role granting `surface`'s
 /// `*_gateway:use`. The body is in the shape the caller's SDK reads:
 /// the protocol's error object on the AI gateway (every one of them
 /// carries `error.message`), a JSON-RPC error on the MCP gateway.
 fn gateway_use_refused(surface: &str, path: &str) -> Response {
     use axum::response::IntoResponse;
-    use tw_dialect::ir::Dialect;
 
     let permission = format!("{surface}:use");
     let message =
@@ -92,18 +108,13 @@ fn gateway_use_refused(surface: &str, path: &str) -> Response {
         });
         ("application/json", body.to_string().into_bytes())
     } else {
-        let client = if path == "/v1/messages" {
-            Dialect::Anthropic
-        } else if path.starts_with("/v1beta/") || path.starts_with("/v1/models/") {
-            Dialect::Gemini
-        } else if path == "/v1/responses" {
-            Dialect::Responses
-        } else {
-            Dialect::Chat
-        };
         (
             "application/json",
-            tw_dialect::convert::error_body(client, StatusCode::FORBIDDEN.as_u16(), &message),
+            tw_dialect::convert::error_body(
+                client_dialect(path),
+                StatusCode::FORBIDDEN.as_u16(),
+                &message,
+            ),
         )
     };
     (
@@ -111,6 +122,90 @@ fn gateway_use_refused(surface: &str, path: &str) -> Response {
         [(axum::http::header::CONTENT_TYPE, content_type)],
         body,
     )
+        .into_response()
+}
+
+/// The limits a request is held to: its owner's (role limits with the
+/// user's overrides) and the calling key's own, counted apart.
+async fn load_request_limits(
+    db: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    lineage_id: uuid::Uuid,
+) -> Result<(SurfaceConstraints, SurfaceConstraints), sqlx::Error> {
+    let user = rbac::compute_user_surface_constraints(db, user_id).await?;
+    let key = rbac::compute_key_surface_constraints(db, lineage_id).await?;
+    Ok((user, key))
+}
+
+/// The label a request refused for want of its limits carries — the
+/// limits could not be loaded, so they could not be checked.
+const LIMITS_UNAVAILABLE: &str = "limits_unavailable";
+
+/// What a request goes on with when loading its limits failed, decided
+/// by `security.rate_limit_fail_closed` — the setting the rate limiter
+/// and the budget gate follow when Redis fails. Failing closed, `None`:
+/// the request is refused ([`limits_unavailable`]). Failing open, no
+/// limits for this request, and a warning that says why.
+fn limits_or_refusal(
+    loaded: Result<(SurfaceConstraints, SurfaceConstraints), sqlx::Error>,
+    fail_closed: bool,
+    api_key_id: uuid::Uuid,
+) -> Option<(SurfaceConstraints, SurfaceConstraints)> {
+    let error = match loaded {
+        Ok(limits) => return Some(limits),
+        Err(e) => e,
+    };
+    if fail_closed {
+        metrics::counter!("gateway_limits_load_fail_closed_total").increment(1);
+        tracing::error!(
+            %api_key_id,
+            error = %error,
+            "loading the request's limits failed; failing closed per security.rate_limit_fail_closed"
+        );
+        None
+    } else {
+        metrics::counter!("gateway_limits_load_fail_open_total").increment(1);
+        tracing::warn!(
+            %api_key_id,
+            error = %error,
+            "loading the request's limits failed; failing open, the request runs without limits"
+        );
+        Some(Default::default())
+    }
+}
+
+/// The refusal for a request whose limits could not be loaded while
+/// failing closed: the same answer the gateways give when the rate
+/// limiter itself is unreachable — 429 with `Retry-After`, labelled
+/// [`LIMITS_UNAVAILABLE`], in the caller's format.
+fn limits_unavailable(surface: &str, path: &str) -> Response {
+    use axum::response::IntoResponse;
+    let refusal = think_watch_gateway::error::GatewayError::limiter_unavailable(LIMITS_UNAVAILABLE);
+    if surface == "mcp_gateway" {
+        let retry_after = refusal.retry_after_secs().unwrap_or(30);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": think_watch_mcp_gateway::proxy::INVALID_REQUEST,
+                "message": refusal.to_string(),
+            },
+        });
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json".to_string(),
+                ),
+                (axum::http::header::RETRY_AFTER, retry_after.to_string()),
+            ],
+            body.to_string(),
+        )
+            .into_response();
+    }
+    think_watch_gateway::proxy::GatewayErrorResponse::from(refusal)
+        .in_dialect(client_dialect(path))
         .into_response()
 }
 
@@ -335,7 +430,7 @@ fn authenticate(
                 // can gate per-tool access without re-querying the DB, and
                 // the aggregated `surface_constraints` JSON so the gateway
                 // hot path has rate limits + budgets without further lookups.
-                let (role_limits, user_roles, surface_constraints, key_constraints) = if let Some(uid) = row.user_id {
+                let (role_limits, user_roles, loaded_limits) = if let Some(uid) = row.user_id {
                     let limits = rbac::compute_user_resource_limits(&state.db, uid)
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -344,15 +439,10 @@ fn authenticate(
                         .unwrap_or_default();
                     // The user's limits and the key's own, kept apart:
                     // the gateway counts each on its own counters and
-                    // checks both.
-                    let constraints = rbac::compute_user_surface_constraints(&state.db, uid)
-                        .await
-                        .unwrap_or_default();
-                    let key_constraints =
-                        rbac::compute_key_surface_constraints(&state.db, row.lineage_id)
-                            .await
-                            .unwrap_or_default();
-                    (limits, names, constraints, key_constraints)
+                    // checks both. A failure to load them is decided
+                    // below, once the request is known to be allowed.
+                    let loaded = load_request_limits(&state.db, uid, row.lineage_id).await;
+                    (limits, names, loaded)
                 } else {
                     // A key without an owner (its user row was removed
                     // and `user_id` set NULL) has no roles to grant
@@ -362,8 +452,7 @@ fn authenticate(
                     (
                         rbac::UserResourceLimits::none(),
                         Vec::new(),
-                        think_watch_common::limits::SurfaceConstraints::default(),
-                        think_watch_common::limits::SurfaceConstraints::default(),
+                        Ok(Default::default()),
                     )
                 };
 
@@ -384,6 +473,36 @@ fn authenticate(
                     );
                     return Ok(gateway_use_refused(surface, request.uri().path()));
                 }
+
+                // Limits that could not be loaded are not "no limits":
+                // the request is refused or let through without them as
+                // `security.rate_limit_fail_closed` says.
+                let fail_closed = match &loaded_limits {
+                    Ok(_) => false,
+                    Err(_) => state.dynamic_config.rate_limit_fail_closed().await,
+                };
+                let Some((surface_constraints, key_constraints)) =
+                    limits_or_refusal(loaded_limits, fail_closed, row.id)
+                else {
+                    let user_id = row.user_id.map(|u| u.to_string());
+                    let api_key_id = row.id.to_string();
+                    let lineage_id = row.lineage_id.to_string();
+                    state.audit.log(
+                        think_watch_common::audit::AuditActor::audit(
+                            &think_watch_common::audit::GatewayActor {
+                                user_id: user_id.as_deref(),
+                                user_email: None,
+                                api_key_id: Some(&api_key_id),
+                                api_key_lineage_id: Some(&lineage_id),
+                                ip: None,
+                                session_id: None,
+                            },
+                            LIMITS_UNAVAILABLE,
+                        )
+                        .detail(serde_json::json!({ "surface": surface })),
+                    );
+                    return Ok(limits_unavailable(surface, request.uri().path()));
+                };
 
                 let merged_models = intersect_allowlists(
                     row.allowed_models.clone(),
@@ -537,6 +656,64 @@ mod tests {
             intersect_allowlists(v(&["github__*"]), v(&["slack__*"]), t),
             v(&[])
         );
+    }
+
+    /// Limits that failed to load are not "no limits": failing closed
+    /// refuses the request, failing open runs it without them; limits
+    /// that loaded are used as they are either way.
+    #[test]
+    fn a_failed_limits_load_follows_the_fail_closed_setting() {
+        let key = uuid::Uuid::new_v4();
+        let failed = || Err(sqlx::Error::PoolTimedOut);
+        assert_eq!(limits_or_refusal(failed(), true, key), None);
+        assert_eq!(
+            limits_or_refusal(failed(), false, key),
+            Some((SurfaceConstraints::default(), SurfaceConstraints::default()))
+        );
+
+        let user = SurfaceConstraints {
+            ai_gateway: Some(think_watch_common::limits::SurfaceBlock::default()),
+            mcp_gateway: None,
+        };
+        let loaded = || Ok((user.clone(), SurfaceConstraints::default()));
+        for fail_closed in [true, false] {
+            assert_eq!(
+                limits_or_refusal(loaded(), fail_closed, key),
+                Some((user.clone(), SurfaceConstraints::default()))
+            );
+        }
+    }
+
+    /// The refusal is the limiter-unavailable answer: 429, a
+    /// `Retry-After`, the label, in the caller's format.
+    #[tokio::test]
+    async fn the_refusal_is_a_429_in_the_callers_format() {
+        async fn read(resp: Response) -> (u16, Option<String>, serde_json::Value) {
+            let status = resp.status().as_u16();
+            let retry = resp
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .map(|v| v.to_str().unwrap().to_string());
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, retry, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        let (status, retry, body) =
+            read(limits_unavailable("ai_gateway", "/v1/chat/completions")).await;
+        assert_eq!((status, retry.as_deref()), (429, Some("30")));
+        assert_eq!(body["error"]["message"], "Rate limited: limits_unavailable");
+
+        let (status, _, body) = read(limits_unavailable("ai_gateway", "/v1/messages")).await;
+        assert_eq!(status, 429);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["message"], "Rate limited: limits_unavailable");
+
+        let (status, retry, body) = read(limits_unavailable("mcp_gateway", "/mcp")).await;
+        assert_eq!((status, retry.as_deref()), (429, Some("30")));
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["error"]["message"], "Rate limited: limits_unavailable");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! MCP-specific lifecycle stages. Each stage takes
 //! `Authorized<McpSurface>` (the state every stage past
-//! [`common::lifecycle::stages::check_access`] sees) and either
+//! [`common::lifecycle::stages::check_limits`] sees) and either
 //! returns it unchanged on a continue, or returns
 //! `Err(JsonRpcResponse)` on a short-circuit (cache hit,
 //! breaker-open, etc.). Audit emission for short-circuits is

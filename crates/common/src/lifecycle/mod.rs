@@ -9,8 +9,8 @@
 //! ```text
 //! Raw<S>
 //!   → check_budget      (pre-call budget peek; charges nothing)
+//!   → check_access      (allowed_models / allowed_tools; charges nothing)
 //!   → check_limits      (rate-limit gate; charges only when it passes)
-//!   → check_access      (allowed_models / allowed_tools)
 //!   → surface-specific  (cache lookup, breaker, credential resolution,
 //!                        invoke_upstream → Invocation<S>)
 //!   → run_post_invoke
@@ -29,7 +29,7 @@
 //!   `record_outcome` / `write_cache` / `record_usage` /
 //!   `emit_audit` and short-circuit response factories.
 //! - [`state`] — per-stage state structs ([`state::Raw`],
-//!   [`state::LimitsChecked`], [`state::Authorized`],
+//!   [`state::AccessChecked`], [`state::Authorized`],
 //!   [`state::Invoked`], [`state::Emitted`]) plus the
 //!   [`state::Invocation`] / [`state::CapturedView`] enums that
 //!   model the buffered/streaming fork at `invoke_upstream`.

@@ -179,8 +179,10 @@ pub struct CapStatus {
     pub limit: i64,
 }
 
-/// Read the current spend for every cap in the slice. No mutation —
-/// used for "show me the dashboard".
+/// Read the current spend for every cap in the slice, in input order.
+/// No mutation. A counter that does not exist yet reads as 0; a read
+/// that fails is an error, never a 0 — the pre-call gate
+/// (`check_budget`) decides from it whether to fail open or closed.
 pub async fn current_spend(
     redis: &Client,
     caps: &[BudgetCap],
@@ -188,8 +190,7 @@ pub async fn current_spend(
     let now = Utc::now();
     let mut out = Vec::with_capacity(caps.len());
     for cap in caps {
-        let current = spend(redis, cap, now).await.unwrap_or(0);
-        out.push(cap_status(cap, current));
+        out.push(cap_status(cap, spend(redis, cap, now).await?));
     }
     Ok(out)
 }
@@ -422,6 +423,35 @@ mod tests {
         assert_eq!(crossed_thresholds(1100, 1200, 1000), Vec::<u8>::new());
         // limit = 0 (defensive — can't divide) → never fires
         assert_eq!(crossed_thresholds(0, 999, 0), Vec::<u8>::new());
+    }
+
+    /// A read that fails is an error, not an unspent budget: with
+    /// `.ok()` here the fail-closed branch of `check_budget` could never
+    /// run. A client that never connected times its commands out.
+    #[tokio::test]
+    async fn a_failed_read_is_an_error_not_zero() {
+        use fred::types::Builder;
+        use fred::types::config::Config;
+        let redis = Builder::from_config(Config::from_url("redis://127.0.0.1:1").unwrap())
+            .with_performance_config(|c| {
+                c.default_command_timeout = std::time::Duration::from_millis(50)
+            })
+            .build()
+            .unwrap();
+        let cap = BudgetCap {
+            id: uuid::Uuid::nil(),
+            subject_kind: BudgetSubject::User,
+            subject_id: uuid::Uuid::nil(),
+            period: BudgetPeriod::Daily,
+            limit_tokens: 100,
+            enabled: true,
+            expires_at: None,
+            reason: None,
+            created_by: None,
+        };
+        assert!(current_spend(&redis, &[cap]).await.is_err());
+        // No caps, nothing to read.
+        assert!(current_spend(&redis, &[]).await.unwrap().is_empty());
     }
 
     #[test]

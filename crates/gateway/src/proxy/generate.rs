@@ -709,7 +709,7 @@ async fn run(
         request_started_at,
     );
 
-    // 2. Rate limits, budget, model access — each stage writes its own
+    // 2. Budget, model access, rate limits — each stage writes its own
     //    audit row on short-circuit.
     let preflight = run_preflight_stages(&state, &identity, &trace_id, &mapped_model).await?;
 
@@ -756,7 +756,7 @@ async fn run(
     //    request can be converted at all. One that cannot — it continues a
     //    conversation kept on OpenAI's servers (`previous_response_id`), or
     //    carries a compaction only OpenAI can read — can still be forwarded
-    //    to an upstream of its own format, so that is where it goes (step 9).
+    //    to an upstream of its own format, so that is where it goes (step 8).
     let decoded =
         tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect));
 
@@ -798,24 +798,10 @@ async fn run(
         identity.user_email.clone(),
     );
 
-    // 7. Quota, keyed on the model the caller named — that is what their
-    //    dashboards group by.
-    let quota_key = identity
-        .user_id
-        .as_deref()
-        .or(identity.api_key_id.as_deref())
-        .map(|id| format!("{id}:{mapped_model}"))
-        .unwrap_or_else(|| mapped_model.clone());
-    if let Err(e) = state.quota.check_quota(&quota_key).await {
-        tracing::warn!("Quota exceeded for {quota_key}: {e}");
-        return Err(ctx
-            .emit(GatewayError::ProviderError(format!("Quota exceeded: {e}")))
-            .into());
-    }
-
-    // 8. Cache. A hit debits quota like a real call would — otherwise a
-    //    deterministic prompt amortises one upstream call across an
-    //    unbounded quota window.
+    // 7. Cache. A hit counts its tokens toward the token limits and
+    //    budgets like a real call would — the caller received them, and
+    //    otherwise repeating a cached prompt would get round every token
+    //    limit.
     let cache_fingerprint = if surface.caches {
         ResponseCache::fingerprint(&outbound_body).map(|mut fp| {
             // The cap is applied after this, per hop: an answer made under
@@ -846,18 +832,23 @@ async fn run(
         ) {
             return Err(ctx.emit(e).into());
         }
-        let total = cached.prompt_tokens + cached.completion_tokens;
-        if let Err(e) = state.quota.consume(&quota_key, total).await {
-            tracing::warn!(quota_key = %quota_key, tokens = total, "quota consume on cache hit failed: {e}");
-        }
-        super::accounting::count_cache_hit_usage(
-            &state.db,
-            &state.redis,
-            &state.weight_cache,
-            &mapped_model,
-            cached.prompt_tokens,
-            cached.completion_tokens,
+        // The tokens the stored answer records, weighted for this model,
+        // to the same rules and caps the pre-flight checked. No route
+        // answered, so no route cap counts them.
+        super::post_flight_account(
+            state.db.clone(),
+            state.redis.clone(),
+            state.dynamic_config.clone(),
+            state.weight_cache.clone(),
+            mapped_model.clone(),
+            cached_tokens(&cached),
             &preflight.limits,
+            None,
+            identity.user_id.clone(),
+            identity.user_email.clone(),
+            identity.api_key_id.clone(),
+            identity.ip_address.clone(),
+            state.audit.clone(),
         )
         .await;
 
@@ -918,7 +909,7 @@ async fn run(
         metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
     }
 
-    // 9. Route.
+    // 8. Route.
     let router = state.router.load();
     let routes = router.route(&mapped_model).ok_or_else(|| {
         ctx.emit(GatewayError::ProviderError(format!(
@@ -982,6 +973,7 @@ async fn run(
             provider_name: route.provider_name.clone(),
             upstream_model: route.upstream_model.clone(),
             sel_record,
+            caps: crate::route_caps::RouteCaps::of(route),
         },
         cache_enabled: surface.caches,
     };
@@ -1088,15 +1080,7 @@ async fn run(
     // Cache fill, audit, breaker and budget debit — the same hooks the
     // stream runs in its tail. The cache keeps the placeholder form.
     let deps = snapshot(entry, sel_record);
-    let completed = run_buffered_post_invoke(&deps, completed).await;
-
-    let (prompt, completion) = tokens(&completed.usage);
-    let total = prompt + completion;
-    if total > 0
-        && let Err(e) = state.quota.consume(&quota_key, total).await
-    {
-        tracing::warn!("Failed to consume quota: {e}");
-    }
+    run_buffered_post_invoke(&deps, completed).await;
 
     tracing::info!(
         request_id = %metadata.request_id,
@@ -1127,6 +1111,19 @@ pub(crate) fn tokens(u: &tw_dialect::usage::Usage) -> (u32, u32) {
         u32::try_from(u.prompt_total()).unwrap_or(u32::MAX),
         u32::try_from(u.output).unwrap_or(u32::MAX),
     )
+}
+
+/// What a cache hit counts toward token limits and budgets: the tokens
+/// its stored answer records. The store keeps only the input and output
+/// totals, so all of the input counts as plain input.
+fn cached_tokens(cached: &crate::cache::Cached) -> TokenCounts {
+    TokenCounts {
+        input: i64::from(cached.prompt_tokens),
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: false,
+        output: i64::from(cached.completion_tokens),
+    }
 }
 
 /// The same usage split the way it is priced: cache reads and writes

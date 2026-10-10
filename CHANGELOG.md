@@ -11,8 +11,49 @@ target.
 
 ## [Unreleased]
 
+Limits hold where they used to leak: route caps are enforced, a limits
+store that cannot be read follows `security.rate_limit_fail_closed`, a
+refused model or tool no longer spends a request, a team-scoped role no
+longer limits the gateway it does not open, and cached answers count their
+tokens. The legacy monthly token quota is gone.
+
 ### Read before upgrading
 
+- **Route caps are enforced.** A route's RPM cap and TPM cap
+  (`model_routes.rpm_cap` / `tpm_cap`, set in the route editor) were saved
+  but never applied. They now are, per route over a sliding minute, the TPM
+  cap in weighted tokens like every other token limit (counted after the
+  response). A route at either cap is skipped and the model's next route
+  serves the request; when every route left is at its cap, the request gets
+  429 with `Retry-After`, labelled `route:requests/1m` or
+  `route:tokens/1m`. Review the caps already set on your routes: a cap that
+  did nothing until now takes effect on upgrade. Routes with a cap write new
+  Redis keys, `ratelimit:{route:<route_id>}:ai_gateway:route:…`.
+- **A limits store that cannot be read follows
+  `security.rate_limit_fail_closed`.** When the database failed while a
+  request's rate limits and budgets were being loaded, the request ran with
+  no limits at all; when Redis failed while a budget was being read, the
+  budget read as unspent. Both now follow the setting, as a Redis failure
+  in the rate limiter always has, and so do the route caps: off (the
+  default), the request goes on and a warning with the error is logged
+  (`gateway_limits_load_fail_open_total`,
+  `lifecycle_budget_fail_open_total`); on, the request is refused with 429,
+  `Retry-After: 30`, labelled `limits_unavailable`, `budget_unavailable` or
+  `rate_limiter_unavailable`.
+- **A role granted at team scope no longer limits gateway requests.** Such
+  a grant administers that team and has never opened a model or an MCP tool
+  at the gateways, but its rate limits and budgets were applied to every
+  gateway request of the user who held it. A role's limits now apply
+  exactly where its gateway grant does: roles assigned globally, and roles
+  attached to a team the user is a member of. A user who held a limiting
+  role only at team scope is no longer held to its limits; assign the role
+  globally, attach it to the team, or set a user limit if they were meant.
+- **Answers from the response cache count their tokens.** A cache hit
+  counted toward request limits but added no tokens to token limits and
+  budgets, so repeating a cached request got round them. It now adds the
+  tokens the cached answer records, weighted like any answer (all of its
+  input as plain input). The cost a cache hit reports stays 0. Callers that
+  lean on the cache reach their token limits and budgets sooner.
 - **Each API key and each user get day and month usage counters in Redis.**
   An AI-gateway request made with a key now also counts on the key's
   `usage:{user:<owner id>}:api_key_lineage:<lineage id>:daily:<date>` and
@@ -81,6 +122,35 @@ target.
   Reading needs `rate_limits:read` and changing `rate_limits:write`, in a
   scope that covers the key, as before; without write access the tab is
   read-only, and without read access the dialog is unchanged.
+
+### Fixed
+
+- **A request the key may not make no longer spends a request limit.** The
+  rate-limit check, which counts the request, ran before the model check on
+  the AI gateway and before the tool check on the MCP gateway, so a refused
+  model or tool used up the caller's `requests` limits. Access is now
+  checked first (after the budget check, which counts nothing).
+- **Route caps are applied**, **limits and budgets that cannot be read
+  follow the fail-closed setting**, **team-scoped roles no longer limit**
+  and **cached answers count their tokens**: see Read before upgrading.
+- Comments that described a limits cache, a `limits:changed` subscriber and
+  team-level budget caps, none of which exist, now say what happens: limits
+  are read from the database on every request, nothing subscribes to
+  `limits:changed`, and teams carry no limits of their own.
+
+### Changed
+
+- **The legacy monthly token quota is removed.** Every request counted its
+  tokens into `quota:{<user or key>:<model>}:used:<YYYY-MM>` in Redis
+  against a limit nothing could set, so it never refused anything. The
+  gateway no longer reads or writes these keys; existing `quota:*` keys can
+  be deleted. Monthly limits are budgets. Its metric,
+  `gateway_quota_overflow_total`, is gone too: the Grafana overview panel
+  that plotted it shows routes at their cap (`gateway_route_capped_total`)
+  instead.
+- The `security.rate_limit_fail_closed` hint in Settings names everything
+  the setting now covers.
+
 
 ## [3.4.0] — 2026-10-11
 

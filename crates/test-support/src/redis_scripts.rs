@@ -1,6 +1,7 @@
 //! The rate-limit scripts, run against whatever Redis a test hands in —
 //! one node in `tests/limits.rs`, a Redis Cluster in
-//! `tests/redis_cluster.rs`.
+//! `tests/redis_cluster.rs`. The route caps run on the same scripts
+//! with their own keys.
 
 use uuid::Uuid;
 
@@ -76,4 +77,42 @@ pub async fn exercise_the_limit_scripts(redis: &fred::clients::Client) {
     let tokens = sliding::ResolvedRule::new(&rules[1], owner);
     assert_eq!(redis.hlen::<i64, _>(&requests.key).await.unwrap(), 1);
     assert_eq!(redis.hlen::<i64, _>(&tokens.key).await.unwrap(), 0);
+}
+
+/// A route's caps on the same scripts: the request cap fills and counts
+/// nothing more once full, recorded tokens close the token cap, and a
+/// route's two counters run in one script (one hash slot).
+pub async fn exercise_the_route_cap_scripts(redis: &fred::clients::Client) {
+    use think_watch_gateway::route_caps::{self, Admission, RouteCaps};
+
+    let caps = RouteCaps {
+        route_id: Uuid::new_v4(),
+        rpm: Some(2),
+        tpm: Some(100),
+    };
+    let t0: i64 = 1_800_000_000_000;
+    let admit = |ms: i64| route_caps::admit_at(redis, &caps, true, t0 + ms);
+
+    assert_eq!(admit(0).await.unwrap(), Admission::Admitted);
+    assert_eq!(admit(10_000).await.unwrap(), Admission::Admitted);
+    // Full: the first request leaves the window at t0 + 60 s.
+    assert_eq!(
+        admit(20_000).await.unwrap(),
+        Admission::Capped {
+            label: "route:requests/1m".into(),
+            retry_after_secs: 40,
+        }
+    );
+    // Room again for one request; the tokens then fill the token cap.
+    assert_eq!(admit(60_000).await.unwrap(), Admission::Admitted);
+    route_caps::record_tokens_at(redis, &caps, 150, t0 + 60_000).await;
+    assert_eq!(
+        admit(65_000).await.unwrap(),
+        Admission::Capped {
+            label: "route:tokens/1m".into(),
+            retry_after_secs: 55,
+        }
+    );
+    // A minute on, both windows are clear.
+    assert_eq!(admit(121_000).await.unwrap(), Admission::Admitted);
 }
