@@ -3,7 +3,8 @@
 //!   - a limits store that cannot be read follows
 //!     `security.rate_limit_fail_closed` — the database the limits are
 //!     loaded from, and the Redis a budget is read from — instead of
-//!     reading as "no limits";
+//!     reading as "no limits", and `GET /v1/usage` does not report
+//!     limits it could not load as none;
 //!   - a route's `rpm_cap` / `tpm_cap` is enforced: a route at its cap
 //!     is skipped, and with every route capped the request gets 429;
 //!   - a request the key may not make (its model, its MCP tool) is
@@ -158,6 +159,41 @@ async fn limits_that_cannot_be_loaded_let_the_request_through_when_failing_open(
         .await
         .unwrap()
         .assert_ok();
+}
+
+/// `GET /v1/usage` reports the limits that hold the key. Limits that
+/// can't be loaded leave it nothing true to report — an empty list would
+/// say the key has none — so it is a 503 whichever way the setting goes,
+/// while a model request follows the setting.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_with_limits_that_cannot_be_loaded_is_unavailable() {
+    let app = TestApp::spawn().await;
+    let (key, _) = seed(&app, None).await;
+    let gw = gateway(&app, &key);
+    let before = gw.get("/v1/usage").await.unwrap();
+    before.assert_ok();
+
+    break_the_limits_table(&app).await;
+    for fail_closed in [false, true] {
+        app.set_setting("security.rate_limit_fail_closed", json!(fail_closed))
+            .await;
+        let r = gw.get("/v1/usage").await.unwrap();
+        assert_eq!(
+            r.status.as_u16(),
+            503,
+            "fail_closed={fail_closed}: {}",
+            r.text()
+        );
+        let body: Json = r.json().unwrap();
+        assert_eq!(
+            body["error"]["message"],
+            "The key's limits and usage are unavailable."
+        );
+        let model = gw.post("/v1/chat/completions", chat(MODEL)).await.unwrap();
+        let expected = if fail_closed { 429 } else { 200 };
+        assert_eq!(model.status.as_u16(), expected, "body={}", model.text());
+    }
 }
 
 // ----------------------------------------------------------------------------

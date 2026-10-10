@@ -316,10 +316,17 @@ async fn cost_this_month(
 /// room it may not have.
 fn unavailable(e: &fred::error::Error) -> Response {
     tracing::warn!("key usage read failed: {e}");
+    unavailable_response()
+}
+
+/// 503: the key's limits or their counters could not be read. Also what
+/// `require_api_key_to_read` answers when the limits cannot be loaded —
+/// an empty `limits` list would say the key has none.
+pub(crate) fn unavailable_response() -> Response {
     let body = tw_dialect::convert::error_body(
         tw_dialect::ir::Dialect::Chat,
         StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-        "Usage counters are unavailable.",
+        "The key's limits and usage are unavailable.",
     );
     (
         StatusCode::SERVICE_UNAVAILABLE,
