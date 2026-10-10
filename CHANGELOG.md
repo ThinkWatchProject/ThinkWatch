@@ -11,6 +11,25 @@ target.
 
 ## [Unreleased]
 
+## [3.3.1] — 2026-10-10
+
+Streams are logged as they ended. A caller that hangs up once it has read
+the whole answer, as Codex does, finished the request; an error the
+upstream or Bedrock reports partway through a stream is logged with the
+status the same error has as an answer, and counts against the route only
+when that answer would; a Responses WebSocket turn ends at its last event.
+The thinkwatch-core crates move from v0.67.1 to v0.68.0.
+
+### Read before upgrading
+
+- **Request logs and error rates change for streams.** Codex streams that
+  were logged as cancelled (`499`) are logged as finished (`200`) and
+  billed on the reported usage. Streams the upstream failed partway are
+  logged with a `4xx` or `5xx` `status_code` instead of `200`, so error
+  rates that count `status_code` ≥ 400 include them; `client_status`
+  keeps the `200` the caller received. No configuration, database schema,
+  API or Helm value changes.
+
 ### Fixed
 
 - **A caller that hangs up on the answer's last event finished the
@@ -1677,7 +1696,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.3.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.3.1...HEAD
+[3.3.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.1
 [3.3.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.0
 [3.2.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.1
 [3.2.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.2.0

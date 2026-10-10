@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.3.0"
+version = "3.3.1"
 edition = "2024"
 # The MSRV: the newest `rust-version` among the locked dependencies
 # (sqlx 0.9 and the aws-smithy crates under aws-sigv4). Without it,
