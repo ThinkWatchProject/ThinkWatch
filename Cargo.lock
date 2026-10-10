@@ -4837,8 +4837,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.68.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=2c4386bbfe285e00bb846cb52060311bad8bde34#2c4386bbfe285e00bb846cb52060311bad8bde34"
+version = "0.69.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.69.0#13d039d812f39445d44f59b46d33845715bb33ed"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4852,16 +4852,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.68.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=2c4386bbfe285e00bb846cb52060311bad8bde34#2c4386bbfe285e00bb846cb52060311bad8bde34"
+version = "0.69.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.69.0#13d039d812f39445d44f59b46d33845715bb33ed"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.68.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=2c4386bbfe285e00bb846cb52060311bad8bde34#2c4386bbfe285e00bb846cb52060311bad8bde34"
+version = "0.69.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.69.0#13d039d812f39445d44f59b46d33845715bb33ed"
 dependencies = [
  "memchr",
  "serde",
@@ -4870,8 +4870,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.68.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=2c4386bbfe285e00bb846cb52060311bad8bde34#2c4386bbfe285e00bb846cb52060311bad8bde34"
+version = "0.69.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.69.0#13d039d812f39445d44f59b46d33845715bb33ed"
 dependencies = [
  "base64 0.22.1",
  "bytes",

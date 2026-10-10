@@ -363,13 +363,10 @@ impl Outbound {
     /// request defined the tool, into a structured one (see
     /// `tw_dialect::chat::text_calls`); a forwarded answer reaches the
     /// caller as the upstream wrote it, text included, and is assembled as
-    /// that. The conversion recognises these calls by the request's tool
-    /// names, so a forwarded Chat answer is assembled knowing none of them
-    /// — except the freeform tools, whose input is unwrapped the same way
-    /// either way.
+    /// that (`Session::keep_text_calls`).
     fn forwarded_session(&self, body: &Value, model: &str, target: &Target) -> Session {
         let client = self.surface.dialect;
-        let mut request =
+        let request =
             match tw_dialect::convert::decode(client, body, &self.path, internal_query(client)) {
                 Ok(decoded) => decoded.request,
                 Err(_) => tw_dialect::ir::Request {
@@ -378,12 +375,9 @@ impl Outbound {
                     ..Default::default()
                 },
             };
-        if client == Dialect::Chat {
-            request
-                .tools
-                .retain(|t| matches!(t.kind, tw_dialect::ir::ToolKind::Freeform { .. }));
-        }
-        tw_dialect::convert::encode(&request, target).session
+        tw_dialect::convert::encode(&request, target)
+            .session
+            .keep_text_calls()
     }
 
     /// Address the request to `protocol`, naming `model` upstream.
