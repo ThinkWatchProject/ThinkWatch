@@ -259,9 +259,9 @@ pub(crate) fn build_chat_pump(
                     Some(t) => t
                         .feed(&raw)
                         .map(Bytes::from)
-                        .map_err(|e| format!("Bedrock ended the stream: {e}")),
+                        .map_err(|e| bedrock_ended(&provider, e)),
                 },
-                Err(e) => Err(format!("The upstream stream broke off: {e}")),
+                Err(e) => Err(broke_off(format!("The upstream stream broke off: {e}"))),
             };
             match item {
                 Ok(chunk) => {
@@ -293,21 +293,16 @@ pub(crate) fn build_chat_pump(
                         yield Ok(Bytes::from(out));
                     }
                 }
-                Err(message) => {
+                Err((message, outcome)) => {
                     // Headers are gone; the only way left to say it is in
                     // the stream, in the caller's own format.
-                    tracing::warn!("{message}");
                     let tail = match convert.as_mut() {
                         Some(c) => c.fail(&message),
                         None => error_frame(client, 502, &message),
                     };
                     let mut out = shaper.process(&tail);
                     out.extend(shaper.finish());
-                    tell(&mut done_tx, StreamOutcome::UpstreamError {
-                        error_type: "transport".into(),
-                        message,
-                        status_code: 502,
-                    });
+                    tell(&mut done_tx, outcome);
                     yield Ok(Bytes::from(out));
                     return;
                 }
@@ -658,6 +653,64 @@ fn failed_partway(provider: &str, said: &Said) -> StreamOutcome {
         message,
         status_code: e.status_code(),
     }
+}
+
+/// A stream that broke off in transit: what the client is told, and the
+/// outcome. No usable answer arrived — the upstream's failure, 502.
+fn broke_off(message: String) -> (String, StreamOutcome) {
+    tracing::warn!("{message}");
+    let outcome = StreamOutcome::UpstreamError {
+        error_type: "transport".into(),
+        message: message.clone(),
+        status_code: 502,
+    };
+    (message, outcome)
+}
+
+/// Bedrock's event stream ended in an error: what the client is told —
+/// the same whichever it was — and the outcome.
+///
+/// A damaged frame broke the stream off. An exception Bedrock reported
+/// in the stream (a `throttlingException` partway through, say) is an
+/// error the upstream reported, recorded like the others (see
+/// [`failed_partway`]) with the status [`bedrock_status`] gives it.
+fn bedrock_ended(
+    provider: &str,
+    e: tw_bedrock::eventstream::StreamError,
+) -> (String, StreamOutcome) {
+    use tw_bedrock::eventstream::StreamError;
+
+    let told = format!("Bedrock ended the stream: {e}");
+    match e {
+        StreamError::Malformed(_) => broke_off(told),
+        StreamError::Upstream { kind, message } => {
+            let said = Said {
+                message: format!("{kind}: {message}"),
+                status: Some(bedrock_status(&kind)),
+            };
+            (told, failed_partway(provider, &said))
+        }
+    }
+}
+
+/// The status of an exception Bedrock reports in its event stream, as the
+/// desktop gateway reads one that arrives in a stream: throttling 429,
+/// an invalid request 400, access denied 403, a model timeout 504, the
+/// service unavailable 503, and any other exception (an internal error,
+/// a model stream error) 500. Bedrock names them in camel case
+/// (`throttlingException`); any case is read.
+fn bedrock_status(kind: &str) -> u16 {
+    const STATUSES: [(&str, u16); 5] = [
+        ("throttlingException", 429),
+        ("serviceUnavailableException", 503),
+        ("validationException", 400),
+        ("accessDeniedException", 403),
+        ("modelTimeoutException", 504),
+    ];
+    STATUSES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(kind))
+        .map_or(500, |(_, status)| *status)
 }
 
 /// Tell the tail how the stream ended. Only the first outcome counts.
@@ -1246,6 +1299,101 @@ mod tests {
         );
         assert!(crate::proxy::upstream_failed(&error_type, status_code));
         assert!(!message.contains("arn:aws"), "{message}");
+    }
+
+    /// What a Bedrock stream that ended in `e` is recorded as, with
+    /// whether it counts against the route, and what the client is told.
+    fn bedrock_recorded(e: tw_bedrock::eventstream::StreamError) -> (String, i64, bool, String) {
+        let (told, outcome) = bedrock_ended("bedrock-main", e);
+        let StreamOutcome::UpstreamError {
+            error_type,
+            status_code,
+            ..
+        } = outcome
+        else {
+            panic!("not a failure");
+        };
+        let counted = crate::proxy::upstream_failed(&error_type, status_code);
+        (error_type, status_code, counted, told)
+    }
+
+    fn exception(kind: &str, message: &str) -> tw_bedrock::eventstream::StreamError {
+        tw_bedrock::eventstream::StreamError::Upstream {
+            kind: kind.into(),
+            message: message.into(),
+        }
+    }
+
+    /// An exception Bedrock reports in its stream is recorded as the same
+    /// exception as an answer: throttling stays a 429 and counts like one,
+    /// a request Bedrock refuses does not count against the route.
+    #[test]
+    fn a_bedrock_exception_in_the_stream_is_classified_by_its_name() {
+        let (error_type, status, counted, told) =
+            bedrock_recorded(exception("throttlingException", "Too many requests"));
+        assert_eq!(
+            (error_type.as_str(), status, counted),
+            ("UpstreamRateLimited", 429, true)
+        );
+        // The client is told what it was told before.
+        assert_eq!(
+            told,
+            "Bedrock ended the stream: throttlingException: Too many requests"
+        );
+
+        let (error_type, status, counted, _) =
+            bedrock_recorded(exception("validationException", "Malformed input request"));
+        assert_eq!(
+            (error_type.as_str(), status, counted),
+            ("ProviderHttpError", 400, false)
+        );
+
+        for (kind, expected) in [
+            ("internalServerException", 500),
+            ("modelStreamErrorException", 500),
+            ("serviceUnavailableException", 503),
+            ("modelTimeoutException", 504),
+            ("ThrottlingException", 429),
+        ] {
+            let (_, status, counted, _) = bedrock_recorded(exception(kind, "x"));
+            assert_eq!((status, counted), (expected, true), "{kind}");
+        }
+
+        // Access denied keeps the IAM principal out of the row, as a 403
+        // answer does.
+        let (_, outcome) = bedrock_ended(
+            "bedrock-main",
+            exception(
+                "accessDeniedException",
+                "User: arn:aws:iam::123456789012:user/gateway is not authorized",
+            ),
+        );
+        let StreamOutcome::UpstreamError {
+            error_type,
+            message,
+            status_code,
+        } = outcome
+        else {
+            panic!("not a failure");
+        };
+        assert_eq!(
+            (error_type.as_str(), status_code),
+            ("UpstreamAuthError", 401)
+        );
+        assert!(!message.contains("arn:aws"), "{message}");
+    }
+
+    /// A damaged frame broke the stream off: no usable answer arrived.
+    #[test]
+    fn a_damaged_bedrock_frame_broke_the_stream_off() {
+        let (error_type, status, counted, told) = bedrock_recorded(
+            tw_bedrock::eventstream::StreamError::Malformed("bad CRC".into()),
+        );
+        assert_eq!(
+            (error_type.as_str(), status, counted),
+            ("transport", 502, true)
+        );
+        assert!(told.starts_with("Bedrock ended the stream: "), "{told}");
     }
 
     /// A Gemini answer ends with its stream, whichever form the caller

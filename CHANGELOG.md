@@ -54,6 +54,24 @@ target.
   - The rows of other streams that failed after the response went out as
     `200` — broken off, cut by tool-call inspection, refused by the
     upstream before its first byte — carry `client_status` too.
+- **An exception Bedrock reports partway through a stream is logged as
+  the same exception as an answer.** Bedrock reports a failure in a
+  stream it has started as an exception event: `throttlingException` when
+  it throttles partway through, `validationException`,
+  `internalServerException`, `serviceUnavailableException` and others.
+  Each was logged as the stream breaking off in transit (`502`,
+  `error_type` `transport`) and counted against the route's circuit
+  breaker. Each is now logged with the status the desktop gateway gives
+  that exception and with what Bedrock said: throttling `429`
+  (`UpstreamRateLimited`), an invalid request `400`, a model timeout
+  `504`, the service unavailable `503`, any other exception `500`
+  (`ProviderHttpError`). Access denied is logged as a refused credential
+  (`UpstreamAuthError`), without Bedrock's words, which name the IAM
+  principal, as for a `403` answer. The route's health and circuit breaker treat it
+  as they treat that answer (see the previous entry), so a request Bedrock
+  refuses as invalid no longer counts against the route. What the caller
+  receives is unchanged, and a damaged event-stream frame is still logged
+  as `transport` `502`.
 - **A Responses WebSocket turn ends at its last event.** On
   `GET /v1/responses` over a WebSocket, a turn lasted until the upstream's
   stream ended, and the connection took the next turn only then, so an
