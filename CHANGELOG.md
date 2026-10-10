@@ -92,6 +92,19 @@ target.
     is read on from where it stopped, nothing nested inside a usage object
     is counted as a second usage, and a stream that arrives in chunks
     shorter than the `"usage"` key no longer loses it.
+  - **A `null` error in a stream chunk is not an error** (tw-dialect).
+    Some OpenAI-compatible relays and Gemini-format upstreams write
+    `"error": null` in every streamed chunk, and the Chat and Gemini stream
+    readers took each such chunk for an error the upstream reported. A
+    stream converted to another format ended in an error and lost its
+    text, and for such a stream forwarded as sent, no assembled answer was
+    cached or captured as the response body. A Gemini caller's tool result
+    carrying `"error": null` and no `output` went to an upstream of
+    another format as a failed one. A `null` error is now ignored, and a
+    Chat chunk's error without a message reaches the caller of a converted
+    stream as a fixed sentence instead of the whole chunk, which could hold
+    answer text. The gateway's own check for an error partway through a
+    stream (see Fixed) ignores a `null` error as well.
   - `tw_dialect::convert::ends_answer` recognises an answer's last event.
     The gateway uses it to tell a caller that left after the whole answer
     from one that left partway, and to end a WebSocket turn (see Fixed).
