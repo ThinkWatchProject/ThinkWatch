@@ -117,6 +117,60 @@ impl MockProvider {
     }
 }
 
+/// A Responses upstream whose stream stays open for `linger` after its
+/// last event, `response.completed`, as the ChatGPT Codex backend's often
+/// does. Every `POST /v1/responses` gets one streamed answer, "ok", with
+/// usage of 23 input and 5 output tokens. Returns its base URL.
+///
+/// wiremock sends a body in one piece and ends it, so this is a server
+/// of its own.
+pub async fn responses_stream_lingering(model: &str, linger: std::time::Duration) -> String {
+    let event = |kind: &str, mut v: Value| {
+        v["type"] = json!(kind);
+        format!("event: {kind}\ndata: {v}\n\n")
+    };
+    let frames = [
+        event(
+            "response.created",
+            json!({"response": {"id": "resp_1", "model": model, "status": "in_progress"}}),
+        ),
+        event(
+            "response.output_text.delta",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "ok"}),
+        ),
+        event(
+            "response.completed",
+            json!({"response": {
+                "id": "resp_1", "model": model, "status": "completed",
+                "output": [{"type": "message", "id": "msg_1", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": {"input_tokens": 23, "output_tokens": 5, "total_tokens": 28}
+            }}),
+        ),
+    ]
+    .concat();
+    let answer = axum::routing::post(move || {
+        let frames = frames.clone();
+        async move {
+            let body = async_stream::stream! {
+                yield Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frames));
+                tokio::time::sleep(linger).await;
+            };
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(body))
+                .unwrap()
+        }
+    });
+    let app = axum::Router::new().route("/v1/responses", answer);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 fn openai_sse_chunks(model: &str) -> Vec<u8> {
     let chunk = |delta: Value| {
         format!(

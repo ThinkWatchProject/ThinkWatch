@@ -487,6 +487,64 @@ async fn a_stream_the_caller_leaves_is_billed_on_an_estimate() {
     assert_eq!(detail["usage_estimated"], true, "{detail}");
 }
 
+/// Codex hangs up as soon as it has read `response.completed`, without
+/// waiting for the stream to end, and an upstream can end its stream a
+/// while after that frame. The caller left having read the whole answer:
+/// the request finished, and is billed on the usage the upstream
+/// reported, not logged as cancelled.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_caller_that_leaves_after_the_last_frame_finished_the_request() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let upstream = think_watch_test_support::mock_provider::responses_stream_lingering(
+        "gpt-linger",
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let (key, user_id) = seed_upstream(&app, &upstream, "openai", "gpt-linger").await;
+    // Forwarded as sent: the caller reads the upstream's own frames.
+    sqlx::query(
+        "UPDATE model_routes SET upstream_protocol = 'openai_responses' WHERE model_id = $1",
+    )
+    .bind("gpt-linger")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+
+    let mut resp = reqwest::Client::new()
+        .post(format!("{}/v1/responses", app.gateway_url))
+        .bearer_auth(&key)
+        .json(&json!({"model": "gpt-linger", "stream": true, "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    // Read the way Codex does: up to the end of `response.completed`, then
+    // hang up.
+    let mut got = String::new();
+    while !got
+        .find("event: response.completed\n")
+        .is_some_and(|at| got[at..].contains("\n\n"))
+    {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+            .await
+            .expect("response.completed within 10s")
+            .unwrap()
+            .expect("the stream is still open");
+        got.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    drop(resp);
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
+    let (status, input, output, cost, detail) = last_gateway_log(ch, user_id).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!((input, output), (23, 5), "{detail}");
+    assert!(cost > Decimal::ZERO, "{detail}");
+    assert!(detail.get("stream_outcome").is_none(), "{detail}");
+    assert!(detail.get("usage_estimated").is_none(), "{detail}");
+}
+
 /// Input read from the prompt cache is billed at a tenth of the input
 /// price and input written to it at 1.25×, not all at the full price —
 /// and the budget counter is debited by the same weights.

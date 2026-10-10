@@ -18,6 +18,7 @@
 //! - `emit_audit` → `prepare_body_capture` + `emit_gateway_log_with_extra`.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::GatewayError;
@@ -159,7 +160,17 @@ pub(crate) type OpenUpstream = Pin<
 ///
 /// **A dropped stream is a cancelled request.** When the client goes,
 /// hyper drops the body, and with it the sender the tail is waiting on;
-/// the tail then records `ClientCancelled`.
+/// the tail then records `ClientCancelled` — unless the answer's last
+/// frame had already gone out (see [`LastFrame`]). A client that leaves
+/// after that leaves having read the whole answer: Codex closes the
+/// connection as soon as it has `response.completed`, and an upstream can
+/// end its stream a while after that frame. The request finished, and is
+/// recorded as `Natural`.
+///
+/// For the same reason a stream that ends here tells its outcome before
+/// its last bytes go out, not after: a consumer that stops reading at
+/// those bytes, as the WebSocket relay does at a turn's last event, never
+/// polls the stream again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_chat_pump(
     open: OpenUpstream,
@@ -185,6 +196,9 @@ pub(crate) fn build_chat_pump(
     let readers_for_tail = Arc::clone(&readers);
 
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+    // Set once the answer's last frame is handed to the client.
+    let delivered = Arc::new(AtomicBool::new(false));
+    let delivered_for_tail = Arc::clone(&delivered);
 
     // Tool calls are inspected on what the client is about to receive —
     // converted, if it was, and with redacted values restored — since that
@@ -198,6 +212,7 @@ pub(crate) fn build_chat_pump(
         provider.to_string(),
     );
 
+    let mut last_frame = LastFrame::new(client, client_sse);
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
 
@@ -209,14 +224,12 @@ pub(crate) fn build_chat_pump(
                 // so a throttled upstream stays 429 on the audit row.
                 let mut out = shaper.process(&error_frame(client, e.status_code(), &e.to_string()));
                 out.extend(shaper.finish());
+                tell(&mut done_tx, StreamOutcome::UpstreamError {
+                    error_type: e.error_tag().to_string(),
+                    message: e.to_string(),
+                    status_code: e.status_code(),
+                });
                 yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(out));
-                if let Some(tx) = done_tx.take() {
-                    let _ = tx.send(StreamOutcome::UpstreamError {
-                        error_type: e.error_tag().to_string(),
-                        message: e.to_string(),
-                        status_code: e.status_code(),
-                    });
-                }
                 return;
             }
         };
@@ -259,17 +272,19 @@ pub(crate) fn build_chat_pump(
                     // still goes out, then the refusal.
                     let stop = inspector.as_mut().and_then(|i| i.check(&out));
                     if let Some((err, safe)) = stop {
-                        yield Ok(Bytes::from(cut(&shaper, convert.as_mut(), client, &out[..safe], &err)));
-                        if let Some(tx) = done_tx.take() {
-                            let _ = tx.send(StreamOutcome::UpstreamError {
-                                error_type: err.error_tag().to_string(),
-                                message: err.to_string(),
-                                status_code: err.status_code(),
-                            });
-                        }
+                        let out = cut(&shaper, convert.as_mut(), client, &out[..safe], &err);
+                        tell(&mut done_tx, StreamOutcome::UpstreamError {
+                            error_type: err.error_tag().to_string(),
+                            message: err.to_string(),
+                            status_code: err.status_code(),
+                        });
+                        yield Ok(Bytes::from(out));
                         return;
                     }
                     if !out.is_empty() {
+                        if last_frame.is_in(&out) {
+                            delivered.store(true, Ordering::Release);
+                        }
                         yield Ok(Bytes::from(out));
                     }
                 }
@@ -283,14 +298,12 @@ pub(crate) fn build_chat_pump(
                     };
                     let mut out = shaper.process(&tail);
                     out.extend(shaper.finish());
+                    tell(&mut done_tx, StreamOutcome::UpstreamError {
+                        error_type: "transport".into(),
+                        message,
+                        status_code: 502,
+                    });
                     yield Ok(Bytes::from(out));
-                    if let Some(tx) = done_tx.take() {
-                        let _ = tx.send(StreamOutcome::UpstreamError {
-                            error_type: "transport".into(),
-                            message,
-                            status_code: 502,
-                        });
-                    }
                     return;
                 }
             }
@@ -302,21 +315,18 @@ pub(crate) fn build_chat_pump(
         // stop), so they are inspected too.
         let stop = inspector.as_mut().and_then(|i| i.check(&out));
         if let Some((err, safe)) = stop {
-            yield Ok(Bytes::from(cut(&shaper, None, client, &out[..safe], &err)));
-            if let Some(tx) = done_tx.take() {
-                let _ = tx.send(StreamOutcome::UpstreamError {
-                    error_type: err.error_tag().to_string(),
-                    message: err.to_string(),
-                    status_code: err.status_code(),
-                });
-            }
+            let out = cut(&shaper, None, client, &out[..safe], &err);
+            tell(&mut done_tx, StreamOutcome::UpstreamError {
+                error_type: err.error_tag().to_string(),
+                message: err.to_string(),
+                status_code: err.status_code(),
+            });
+            yield Ok(Bytes::from(out));
             return;
         }
+        tell(&mut done_tx, StreamOutcome::Natural);
         if !out.is_empty() {
             yield Ok(Bytes::from(out));
-        }
-        if let Some(tx) = done_tx.take() {
-            let _ = tx.send(StreamOutcome::Natural);
         }
     };
 
@@ -338,7 +348,13 @@ pub(crate) fn build_chat_pump(
     let input_estimate = request.input_estimate;
 
     let tail = Box::pin(async move {
-        let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
+        let outcome = match done_rx.await {
+            Ok(outcome) => outcome,
+            // Dropped after the answer's last frame went out: the client
+            // left having read all of it.
+            Err(_) if delivered_for_tail.load(Ordering::Acquire) => StreamOutcome::Natural,
+            Err(_) => StreamOutcome::ClientCancelled,
+        };
         metrics::counter!(
             "gateway_stream_completion_total",
             "outcome" => outcome.metric_label()
@@ -398,6 +414,50 @@ pub(crate) fn build_chat_pump(
         }
     });
     (response, tail)
+}
+
+/// Tell the tail how the stream ended. Only the first outcome counts.
+fn tell(done_tx: &mut Option<tokio::sync::oneshot::Sender<StreamOutcome>>, outcome: StreamOutcome) {
+    if let Some(tx) = done_tx.take() {
+        let _ = tx.send(outcome);
+    }
+}
+
+/// Watches what the client receives for the answer's last frame
+/// (`tw_dialect::convert::ends_answer`): Responses `response.completed`,
+/// `response.incomplete` or `response.failed`, Anthropic `message_stop`,
+/// Chat `[DONE]`. A Gemini answer has none, SSE or JSON array: it ends
+/// with the stream.
+struct LastFrame {
+    client: Dialect,
+    /// `None` once the frame was seen, and for an answer without one.
+    frames: Option<tw_dialect::frame::Decoder>,
+}
+
+impl LastFrame {
+    fn new(client: Dialect, client_sse: bool) -> Self {
+        let has_one = client_sse && !matches!(client, Dialect::Gemini | Dialect::Bedrock);
+        Self {
+            client,
+            frames: has_one.then(Default::default),
+        }
+    }
+
+    /// Whether `out`, the next bytes the client receives, completes the
+    /// last frame. True once; nothing is read after it.
+    fn is_in(&mut self, out: &[u8]) -> bool {
+        let Some(frames) = self.frames.as_mut() else {
+            return false;
+        };
+        let found = frames
+            .feed(out)
+            .iter()
+            .any(|f| tw_dialect::convert::ends_answer(self.client, f));
+        if found {
+            self.frames = None;
+        }
+        found
+    }
 }
 
 /// Reframe a client-format SSE stream as Gemini's JSON-array stream (see
@@ -690,5 +750,41 @@ fn usage_estimated(view: &CapturedView<ChatCompletionSurface>) -> bool {
         CapturedView::Streaming { captured, .. } => captured.usage_estimated,
         CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => c.usage_estimated,
         CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_last_frame_is_seen_in_the_chunk_that_completes_it() {
+        let mut w = LastFrame::new(Dialect::Responses, true);
+        // The model's text naming the event is not the event.
+        assert!(!w.is_in(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"response.completed\"}\n\n"
+        ));
+        assert!(!w.is_in(b"event: response.completed\ndata: {\"type\":\"response.com"));
+        assert!(w.is_in(b"pleted\",\"response\":{\"status\":\"completed\"}}\n\n"));
+        // Seen once.
+        assert!(!w.is_in(b"event: response.completed\ndata: {}\n\n"));
+
+        let mut w = LastFrame::new(Dialect::Anthropic, true);
+        assert!(!w.is_in(b"event: message_delta\ndata: {\"type\":\"message_delta\"}\n\n"));
+        assert!(w.is_in(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+
+        let mut w = LastFrame::new(Dialect::Chat, true);
+        assert!(!w.is_in(b"data: {\"choices\":[]}\n\n"));
+        assert!(w.is_in(b"data: [DONE]\n\n"));
+    }
+
+    /// A Gemini answer ends with its stream, whichever form the caller
+    /// reads it in.
+    #[test]
+    fn a_gemini_answer_has_no_last_frame() {
+        let last = b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n";
+        for sse in [true, false] {
+            assert!(!LastFrame::new(Dialect::Gemini, sse).is_in(last));
+        }
     }
 }

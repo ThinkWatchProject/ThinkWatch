@@ -11,6 +11,43 @@ target.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A caller that hangs up on the answer's last event finished the
+  request.** Codex closes the connection as soon as it has read
+  `response.completed`, without waiting for the stream to end, and an
+  upstream can end its stream a while after that event: the ChatGPT Codex
+  backend often does, and so can a relay in front of it. A stream forwarded
+  in its own format whose caller left in that window was logged as
+  cancelled (`499`, `stream_outcome: client_cancelled`), though the caller
+  had read the whole answer. Once the answer's last event has gone out —
+  Responses `response.completed`, `response.incomplete` or
+  `response.failed`, Anthropic `message_stop`, Chat `[DONE]` — a caller
+  that leaves is logged as if the stream had run to its end: `200`, billed
+  on the usage the upstream reported. Converted streams were not affected:
+  their last event is written once the upstream's stream has ended.
+- **A Responses WebSocket turn ends at its last event.** On
+  `GET /v1/responses` over a WebSocket, a turn lasted until the upstream's
+  stream ended, and the connection took the next turn only then, so an
+  upstream that keeps its stream open after `response.completed` held up
+  every following turn by that long. The next turn now starts at once.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.67.1 → vX.Y.Z. Only tw-dialect changes:
+  - **Long usage objects are read.** The usage reader skipped a usage
+    object longer than 8 KB. The ChatGPT Codex backend's usage carries an
+    `attribution` breakdown that grows with the conversation, so behind an
+    upstream that passes it on, a longer Codex session's requests were
+    billed on an estimate (`usage_estimated`) instead of the reported
+    counts. Usage objects up to 1 MiB are now read. One cut across chunks
+    is read on from where it stopped, nothing nested inside a usage object
+    is counted as a second usage, and a stream that arrives in chunks
+    shorter than the `"usage"` key no longer loses it.
+  - `tw_dialect::convert::ends_answer` recognises an answer's last event,
+    which the two fixes above rely on.
+
 ## [3.3.0] — 2026-10-09
 
 Requests converted for Claude now use prompt caching, and Codex works
