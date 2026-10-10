@@ -177,8 +177,9 @@ pub(crate) type OpenUpstream = Pin<
 /// `response.failed`, an `error` in a Chat or Gemini chunk. The upstream
 /// opened the stream with 200 and the stream may end normally, but the
 /// client got half an answer and an error; recorded as a success, the
-/// route would look like it never fails. It is recorded as the upstream's
-/// failure, with its words, whether the stream ran to its end or the
+/// route would look like it never fails. It is recorded as the error the
+/// same refusal would have been as an answer, with the upstream's words
+/// (see [`failed_partway`]), whether the stream ran to its end or the
 /// client left after the error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_chat_pump(
@@ -442,8 +443,8 @@ struct Readers {
     collector: Option<tw_dialect::convert::Collector>,
     /// `None` once it found an error.
     errors: Option<ErrorWatch>,
-    /// The first error the upstream reported in its stream, in its words.
-    said: Option<String>,
+    /// The first error the upstream reported in its stream.
+    said: Option<Said>,
 }
 
 impl Readers {
@@ -463,7 +464,7 @@ impl Readers {
     /// The error the upstream reported in its stream, if it did — read to
     /// the end, for an upstream whose last frame has no blank line after
     /// it.
-    fn upstream_error(&mut self) -> Option<String> {
+    fn upstream_error(&mut self) -> Option<Said> {
         if let Some(mut w) = self.errors.take() {
             self.said = self.said.take().or_else(|| w.flush());
         }
@@ -472,10 +473,10 @@ impl Readers {
 }
 
 /// Watches the upstream's frames for an error it reports in its stream
-/// (`tw_dialect::convert::stream_error`, which reads each format's own
-/// error frame: an Anthropic `error` event, Responses `response.failed`,
-/// an `error` in a Chat or Gemini chunk). Read on the upstream's bytes,
-/// so a converted stream is watched the same way as one forwarded as sent.
+/// (see [`said_in`]: an Anthropic `error` event, Responses
+/// `response.failed`, an `error` in a Chat or Gemini chunk). Read on the
+/// upstream's bytes, so a converted stream is watched the same way as one
+/// forwarded as sent.
 struct ErrorWatch {
     upstream: Dialect,
     frames: tw_dialect::frame::Decoder,
@@ -490,35 +491,171 @@ impl ErrorWatch {
     }
 
     /// What the upstream said, if this chunk completes an error frame.
-    fn feed(&mut self, chunk: &[u8]) -> Option<String> {
+    fn feed(&mut self, chunk: &[u8]) -> Option<Said> {
         let frames = self.frames.feed(chunk);
         self.first(&frames)
     }
 
     /// The stream ended: a last frame without a blank line after it.
-    fn flush(&mut self) -> Option<String> {
+    fn flush(&mut self) -> Option<Said> {
         let frames = self.frames.flush();
         self.first(&frames)
     }
 
-    fn first(&self, frames: &[tw_dialect::frame::Frame]) -> Option<String> {
-        frames
-            .iter()
-            .find_map(|f| tw_dialect::convert::stream_error(self.upstream, f))
+    fn first(&self, frames: &[tw_dialect::frame::Frame]) -> Option<Said> {
+        frames.iter().find_map(|f| said_in(self.upstream, f))
     }
 }
 
-/// The outcome of a stream the upstream reported an error in: its
-/// failure, counted against the route like a 5xx answer, with what it
-/// said (500 characters at most, as a refusal's body is cut).
-fn failed_partway(provider: &str, said: &str) -> StreamOutcome {
-    let said: String = said.chars().take(500).collect();
-    let e = GatewayError::ProviderError(format!(
-        "{provider} reported an error partway through the answer: {said}"
-    ));
+/// An error the upstream reported in its stream.
+#[derive(Debug, PartialEq)]
+struct Said {
+    /// In its words, or [`NO_MESSAGE`] when the error carried none.
+    message: String,
+    /// The status the same error has as an answer, when the error names
+    /// one (see [`status_of`]).
+    status: Option<u16>,
+}
+
+/// The message of an error the upstream reported without one.
+const NO_MESSAGE: &str = "The error carried no message.";
+
+/// What the upstream said in `f`, if `f` is an error frame.
+///
+/// `tw_dialect::convert::stream_error` picks the frame: the same reading
+/// the converter gives it, and most frames are passed over without being
+/// parsed. The error itself is read here, where each format keeps it:
+/// Anthropic's `error`; Responses' `response.error` in `response.failed`,
+/// or the `error` event's own fields (or its `error`); the top-level
+/// `error` of a Chat or Gemini chunk. Gemini sends an error as a
+/// one-element array outside SSE; upstreams are asked for SSE, but a
+/// frame like that is read the same.
+///
+/// A Chat or Gemini chunk whose `error` is `null` is not an error: an
+/// OpenAI-compatible relay can send `"error": null` in every chunk. And
+/// the message is never the frame's own text, which can be the model's
+/// answer: an error without a message gets [`NO_MESSAGE`].
+fn said_in(upstream: Dialect, f: &tw_dialect::frame::Frame) -> Option<Said> {
+    use serde_json::Value;
+
+    tw_dialect::convert::stream_error(upstream, f)?;
+    let v = match serde_json::from_str::<Value>(f.data.trim()) {
+        Ok(Value::Array(mut items)) if items.len() == 1 => items.remove(0),
+        Ok(v) => v,
+        Err(_) => Value::Null,
+    };
+    fn present(e: Option<&Value>) -> Option<&Value> {
+        e.filter(|e| !e.is_null())
+    }
+    let error = match upstream {
+        Dialect::Chat | Dialect::Gemini => Some(present(v.get("error"))?),
+        Dialect::Responses => {
+            let kind = v.get("type").and_then(Value::as_str).or(f.event.as_deref());
+            if kind == Some("response.failed") {
+                present(v.pointer("/response/error"))
+            } else {
+                Some(present(v.get("error")).unwrap_or(&v))
+            }
+        }
+        Dialect::Anthropic => Some(present(v.get("error")).unwrap_or(&v)),
+        Dialect::Bedrock => Some(&v),
+    };
+    let message = match error {
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(e) => e.get("message").and_then(Value::as_str),
+        None => None,
+    }
+    .map(str::trim)
+    .filter(|m| !m.is_empty())
+    .unwrap_or(NO_MESSAGE);
+    Some(Said {
+        message: message.to_string(),
+        status: error.and_then(status_of),
+    })
+}
+
+/// The status an error the upstream reports in its stream has as an
+/// answer: a numeric `code` from 400 to 599 (Gemini's, and some relays'),
+/// or what its `code`, `type` or `status` names (see [`status_named`]).
+/// `None` when it says nothing recognisable.
+fn status_of(e: &serde_json::Value) -> Option<u16> {
+    use serde_json::Value;
+
+    let numeric = match e.get("code") {
+        Some(Value::Number(n)) => n.as_u64().and_then(|n| u16::try_from(n).ok()),
+        Some(Value::String(s)) => s.trim().parse::<u16>().ok(),
+        _ => None,
+    };
+    numeric.filter(|c| (400..600).contains(c)).or_else(|| {
+        ["code", "type", "status"]
+            .iter()
+            .find_map(|key| e.get(*key)?.as_str().and_then(status_named))
+    })
+}
+
+/// The status each format documents for an error it names: Anthropic's
+/// error types, OpenAI's error types and codes, Gemini's statuses — the
+/// statuses the same errors come with as an answer. An overload is 529 as
+/// Anthropic sends it, or 503.
+fn status_named(name: &str) -> Option<u16> {
+    Some(match name {
+        "invalid_request_error"
+        | "context_length_exceeded"
+        | "invalid_prompt"
+        | "INVALID_ARGUMENT"
+        | "FAILED_PRECONDITION" => 400,
+        "authentication_error" | "invalid_api_key" | "UNAUTHENTICATED" => 401,
+        "billing_error" => 402,
+        "permission_error" | "PERMISSION_DENIED" => 403,
+        "not_found_error" | "model_not_found" | "NOT_FOUND" => 404,
+        "request_too_large" => 413,
+        "rate_limit_error"
+        | "rate_limit_exceeded"
+        | "insufficient_quota"
+        | "usage_limit_reached"
+        | "RESOURCE_EXHAUSTED" => 429,
+        "api_error" => 500,
+        "server_is_overloaded" | "slow_down" | "UNAVAILABLE" => 503,
+        "timeout_error" | "DEADLINE_EXCEEDED" => 504,
+        "overloaded_error" => 529,
+        _ => return None,
+    })
+}
+
+/// The outcome of a stream the upstream reported an error in: the error
+/// the same refusal would have been as an answer (see
+/// `transport::status_error`), so the route's health and circuit breaker
+/// treat it as they treat that answer — a 5xx, 408 or 429 counts against
+/// the route, a request the upstream refuses (another 4xx) does not.
+/// An error that names no status is the upstream's failure, 502.
+///
+/// The message carries what the upstream said, 500 characters at most as
+/// a refusal's body is cut — except for a refused credential, whose
+/// words stay out of the row as an answer's do: they can name the account
+/// behind it. The log has them either way.
+fn failed_partway(provider: &str, said: &Said) -> StreamOutcome {
+    tracing::warn!(
+        provider,
+        status = ?said.status,
+        message = %said.message,
+        "upstream reported an error partway through a stream"
+    );
+    let words: String = said.message.chars().take(500).collect();
+    let what = format!("{provider} reported an error partway through the answer: {words}");
+    let e = match said.status {
+        Some(status) => crate::proxy::transport::status_error(status, None, what.clone()),
+        None => GatewayError::ProviderError(what.clone()),
+    };
+    let message = match &e {
+        GatewayError::UpstreamRateLimited { .. } => format!("{e}: {what}"),
+        GatewayError::UpstreamAuthError { .. } => {
+            format!("{e}: {provider} reported it partway through the answer")
+        }
+        _ => e.to_string(),
+    };
     StreamOutcome::UpstreamError {
         error_type: e.error_tag().to_string(),
-        message: e.to_string(),
+        message,
         status_code: e.status_code(),
     }
 }
@@ -904,7 +1041,10 @@ mod tests {
         r.feed(b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",");
         assert!(r.said.is_none());
         r.feed(b"\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n");
-        assert_eq!(r.upstream_error().as_deref(), Some("boom"));
+        assert_eq!(
+            r.upstream_error().map(|s| s.message).as_deref(),
+            Some("boom")
+        );
 
         // An upstream whose last frame has no blank line after it.
         let mut r = Readers {
@@ -912,7 +1052,10 @@ mod tests {
             ..Default::default()
         };
         r.feed(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
-        assert_eq!(r.upstream_error().as_deref(), Some("Overloaded"));
+        assert_eq!(
+            r.upstream_error().map(|s| s.message).as_deref(),
+            Some("Overloaded")
+        );
 
         // A stream without one.
         let mut r = Readers {
@@ -923,24 +1066,186 @@ mod tests {
         assert_eq!(r.upstream_error(), None);
     }
 
-    /// Counted against the route like a 5xx answer, logged as 502 with the
-    /// upstream's words.
-    #[test]
-    fn a_stream_failed_partway_is_the_upstreams_failure() {
+    /// What a stream whose upstream sent `frames` is recorded as, with
+    /// whether it counts against the route: `None` when it carried no
+    /// error.
+    fn recorded(upstream: Dialect, frames: &str) -> Option<(String, i64, String, bool)> {
+        let mut r = Readers {
+            errors: Some(ErrorWatch::new(upstream)),
+            ..Default::default()
+        };
+        r.feed(frames.as_bytes());
+        let said = r.upstream_error()?;
         let StreamOutcome::UpstreamError {
             error_type,
             message,
             status_code,
-        } = failed_partway("anthropic-main", &"x".repeat(2_000))
+        } = failed_partway("up", &said)
         else {
             panic!("not a failure");
         };
-        assert_eq!((error_type.as_str(), status_code), ("ProviderError", 502));
-        assert!(crate::proxy::upstream_failed(&error_type, status_code));
+        let counted = crate::proxy::upstream_failed(&error_type, status_code);
+        Some((error_type, status_code, message, counted))
+    }
+
+    fn responses_failed(error: serde_json::Value) -> String {
+        let v = serde_json::json!({
+            "type": "response.failed",
+            "response": {"id": "resp_1", "status": "failed", "error": error},
+        });
+        format!("event: response.failed\ndata: {v}\n\n")
+    }
+
+    /// Throttling stays a 429, and counts against the route like a 429
+    /// answer does: that upstream's quota, which another route does not
+    /// share.
+    #[test]
+    fn a_rate_limit_in_a_stream_is_a_429() {
+        let (error_type, status, message, counted) = recorded(
+            Dialect::Responses,
+            &responses_failed(serde_json::json!({
+                "code": "rate_limit_exceeded",
+                "message": "Rate limit reached for requests",
+            })),
+        )
+        .unwrap();
+        assert_eq!((error_type.as_str(), status), ("UpstreamRateLimited", 429));
+        assert!(counted);
+        assert!(
+            message.contains("Rate limit reached for requests"),
+            "{message}"
+        );
+
+        // Gemini names it by number and by status.
+        let gemini = "data: {\"error\":{\"code\":429,\"message\":\"Resource has been exhausted\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n";
+        assert_eq!(recorded(Dialect::Gemini, gemini).unwrap().1, 429);
+        // An Anthropic one by its type.
+        let anthropic = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}\n\n";
+        assert_eq!(recorded(Dialect::Anthropic, anthropic).unwrap().1, 429);
+    }
+
+    /// A request the upstream refuses is the caller's, as when the
+    /// upstream refuses it with an answer: it does not count against the
+    /// route.
+    #[test]
+    fn a_refused_request_in_a_stream_does_not_count_against_the_route() {
+        let (error_type, status, message, counted) = recorded(
+            Dialect::Responses,
+            &responses_failed(serde_json::json!({
+                "code": "context_length_exceeded",
+                "message": "Your input exceeds the context window of this model.",
+            })),
+        )
+        .unwrap();
+        assert_eq!((error_type.as_str(), status), ("ProviderHttpError", 400));
+        assert!(!counted);
+        assert!(message.contains("exceeds the context window"), "{message}");
+
+        // A Chat chunk: the code says nothing known, the type does.
+        let chat = "data: {\"error\":{\"message\":\"bad\",\"type\":\"invalid_request_error\",\"code\":\"weird_param\"}}\n\n";
+        let (_, status, _, counted) = recorded(Dialect::Chat, chat).unwrap();
+        assert_eq!((status, counted), (400, false));
+        // A Gemini one by its number.
+        let gemini = "data: {\"error\":{\"code\":404,\"message\":\"no such model\",\"status\":\"NOT_FOUND\"}}\n\n";
+        let (_, status, _, counted) = recorded(Dialect::Gemini, gemini).unwrap();
+        assert_eq!((status, counted), (404, false));
+    }
+
+    #[test]
+    fn an_overload_in_a_stream_counts_against_the_route() {
+        let frames = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        let (error_type, status, message, counted) = recorded(Dialect::Anthropic, frames).unwrap();
+        assert_eq!((error_type.as_str(), status), ("ProviderHttpError", 529));
+        assert!(counted);
+        assert!(
+            message.contains("up reported an error partway through the answer: Overloaded"),
+            "{message}"
+        );
+    }
+
+    /// An error that names no status is the upstream's failure. Without a
+    /// message of its own, the row says so in a fixed sentence — never
+    /// the chunk's text, which can be the model's answer.
+    #[test]
+    fn an_error_that_names_no_status_is_the_upstreams_failure() {
+        let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"the secret plan\"}}],\"error\":{\"code\":\"server_error\"}}\n\n";
+        let (error_type, status, message, counted) = recorded(Dialect::Chat, chat).unwrap();
+        assert_eq!((error_type.as_str(), status), ("ProviderError", 502));
+        assert!(counted);
+        assert!(message.ends_with(NO_MESSAGE), "{message}");
+        assert!(!message.contains("secret plan"), "{message}");
+
+        // Nor the text of an Anthropic error event without a message.
+        let anthropic = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\"},\"note\":\"the secret plan\"}\n\n";
+        let (_, status, message, counted) = recorded(Dialect::Anthropic, anthropic).unwrap();
+        assert_eq!((status, counted), (500, true));
+        assert!(message.ends_with(NO_MESSAGE), "{message}");
+        assert!(!message.contains("secret plan"), "{message}");
+
+        // A `response.failed` without an error object is still a failure.
+        let (_, status, message, _) = recorded(
+            Dialect::Responses,
+            &responses_failed(serde_json::Value::Null),
+        )
+        .unwrap();
+        assert_eq!(status, 502);
+        assert!(message.ends_with(NO_MESSAGE), "{message}");
+    }
+
+    /// An OpenAI-compatible relay can send `"error": null` in every chunk.
+    #[test]
+    fn a_null_error_is_no_error() {
+        let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"error\":null}\n\ndata: [DONE]\n\n";
+        assert_eq!(recorded(Dialect::Chat, chat), None);
+        let gemini = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}],\"error\":null}\n\n";
+        assert_eq!(recorded(Dialect::Gemini, gemini), None);
+
+        // And an error after such chunks is still seen.
+        let then = format!(
+            "{chat}data: {{\"error\":{{\"message\":\"boom\",\"type\":\"server_error\"}}}}\n\n"
+        );
+        assert_eq!(recorded(Dialect::Chat, &then).unwrap().1, 502);
+    }
+
+    /// Cut to 500 characters, as a refusal's body is.
+    #[test]
+    fn what_the_upstream_said_is_cut() {
+        let said = Said {
+            message: "x".repeat(2_000),
+            status: None,
+        };
+        let StreamOutcome::UpstreamError { message, .. } = failed_partway("anthropic-main", &said)
+        else {
+            panic!("not a failure");
+        };
         assert!(
             message.contains("anthropic-main reported an error partway through the answer: xxx")
         );
         assert!(message.len() < 600, "{}", message.len());
+    }
+
+    /// A refused credential is logged without the upstream's words, as
+    /// an answer that refuses it is.
+    #[test]
+    fn a_refused_credential_in_a_stream_keeps_its_words_out_of_the_row() {
+        let said = Said {
+            message: "arn:aws:iam::123456789012:user/gateway may not".into(),
+            status: Some(403),
+        };
+        let StreamOutcome::UpstreamError {
+            error_type,
+            message,
+            status_code,
+        } = failed_partway("up", &said)
+        else {
+            panic!("not a failure");
+        };
+        assert_eq!(
+            (error_type.as_str(), status_code),
+            ("UpstreamAuthError", 401)
+        );
+        assert!(crate::proxy::upstream_failed(&error_type, status_code));
+        assert!(!message.contains("arn:aws"), "{message}");
     }
 
     /// A Gemini answer ends with its stream, whichever form the caller

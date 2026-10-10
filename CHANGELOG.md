@@ -34,15 +34,22 @@ target.
   this way), Responses `response.failed`, an `error` in a Chat or Gemini
   chunk. When the stream then ended normally, the request was logged as a
   success (`200`) and counted as one by the route's circuit breaker. It is
-  now logged as the upstream's failure, with what the upstream said:
-  `status_code` `502`, `error_type` `ProviderError`, `stream_outcome`
-  `upstream_error`, and `client_status` `200`, the status the caller's
-  response went out with. It counts against the route's health and circuit
-  breaker like a `5xx` answer, so a route whose streams keep failing this
-  way opens its breaker. This holds for streams forwarded as sent and
-  converted ones, and for a caller that leaves after the error. Such a
-  request is billed like a stream that broke off: on the usage the upstream
-  reported, or on the text received when that counts more output.
+  now logged as the error it would have been as an answer, with what the
+  upstream said: `stream_outcome` `upstream_error`, `client_status` `200`
+  (the status the caller's response went out with), and the `status_code`
+  and `error_type` that answer would have had, read off the error's own
+  type or code. A rate limit or a spent quota is `429`
+  (`UpstreamRateLimited`); a context too long or another invalid request
+  `400`, an unknown model `404`, an overload `529` or `503`
+  (`ProviderHttpError`); an error that names no status `502`
+  (`ProviderError`). The route's health and circuit breaker treat it as
+  they treat that answer: a `5xx`, a `429` or a refused credential counts
+  against the route, so a route whose streams keep failing this way opens
+  its breaker, while a request the upstream refuses, such as one past the
+  model's context window, does not. This holds for streams forwarded as
+  sent and converted ones, and for a caller that leaves after the error.
+  Billing is unchanged: such a request is billed on the usage the upstream
+  reported.
   - Error rates that count `status_code` ≥ 400 now include these requests.
   - The rows of other streams that failed after the response went out as
     `200` — broken off, cut by tool-call inspection, refused by the

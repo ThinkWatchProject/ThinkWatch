@@ -574,11 +574,12 @@ async fn gateway_rows(ch: &clickhouse::Client, user_id: uuid::Uuid, n: usize) ->
 }
 
 /// A row for a stream that the upstream failed partway, after the
-/// response went out as 200: the upstream's failure, with its words.
-fn assert_failed_partway(status: i64, detail: &Value, said: &str) {
-    assert_eq!(status, 502, "{detail}");
+/// response went out as 200: the upstream's failure as `(status,
+/// error_type)`, with its words.
+fn assert_failed_partway(status: i64, detail: &Value, logged: (i64, &str), said: &str) {
+    assert_eq!(status, logged.0, "{detail}");
     assert_eq!(detail["stream_outcome"], "upstream_error", "{detail}");
-    assert_eq!(detail["error_type"], "ProviderError", "{detail}");
+    assert_eq!(detail["error_type"], logged.1, "{detail}");
     assert!(
         detail["error_message"]
             .as_str()
@@ -644,7 +645,12 @@ async fn an_error_the_upstream_reports_in_its_stream_fails_the_request() {
 
     let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
     for (status, detail) in gateway_rows(ch, user_id, 2).await {
-        assert_failed_partway(status, &detail, "The model crashed.");
+        assert_failed_partway(
+            status,
+            &detail,
+            (502, "ProviderError"),
+            "The model crashed.",
+        );
     }
     // Two failures of two: the route's breaker is open, and the next
     // request does not reach the upstream.
@@ -728,7 +734,8 @@ async fn an_anthropic_error_event_partway_through_a_stream_fails_the_request() {
 
     let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
     for (status, detail) in gateway_rows(ch, user_id, 2).await {
-        assert_failed_partway(status, &detail, "Overloaded");
+        // An overload is 529 as an answer too, and counts against the route.
+        assert_failed_partway(status, &detail, (529, "ProviderHttpError"), "Overloaded");
     }
 }
 
@@ -780,7 +787,12 @@ async fn a_caller_that_leaves_after_response_failed_saw_the_request_fail() {
     let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
     let rows = gateway_rows(ch, user_id, 1).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_failed_partway(rows[0].0, &rows[0].1, "The model crashed.");
+    assert_failed_partway(
+        rows[0].0,
+        &rows[0].1,
+        (502, "ProviderError"),
+        "The model crashed.",
+    );
 }
 
 /// Input read from the prompt cache is billed at a tenth of the input
