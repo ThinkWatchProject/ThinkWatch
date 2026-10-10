@@ -10,6 +10,7 @@
 
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
+use think_watch_test_support::mock_provider::{responses_answer, sse_upstream_lingering};
 use think_watch_test_support::prelude::*;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -263,8 +264,9 @@ async fn a_turn_continues_from_the_connections_last_response() {
 #[tokio::test]
 async fn a_turn_ends_at_its_last_event_while_the_upstream_stream_stays_open() {
     let app = TestApp::spawn_with_clickhouse().await;
-    let upstream = think_watch_test_support::mock_provider::responses_stream_lingering(
-        "ws-linger",
+    let upstream = sse_upstream_lingering(
+        "/v1/responses",
+        responses_answer("ws-linger", false),
         std::time::Duration::from_secs(30),
     )
     .await;

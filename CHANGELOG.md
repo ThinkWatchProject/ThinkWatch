@@ -24,8 +24,29 @@ target.
   Responses `response.completed`, `response.incomplete` or
   `response.failed`, Anthropic `message_stop`, Chat `[DONE]` — a caller
   that leaves is logged as if the stream had run to its end: `200`, billed
-  on the usage the upstream reported. Converted streams were not affected:
-  their last event is written once the upstream's stream has ended.
+  on the usage the upstream reported, or, after `response.failed`, the
+  upstream's failure (see the next entry). Converted streams were not
+  affected: their last event is written once the upstream's stream has
+  ended.
+- **An error the upstream reports partway through a stream fails the
+  request.** An upstream that has answered `200` can still report an error
+  in the stream: an Anthropic `error` event (an `overloaded_error` arrives
+  this way), Responses `response.failed`, an `error` in a Chat or Gemini
+  chunk. When the stream then ended normally, the request was logged as a
+  success (`200`) and counted as one by the route's circuit breaker. It is
+  now logged as the upstream's failure, with what the upstream said:
+  `status_code` `502`, `error_type` `ProviderError`, `stream_outcome`
+  `upstream_error`, and `client_status` `200`, the status the caller's
+  response went out with. It counts against the route's health and circuit
+  breaker like a `5xx` answer, so a route whose streams keep failing this
+  way opens its breaker. This holds for streams forwarded as sent and
+  converted ones, and for a caller that leaves after the error. Such a
+  request is billed like a stream that broke off: on the usage the upstream
+  reported, or on the text received when that counts more output.
+  - Error rates that count `status_code` ≥ 400 now include these requests.
+  - The rows of other streams that failed after the response went out as
+    `200` — broken off, cut by tool-call inspection, refused by the
+    upstream before its first byte — carry `client_status` too.
 - **A Responses WebSocket turn ends at its last event.** On
   `GET /v1/responses` over a WebSocket, a turn lasted until the upstream's
   stream ended, and the connection took the next turn only then, so an
@@ -45,8 +66,9 @@ target.
     is read on from where it stopped, nothing nested inside a usage object
     is counted as a second usage, and a stream that arrives in chunks
     shorter than the `"usage"` key no longer loses it.
-  - `tw_dialect::convert::ends_answer` recognises an answer's last event,
-    which the two fixes above rely on.
+  - `tw_dialect::convert::ends_answer` recognises an answer's last event.
+    The gateway uses it to tell a caller that left after the whole answer
+    from one that left partway, and to end a WebSocket turn (see Fixed).
 
 ## [3.3.0] — 2026-10-09
 

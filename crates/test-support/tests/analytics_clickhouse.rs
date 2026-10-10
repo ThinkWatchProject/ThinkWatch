@@ -11,6 +11,7 @@
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::str::FromStr;
+use think_watch_test_support::mock_provider::{responses_answer, sse_upstream_lingering};
 use think_watch_test_support::prelude::*;
 
 async fn seed_runtime(app: &TestApp) -> (String, uuid::Uuid) {
@@ -496,8 +497,9 @@ async fn a_stream_the_caller_leaves_is_billed_on_an_estimate() {
 #[tokio::test]
 async fn a_caller_that_leaves_after_the_last_frame_finished_the_request() {
     let app = TestApp::spawn_with_clickhouse().await;
-    let upstream = think_watch_test_support::mock_provider::responses_stream_lingering(
-        "gpt-linger",
+    let upstream = sse_upstream_lingering(
+        "/v1/responses",
+        responses_answer("gpt-linger", false),
         std::time::Duration::from_secs(30),
     )
     .await;
@@ -543,6 +545,242 @@ async fn a_caller_that_leaves_after_the_last_frame_finished_the_request() {
     assert!(cost > Decimal::ZERO, "{detail}");
     assert!(detail.get("stream_outcome").is_none(), "{detail}");
     assert!(detail.get("usage_estimated").is_none(), "{detail}");
+}
+
+/// The `gateway_logs` rows of `user_id`, `(status, detail)`, once there
+/// are `n` of them.
+async fn gateway_rows(ch: &clickhouse::Client, user_id: uuid::Uuid, n: usize) -> Vec<(i64, Value)> {
+    for _ in 0..200 {
+        let rows: Vec<(i64, String)> = ch
+            .query(
+                "SELECT ifNull(status_code, -1), ifNull(detail, '') FROM gateway_logs \
+                  WHERE user_id = ? ORDER BY created_at",
+            )
+            .bind(user_id.to_string())
+            .fetch_all()
+            .await
+            .expect("CH select");
+        if rows.len() >= n {
+            return rows
+                .into_iter()
+                .map(|(status, detail)| {
+                    (status, serde_json::from_str(&detail).unwrap_or(Value::Null))
+                })
+                .collect();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("{n} gateway_logs rows never landed for user {user_id}");
+}
+
+/// A row for a stream that the upstream failed partway, after the
+/// response went out as 200: the upstream's failure, with its words.
+fn assert_failed_partway(status: i64, detail: &Value, said: &str) {
+    assert_eq!(status, 502, "{detail}");
+    assert_eq!(detail["stream_outcome"], "upstream_error", "{detail}");
+    assert_eq!(detail["error_type"], "ProviderError", "{detail}");
+    assert!(
+        detail["error_message"]
+            .as_str()
+            .is_some_and(|m| m.contains(said)),
+        "{detail}"
+    );
+    // What the caller saw: a 200 stream that ended in the error.
+    assert_eq!(detail["client_status"], 200, "{detail}");
+}
+
+/// An upstream can open a stream with 200 and report an error in it:
+/// Responses `response.failed`. The stream ends normally, but the request
+/// failed: it is logged as the upstream's failure, with what the upstream
+/// said, and counts against the route's circuit breaker like a 5xx answer.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_error_the_upstream_reports_in_its_stream_fails_the_request() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let app = TestApp::spawn_with_clickhouse().await;
+    for (k, v) in [
+        ("gateway.cb_enabled", json!(true)),
+        ("gateway.cb_error_pct", json!(50)),
+        ("gateway.cb_min_samples", json!(2)),
+        ("gateway.cb_window_secs", json!(60)),
+        ("gateway.cb_open_secs", json!(600)),
+    ] {
+        app.set_setting(k, v).await;
+    }
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(responses_answer("gpt-fails", true), "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+    let (key, user_id) = seed_upstream(&app, &upstream.uri(), "openai", "gpt-fails").await;
+    sqlx::query(
+        "UPDATE model_routes SET upstream_protocol = 'openai_responses' WHERE model_id = $1",
+    )
+    .bind("gpt-fails")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    for _ in 0..2 {
+        let resp = gw
+            .post(
+                "/v1/responses",
+                json!({"model": "gpt-fails", "stream": true, "input": "hi"}),
+            )
+            .await
+            .unwrap();
+        resp.assert_ok();
+        assert!(String::from_utf8_lossy(&resp.body).contains("event: response.failed"));
+    }
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
+    for (status, detail) in gateway_rows(ch, user_id, 2).await {
+        assert_failed_partway(status, &detail, "The model crashed.");
+    }
+    // Two failures of two: the route's breaker is open, and the next
+    // request does not reach the upstream.
+    let resp = gw
+        .post(
+            "/v1/responses",
+            json!({"model": "gpt-fails", "input": "hi"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.status.is_success(), "{:?}", resp.body);
+    assert_eq!(
+        upstream.received_requests().await.unwrap_or_default().len(),
+        2,
+        "the route stayed closed"
+    );
+}
+
+/// An Anthropic upstream reports an overload partway through a stream as
+/// an `error` event, and ends the stream. Forwarded as sent or converted
+/// for a Chat caller, the request failed.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_anthropic_error_event_partway_through_a_stream_fails_the_request() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let app = TestApp::spawn_with_clickhouse().await;
+    let event = |kind: &str, v: Value| format!("event: {kind}\ndata: {v}\n\n");
+    let frames = [
+        event(
+            "message_start",
+            json!({"type": "message_start", "message": {
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-fails",
+                "content": [], "stop_reason": null,
+                "usage": {"input_tokens": 12, "output_tokens": 1}
+            }}),
+        ),
+        event(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}),
+        ),
+        event(
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "Hel"}}),
+        ),
+        event(
+            "error",
+            json!({"type": "error",
+                   "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+        ),
+    ]
+    .concat();
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(frames, "text/event-stream"))
+        .mount(&upstream)
+        .await;
+    let (key, user_id) = seed_upstream(&app, &upstream.uri(), "anthropic", "claude-fails").await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    let ask = [
+        (
+            "/v1/messages",
+            json!({"model": "claude-fails", "max_tokens": 100, "stream": true,
+                   "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"model": "claude-fails", "stream": true,
+                   "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+    ];
+    for (route, body) in ask {
+        gw.post(route, body).await.unwrap().assert_ok();
+    }
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
+    for (status, detail) in gateway_rows(ch, user_id, 2).await {
+        assert_failed_partway(status, &detail, "Overloaded");
+    }
+}
+
+/// A caller that hangs up on `response.failed` — the answer's last event —
+/// while the upstream keeps its stream open did not get a success: the
+/// request failed, as if the stream had run to its end.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_caller_that_leaves_after_response_failed_saw_the_request_fail() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    let upstream = sse_upstream_lingering(
+        "/v1/responses",
+        responses_answer("gpt-fails-linger", true),
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let (key, user_id) = seed_upstream(&app, &upstream, "openai", "gpt-fails-linger").await;
+    sqlx::query(
+        "UPDATE model_routes SET upstream_protocol = 'openai_responses' WHERE model_id = $1",
+    )
+    .bind("gpt-fails-linger")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+
+    let mut resp = reqwest::Client::new()
+        .post(format!("{}/v1/responses", app.gateway_url))
+        .bearer_auth(&key)
+        .json(&json!({"model": "gpt-fails-linger", "stream": true, "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let mut got = String::new();
+    while !got
+        .find("event: response.failed\n")
+        .is_some_and(|at| got[at..].contains("\n\n"))
+    {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+            .await
+            .expect("response.failed within 10s")
+            .unwrap()
+            .expect("the stream is still open");
+        got.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    drop(resp);
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
+    let rows = gateway_rows(ch, user_id, 1).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_failed_partway(rows[0].0, &rows[0].1, "The model crashed.");
 }
 
 /// Input read from the prompt cache is billed at a tenth of the input

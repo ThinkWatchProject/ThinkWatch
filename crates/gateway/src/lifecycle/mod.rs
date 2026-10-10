@@ -171,6 +171,15 @@ pub(crate) type OpenUpstream = Pin<
 /// its last bytes go out, not after: a consumer that stops reading at
 /// those bytes, as the WebSocket relay does at a turn's last event, never
 /// polls the stream again.
+///
+/// **An error the upstream reports in its stream fails the request** (see
+/// [`ErrorWatch`]): an Anthropic `error` event, Responses
+/// `response.failed`, an `error` in a Chat or Gemini chunk. The upstream
+/// opened the stream with 200 and the stream may end normally, but the
+/// client got half an answer and an error; recorded as a success, the
+/// route would look like it never fails. It is recorded as the upstream's
+/// failure, with its words, whether the stream ran to its end or the
+/// client left after the error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_chat_pump(
     open: OpenUpstream,
@@ -185,14 +194,7 @@ pub(crate) fn build_chat_pump(
     axum::response::Response,
     Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
 ) {
-    struct Readers {
-        sniffer: Option<tw_dialect::usage::Sniffer>,
-        collector: Option<tw_dialect::convert::Collector>,
-    }
-    let readers = Arc::new(Mutex::new(Readers {
-        sniffer: None,
-        collector: None,
-    }));
+    let readers = Arc::new(Mutex::new(Readers::default()));
     let readers_for_tail = Arc::clone(&readers);
 
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
@@ -213,6 +215,8 @@ pub(crate) fn build_chat_pump(
     );
 
     let mut last_frame = LastFrame::new(client, client_sse);
+    let provider_for_tail = provider.to_string();
+    let provider = provider.to_string();
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
 
@@ -236,6 +240,7 @@ pub(crate) fn build_chat_pump(
         if let Ok(mut r) = readers.lock() {
             r.sniffer = Some(tw_dialect::usage::Sniffer::new());
             r.collector = Some(wire.collect.collector());
+            r.errors = Some(ErrorWatch::new(wire.dialect));
         }
         // The hop that answered can have numbered a value of its own.
         shaper.restore_with(&wire.ledger);
@@ -260,8 +265,7 @@ pub(crate) fn build_chat_pump(
             match item {
                 Ok(chunk) => {
                     if let Ok(mut r) = readers.lock() {
-                        if let Some(s) = r.sniffer.as_mut() { s.feed(&chunk); }
-                        if let Some(c) = r.collector.as_mut() { c.process(&chunk); }
+                        r.feed(&chunk);
                     }
                     let client_bytes = match convert.as_mut() {
                         Some(c) => c.process(&chunk),
@@ -324,7 +328,11 @@ pub(crate) fn build_chat_pump(
             yield Ok(Bytes::from(out));
             return;
         }
-        tell(&mut done_tx, StreamOutcome::Natural);
+        let outcome = match readers.lock().ok().and_then(|mut r| r.upstream_error()) {
+            Some(said) => failed_partway(&provider, &said),
+            None => StreamOutcome::Natural,
+        };
+        tell(&mut done_tx, outcome);
         if !out.is_empty() {
             yield Ok(Bytes::from(out));
         }
@@ -350,10 +358,20 @@ pub(crate) fn build_chat_pump(
     let tail = Box::pin(async move {
         let outcome = match done_rx.await {
             Ok(outcome) => outcome,
-            // Dropped after the answer's last frame went out: the client
-            // left having read all of it.
-            Err(_) if delivered_for_tail.load(Ordering::Acquire) => StreamOutcome::Natural,
-            Err(_) => StreamOutcome::ClientCancelled,
+            // Dropped before the stream ended: the client left.
+            Err(_) => match readers_for_tail
+                .lock()
+                .ok()
+                .and_then(|mut r| r.upstream_error())
+            {
+                // After the upstream had failed, which the client leaving
+                // does not change.
+                Some(said) => failed_partway(&provider_for_tail, &said),
+                // After the answer's last frame went out: the client left
+                // having read all of it.
+                None if delivered_for_tail.load(Ordering::Acquire) => StreamOutcome::Natural,
+                None => StreamOutcome::ClientCancelled,
+            },
         };
         metrics::counter!(
             "gateway_stream_completion_total",
@@ -414,6 +432,95 @@ pub(crate) fn build_chat_pump(
         }
     });
     (response, tail)
+}
+
+/// What the pump reads off the upstream's bytes as they pass, for the
+/// tail. Each reader exists once the upstream answered.
+#[derive(Default)]
+struct Readers {
+    sniffer: Option<tw_dialect::usage::Sniffer>,
+    collector: Option<tw_dialect::convert::Collector>,
+    /// `None` once it found an error.
+    errors: Option<ErrorWatch>,
+    /// The first error the upstream reported in its stream, in its words.
+    said: Option<String>,
+}
+
+impl Readers {
+    fn feed(&mut self, chunk: &[u8]) {
+        if let Some(s) = self.sniffer.as_mut() {
+            s.feed(chunk);
+        }
+        if let Some(c) = self.collector.as_mut() {
+            c.process(chunk);
+        }
+        if let Some(said) = self.errors.as_mut().and_then(|w| w.feed(chunk)) {
+            self.said = Some(said);
+            self.errors = None;
+        }
+    }
+
+    /// The error the upstream reported in its stream, if it did — read to
+    /// the end, for an upstream whose last frame has no blank line after
+    /// it.
+    fn upstream_error(&mut self) -> Option<String> {
+        if let Some(mut w) = self.errors.take() {
+            self.said = self.said.take().or_else(|| w.flush());
+        }
+        self.said.take()
+    }
+}
+
+/// Watches the upstream's frames for an error it reports in its stream
+/// (`tw_dialect::convert::stream_error`, which reads each format's own
+/// error frame: an Anthropic `error` event, Responses `response.failed`,
+/// an `error` in a Chat or Gemini chunk). Read on the upstream's bytes,
+/// so a converted stream is watched the same way as one forwarded as sent.
+struct ErrorWatch {
+    upstream: Dialect,
+    frames: tw_dialect::frame::Decoder,
+}
+
+impl ErrorWatch {
+    fn new(upstream: Dialect) -> Self {
+        Self {
+            upstream,
+            frames: Default::default(),
+        }
+    }
+
+    /// What the upstream said, if this chunk completes an error frame.
+    fn feed(&mut self, chunk: &[u8]) -> Option<String> {
+        let frames = self.frames.feed(chunk);
+        self.first(&frames)
+    }
+
+    /// The stream ended: a last frame without a blank line after it.
+    fn flush(&mut self) -> Option<String> {
+        let frames = self.frames.flush();
+        self.first(&frames)
+    }
+
+    fn first(&self, frames: &[tw_dialect::frame::Frame]) -> Option<String> {
+        frames
+            .iter()
+            .find_map(|f| tw_dialect::convert::stream_error(self.upstream, f))
+    }
+}
+
+/// The outcome of a stream the upstream reported an error in: its
+/// failure, counted against the route like a 5xx answer, with what it
+/// said (500 characters at most, as a refusal's body is cut).
+fn failed_partway(provider: &str, said: &str) -> StreamOutcome {
+    let said: String = said.chars().take(500).collect();
+    let e = GatewayError::ProviderError(format!(
+        "{provider} reported an error partway through the answer: {said}"
+    ));
+    StreamOutcome::UpstreamError {
+        error_type: e.error_tag().to_string(),
+        message: e.to_string(),
+        status_code: e.status_code(),
+    }
 }
 
 /// Tell the tail how the stream ended. Only the first outcome counts.
@@ -645,7 +752,15 @@ impl Surface for ChatCompletionSurface {
         let (prompt_tokens, completion_tokens) = tokens(&usage);
         let (response_body, cost, logged_status, error_detail) = match &invoked.view {
             CapturedView::Streaming { outcome, captured } => {
-                let (status, detail) = outcome.logged_status_and_detail();
+                let (status, mut detail) = outcome.logged_status_and_detail();
+                // The response went out as 200 before the stream failed;
+                // `status` is what the failure would have been as a
+                // response. Both are kept.
+                if let (StreamOutcome::UpstreamError { .. }, Some(serde_json::Value::Object(d))) =
+                    (outcome, detail.as_mut())
+                {
+                    d.insert("client_status".into(), 200.into());
+                }
                 (
                     captured.assembled.as_deref(),
                     captured.cost_usd,
@@ -776,6 +891,56 @@ mod tests {
         let mut w = LastFrame::new(Dialect::Chat, true);
         assert!(!w.is_in(b"data: {\"choices\":[]}\n\n"));
         assert!(w.is_in(b"data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn an_error_the_upstream_reports_in_its_stream_is_found_in_its_words() {
+        let mut r = Readers {
+            errors: Some(ErrorWatch::new(Dialect::Responses)),
+            ..Default::default()
+        };
+        // The model's text naming an error is not one.
+        r.feed(b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"an \\\"error\\\" here\"}\n\n");
+        r.feed(b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",");
+        assert!(r.said.is_none());
+        r.feed(b"\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n");
+        assert_eq!(r.upstream_error().as_deref(), Some("boom"));
+
+        // An upstream whose last frame has no blank line after it.
+        let mut r = Readers {
+            errors: Some(ErrorWatch::new(Dialect::Anthropic)),
+            ..Default::default()
+        };
+        r.feed(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
+        assert_eq!(r.upstream_error().as_deref(), Some("Overloaded"));
+
+        // A stream without one.
+        let mut r = Readers {
+            errors: Some(ErrorWatch::new(Dialect::Chat)),
+            ..Default::default()
+        };
+        r.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n");
+        assert_eq!(r.upstream_error(), None);
+    }
+
+    /// Counted against the route like a 5xx answer, logged as 502 with the
+    /// upstream's words.
+    #[test]
+    fn a_stream_failed_partway_is_the_upstreams_failure() {
+        let StreamOutcome::UpstreamError {
+            error_type,
+            message,
+            status_code,
+        } = failed_partway("anthropic-main", &"x".repeat(2_000))
+        else {
+            panic!("not a failure");
+        };
+        assert_eq!((error_type.as_str(), status_code), ("ProviderError", 502));
+        assert!(crate::proxy::upstream_failed(&error_type, status_code));
+        assert!(
+            message.contains("anthropic-main reported an error partway through the answer: xxx")
+        );
+        assert!(message.len() < 600, "{}", message.len());
     }
 
     /// A Gemini answer ends with its stream, whichever form the caller
