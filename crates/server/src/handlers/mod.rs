@@ -12,6 +12,7 @@ pub mod cost_forecast;
 pub mod dashboard;
 pub mod gateway_logs;
 pub mod health;
+pub mod key_usage;
 pub mod limits;
 pub mod limits_bulk;
 pub mod log_forwarders;

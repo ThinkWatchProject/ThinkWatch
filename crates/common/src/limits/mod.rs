@@ -56,6 +56,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub mod budget;
+pub mod key_usage;
 pub mod sliding;
 pub mod weight;
 
@@ -1158,6 +1159,10 @@ pub struct RequestLimits {
     /// The user the request runs as. Every rate-limit counter below
     /// carries their Redis Cluster hash tag (`sliding::counter_key`).
     pub owner: Uuid,
+    /// The lineage of the API key the request came with, whether or not
+    /// it has limits of its own: its `key_usage` counters count the
+    /// request.
+    pub key_lineage: Option<Uuid>,
     pub rules: Vec<RateLimitRule>,
     pub caps: Vec<BudgetCap>,
 }
@@ -1177,6 +1182,7 @@ impl RequestLimits {
     ) -> Self {
         let mut out = Self {
             owner,
+            key_lineage: key.map(|(lineage, _)| lineage),
             ..Self::default()
         };
         out.add(surface, RateLimitSubject::User, owner, user);

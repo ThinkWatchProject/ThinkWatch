@@ -44,6 +44,15 @@ pub(crate) async fn post_flight_account(
         return;
     }
 
+    // The key's own day and month, counted whether or not it has limits.
+    if let Some(lineage) = request_limits.key_lineage
+        && let Err(e) =
+            limits::key_usage::record_tokens(&redis, lineage, weighted, chrono::Utc::now()).await
+    {
+        metrics::counter!("gateway_key_usage_fail_open_total").increment(1);
+        tracing::warn!("key usage token count failed: {e}");
+    }
+
     // Token-metric sliding rules — the user's and the key's, the same
     // rules the pre-flight checked. Recorded whatever they come to: a
     // window this request overshoots refuses the next one. Post-flight

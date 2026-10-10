@@ -1942,6 +1942,7 @@
     "responsesEndpoint": "OpenAI Responses (new): /v1/responses",
     "responsesWsEndpoint": "OpenAI Responses over WebSocket: /v1/responses (one response.create frame per turn)",
     "modelsEndpoint": "List models: /v1/models",
+    "usageEndpoint": "Usage and limits of the calling key: /v1/usage",
     "claudeDesktop": "Claude Desktop",
     "claudeDesktopDesc": "Configure Claude Desktop to use MCP tools through ThinkWatch.",
     "claudeCodeMcpDesc": "Register ThinkWatch as an MCP server directly from the Claude Code CLI.",

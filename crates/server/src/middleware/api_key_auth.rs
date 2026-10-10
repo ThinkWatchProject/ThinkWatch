@@ -154,6 +154,28 @@ fn presented_key<'a>(
 type AuthFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, StatusCode>> + Send>>;
 
+/// When the key stops authenticating: its expiry, or the end of its
+/// rotation grace period (set on a key that a rotation replaced),
+/// whichever comes first.
+fn stops_authenticating_at(
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    grace_period_ends_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    match (expires_at, grace_period_ends_at) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// What the request does with the key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyUse {
+    /// Calls the gateway: a model, a model listing, an MCP tool.
+    Call,
+    /// Reads about the key itself (`GET /v1/usage`).
+    Read,
+}
+
 /// Build a middleware that authenticates requests via `tw-` prefixed
 /// API keys and additionally requires the key's `surfaces` array to
 /// contain `surface`.
@@ -166,6 +188,25 @@ type AuthFuture =
 /// JWT for interactive admin users.
 pub fn require_api_key(
     surface: &'static str,
+) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {
+    authenticate(surface, KeyUse::Call)
+}
+
+/// [`require_api_key`] for reads about the calling key itself
+/// (`GET /v1/usage`): the same lookup, checks and refusals, but reading
+/// about a key is not a use of it. `last_used_at`, which the inactivity
+/// cutoff reads, stays as it was — a client polling its usage does not
+/// keep an otherwise idle key alive — and a client that leaves early
+/// leaves no `gateway_logs` row.
+pub fn require_api_key_to_read(
+    surface: &'static str,
+) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {
+    authenticate(surface, KeyUse::Read)
+}
+
+fn authenticate(
+    surface: &'static str,
+    key_use: KeyUse,
 ) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {
     move |State(state): State<AppState>, mut request: Request, next: Next| {
         Box::pin(async move {
@@ -257,7 +298,7 @@ pub fn require_api_key(
             // records its own). Every return below produces a response
             // or an auth refusal, so the guard is disarmed after all of
             // them; only a dropped future leaves it armed.
-            let cancel = (surface == "ai_gateway").then(|| {
+            let cancel = (surface == "ai_gateway" && key_use == KeyUse::Call).then(|| {
                 think_watch_gateway::proxy::EarlyCancel::arm(
                     state.audit.clone(),
                     GatewayRequestIdentity {
@@ -271,18 +312,20 @@ pub fn require_api_key(
             });
             let result: Result<Response, StatusCode> = async {
                 // Update last_used_at (best-effort, don't block on failure)
-                let db = state.db.clone();
-                let key_id = row.id;
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
-                            .bind(key_id)
-                            .execute(&db)
-                            .await
-                    {
-                        tracing::warn!("Failed to update api_key last_used_at: {e}");
-                    }
-                });
+                if key_use == KeyUse::Call {
+                    let db = state.db.clone();
+                    let key_id = row.id;
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
+                                .bind(key_id)
+                                .execute(&db)
+                                .await
+                        {
+                            tracing::warn!("Failed to update api_key last_used_at: {e}");
+                        }
+                    });
+                }
 
                 // Compute the user's role-derived constraints and intersect
                 // with the API-key allow-list. The role union is loaded once
@@ -385,6 +428,10 @@ pub fn require_api_key(
                     surface_constraints: surface_constraints.clone(),
                     key_constraints: key_constraints.clone(),
                     ip_address: client_ip.clone(),
+                    key_expires_at: stops_authenticating_at(
+                        row.expires_at,
+                        row.grace_period_ends_at,
+                    ),
                 };
 
                 // The MCP transport handlers expect their own typed
@@ -490,6 +537,23 @@ mod tests {
             intersect_allowlists(v(&["github__*"]), v(&["slack__*"]), t),
             v(&[])
         );
+    }
+
+    #[test]
+    fn a_key_stops_at_its_expiry_or_its_grace_end_whichever_is_first() {
+        use chrono::TimeZone;
+        let d = |day| {
+            Some(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 10, day, 0, 0, 0)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(stops_authenticating_at(None, None), None);
+        assert_eq!(stops_authenticating_at(d(20), None), d(20));
+        assert_eq!(stops_authenticating_at(None, d(12)), d(12));
+        assert_eq!(stops_authenticating_at(d(20), d(12)), d(12));
+        assert_eq!(stops_authenticating_at(d(11), d(12)), d(11));
     }
 
     #[test]

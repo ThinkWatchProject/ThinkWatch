@@ -24,7 +24,7 @@ use think_watch_common::lifecycle::stages::{
     check_access, check_budget, check_limits, run_post_invoke,
 };
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord, Raw};
-use think_watch_common::limits::RequestLimits;
+use think_watch_common::limits::{RequestLimits, key_usage};
 use tw_dialect::ir::Dialect;
 
 /// Pre-flight result threaded through to `ChatPostInvokeDeps` later
@@ -78,6 +78,14 @@ pub(super) async fn run_preflight_stages(
     )
     .await
     .map_err(short_circuit_to_response)?;
+    // Past the rate limits, the request counts on its key, as it has on
+    // every `requests` rule. Fail-open: the counts are for reading.
+    if let Some(lineage) = limits.key_lineage
+        && let Err(e) = key_usage::record_request(&state.redis, lineage, chrono::Utc::now()).await
+    {
+        metrics::counter!("gateway_key_usage_fail_open_total").increment(1);
+        tracing::warn!("key usage request count failed: {e}");
+    }
     let _authorized = check_access::<ChatCompletionSurface>(limits_checked, model, &state.audit)
         .await
         .map_err(short_circuit_to_response)?;

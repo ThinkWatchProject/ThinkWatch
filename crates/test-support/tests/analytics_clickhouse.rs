@@ -872,3 +872,70 @@ async fn cached_input_is_billed_at_the_cache_prices() {
     // 0.000002 × (100 + 5 000 + 2 500) + 0.0004
     assert_eq!(second, Decimal::from_str("0.0156").unwrap());
 }
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn v1_usage_reports_the_keys_cost_this_month_from_the_request_log() {
+    // Two keys of one owner: each key's month counts its own requests.
+    let app = TestApp::spawn_with_clickhouse().await;
+    let (key_a, user_id) = seed_runtime(&app).await;
+    let key_b = fixtures::create_api_key(
+        &app.db,
+        user_id,
+        &unique_name("ck-key-b"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse wired up");
+
+    let gw_a = app.gateway_client();
+    gw_a.set_bearer(&key_a);
+    let gw_b = app.gateway_client();
+    gw_b.set_bearer(&key_b.plaintext);
+    for (gw, n) in [(&gw_a, 1), (&gw_b, 2), (&gw_b, 3)] {
+        gw.post(
+            "/v1/chat/completions",
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": format!("x{n}")}]}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+    }
+    let (one_call, _, _) = wait_for_gateway_log(ch, user_id).await;
+    let one_call: f64 = one_call.to_string().parse().unwrap();
+    // Wait until all three rows have landed.
+    for _ in 0..200 {
+        let n: u64 = ch
+            .query("SELECT count() FROM gateway_logs WHERE user_id = ? AND cost_usd IS NOT NULL")
+            .bind(user_id.to_string())
+            .fetch_one()
+            .await
+            .unwrap();
+        if n == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let cost = |gw: &TestClient| {
+        let gw = gw.clone();
+        async move {
+            let r = gw.get("/v1/usage").await.unwrap();
+            r.assert_ok();
+            let v: Value = r.json().unwrap();
+            v["usage"]["cost_usd_month"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("cost_usd_month is a number: {v:#}"))
+        }
+    };
+    let (a, b) = (cost(&gw_a).await, cost(&gw_b).await);
+    assert!(one_call > 0.0);
+    assert!((a - one_call).abs() < 1e-9, "a={a} one call={one_call}");
+    assert!(
+        (b - 2.0 * one_call).abs() < 1e-9,
+        "b={b} one call={one_call}"
+    );
+}

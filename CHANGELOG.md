@@ -11,6 +11,60 @@ target.
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **Each API key gets day and month usage counters in Redis.** An
+  AI-gateway request made with a key now also counts on
+  `key_usage:{api_key_lineage:<lineage id>}:daily:<date>` and
+  `…:monthly:<month>`, one hash each that expires two periods after its last
+  write: one more Redis script per request once it passes the rate limits,
+  and one when its tokens are counted. The counters start empty, so the
+  `usage` that `GET /v1/usage` reports counts from the upgrade on. No
+  setting, database schema or Helm value changes.
+
+### Added
+
+- **`GET /v1/usage` tells a client what its API key has used and what room
+  it has left.** Called on the gateway port with a gateway API key, as a
+  model request is, it answers with what the key has done today and this
+  month, every limit that binds its model requests with what has been used
+  of it, and when the key stops working:
+
+  ```json
+  {
+    "usage": {"requests_today": 12, "tokens_today": 48210,
+              "requests_month": 340, "tokens_month": 1290455,
+              "cost_usd_month": 3.82},
+    "limits": [
+      {"scope": "key", "kind": "tokens", "window": "daily", "window_secs": null,
+       "limit": 100000, "used": 48210, "resets_at": "2026-10-12T00:00:00Z"},
+      {"scope": "user", "kind": "requests", "window": "1m", "window_secs": 60,
+       "limit": 60, "used": 4, "resets_at": null}
+    ],
+    "expires_at": "2026-12-31T00:00:00Z"
+  }
+  ```
+
+  `usage` counts this key alone, across its rotations: the requests the
+  rate limits let through and the weighted tokens limits count, for the
+  UTC day and month, and its cost this month from the request log (`null`
+  without ClickHouse). `limits` lists the key's own limits (`scope: key`,
+  counted for the key) and its owner's effective limits (`scope: user`:
+  roles, including those a team grants, merged most-restrictive, then the
+  user's overrides, counted for everything the owner does through any key),
+  each with `used` read from the counter that refuses requests, the one
+  with the least left first. `window` is a rate limit's sliding window
+  (`1m`, `5m`, `1h`, `5h`, `1d`, `1w`, with its length in `window_secs`) or
+  a budget's calendar period (`daily`, `weekly`, `monthly`, with its end in
+  `resets_at`, UTC). Limits on the MCP gateway are not listed. `expires_at`
+  is the key's expiry or the end of its rotation grace period, whichever
+  comes first. A key a model request would refuse gets the same `401` or
+  `403`, and `503` means the counters could not be read. Calling it charges
+  no limit, writes no request log row and is not a use of the key:
+  `last_used_at` stays as it was, so polling does not keep an idle key from
+  its inactivity timeout. The console's Configuration Guide lists it with
+  the other gateway endpoints.
+
 ## [3.4.0] — 2026-10-11
 
 Conversations with reasoning models behind Chat-format upstreams keep their
