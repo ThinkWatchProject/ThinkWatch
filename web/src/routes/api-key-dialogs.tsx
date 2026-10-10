@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,9 +15,12 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Copy, Check, AlertCircle } from 'lucide-react';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { KeyLimitsTab } from '@/components/limits/key-limits-tab';
+import { isForbidden, keyLimitsQuery } from '@/components/limits/key-limits-query';
 import {
   ScopeDropdown,
   ToolScopeDropdown,
@@ -347,6 +351,18 @@ export function EditApiKeyDialog({
   const [editMcpOverrides, setEditMcpOverrides] = useState<Record<string, string>>({});
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState('');
+  const [tab, setTab] = useState<'settings' | 'limits'>('settings');
+
+  // The key's own limits, for whoever the limits endpoints let read them:
+  // `rate_limits:read` in a scope that covers the key. Anyone else gets
+  // the settings form alone, as before.
+  const canReadLimits = hasPermission('rate_limits:read');
+  const limitsQuery = useQuery({
+    ...keyLimitsQuery(apiKey?.id ?? ''),
+    enabled: open && !!apiKey && canReadLimits,
+  });
+  const showLimits = canReadLimits && !!apiKey && !isForbidden(limitsQuery.error);
+  const activeTab = showLimits ? tab : 'settings';
 
   // Sync local state when the dialog opens with a new key
   const [lastKeyId, setLastKeyId] = useState<string | null>(null);
@@ -369,6 +385,7 @@ export function EditApiKeyDialog({
     setEditCostCenter(apiKey.cost_center ?? '');
     setEditMcpOverrides(apiKey.mcp_account_overrides ?? {});
     setEditError('');
+    setTab('settings');
   }
 
   // Reset tracking when dialog closes
@@ -428,6 +445,98 @@ export function EditApiKeyDialog({
     }
   };
 
+  const settingsForm = (
+    <form onSubmit={handleEdit} className="space-y-4">
+      {editError && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{editError}</AlertDescription>
+        </Alert>
+      )}
+      <div className="space-y-2">
+        <Label>{t('apiKeys.surfaces')}</Label>
+        <div className="space-y-3 rounded-md border p-3">
+          {ALL_SURFACES.map((s) => {
+            const checked = editSurfaces.includes(s);
+            return (
+              <div key={s} className="space-y-2">
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={() =>
+                      toggleSurface(editSurfaces, setEditSurfaces, s)
+                    }
+                  />
+                  {t(`apiKeys.surface_${s}` as const)}
+                </label>
+                {checked && s === 'ai_gateway' && (
+                  <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
+                    <ScopeDropdown
+                      label={t('apiKeys.allowedModels')}
+                      selected={editSelectedModels}
+                      onChange={setEditSelectedModels}
+                      modelsByProvider={modelsByProvider}
+                    />
+                  </div>
+                )}
+                {checked && s === 'mcp_gateway' && (
+                  <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
+                    <ToolScopeDropdown
+                      label={t('apiKeys.allowedMcpTools')}
+                      selected={editSelectedMcpTools}
+                      onChange={setEditSelectedMcpTools}
+                      mcpToolsByServer={mcpToolsByServer}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label>{t('apiKeys.expiresIn')}</Label>
+        <Input type="number" value={editExpiresInDays} onChange={(e) => setEditExpiresInDays(e.target.value)} placeholder="90" min={1} />
+        <p className="text-xs text-muted-foreground">{t('apiKeys.expiresInHint')}</p>
+      </div>
+      <div className="space-y-2">
+        <Label>{t('apiKeys.rotationPeriod')}</Label>
+        <Input type="number" value={editRotationPeriod} onChange={(e) => setEditRotationPeriod(e.target.value)} placeholder="0" min={0} />
+      </div>
+      <div className="space-y-2">
+        <Label>{t('apiKeys.inactivityTimeout')}</Label>
+        <Input type="number" value={editInactivityTimeout} onChange={(e) => setEditInactivityTimeout(e.target.value)} placeholder="0" min={0} />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="edit-cost-center">{t('apiKeys.costCenter')}</Label>
+        <Input
+          id="edit-cost-center"
+          list="edit-cost-center-options"
+          value={editCostCenter}
+          onChange={(e) => setEditCostCenter(e.target.value)}
+          placeholder={t('apiKeys.costCenterPlaceholder')}
+          maxLength={64}
+        />
+        <datalist id="edit-cost-center-options">
+          {costCenterOptions.map((opt) => (
+            <option key={opt} value={opt} />
+          ))}
+        </datalist>
+        <p className="text-xs text-muted-foreground">{t('apiKeys.costCenterHint')}</p>
+      </div>
+      <McpAccountOverridesField
+        value={editMcpOverrides}
+        onChange={setEditMcpOverrides}
+        visible={editSurfaces.includes('mcp_gateway')}
+      />
+      <DialogFooter>
+        <Button type="submit" disabled={editSubmitting}>
+          {editSubmitting ? t('common.loading') : t('common.save')}
+        </Button>
+      </DialogFooter>
+    </form>
+  );
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -435,95 +544,27 @@ export function EditApiKeyDialog({
           <DialogTitle>{t('apiKeys.editKey')}</DialogTitle>
           <DialogDescription>{apiKey?.name ?? ''}</DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleEdit} className="space-y-4">
-          {editError && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{editError}</AlertDescription>
-            </Alert>
-          )}
-          <div className="space-y-2">
-            <Label>{t('apiKeys.surfaces')}</Label>
-            <div className="space-y-3 rounded-md border p-3">
-              {ALL_SURFACES.map((s) => {
-                const checked = editSurfaces.includes(s);
-                return (
-                  <div key={s} className="space-y-2">
-                    <label className="flex cursor-pointer items-center gap-2 text-sm">
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={() =>
-                          toggleSurface(editSurfaces, setEditSurfaces, s)
-                        }
-                      />
-                      {t(`apiKeys.surface_${s}` as const)}
-                    </label>
-                    {checked && s === 'ai_gateway' && (
-                      <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
-                        <ScopeDropdown
-                          label={t('apiKeys.allowedModels')}
-                          selected={editSelectedModels}
-                          onChange={setEditSelectedModels}
-                          modelsByProvider={modelsByProvider}
-                        />
-                      </div>
-                    )}
-                    {checked && s === 'mcp_gateway' && (
-                      <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
-                        <ToolScopeDropdown
-                          label={t('apiKeys.allowedMcpTools')}
-                          selected={editSelectedMcpTools}
-                          onChange={setEditSelectedMcpTools}
-                          mcpToolsByServer={mcpToolsByServer}
-                        />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>{t('apiKeys.expiresIn')}</Label>
-            <Input type="number" value={editExpiresInDays} onChange={(e) => setEditExpiresInDays(e.target.value)} placeholder="90" min={1} />
-            <p className="text-xs text-muted-foreground">{t('apiKeys.expiresInHint')}</p>
-          </div>
-          <div className="space-y-2">
-            <Label>{t('apiKeys.rotationPeriod')}</Label>
-            <Input type="number" value={editRotationPeriod} onChange={(e) => setEditRotationPeriod(e.target.value)} placeholder="0" min={0} />
-          </div>
-          <div className="space-y-2">
-            <Label>{t('apiKeys.inactivityTimeout')}</Label>
-            <Input type="number" value={editInactivityTimeout} onChange={(e) => setEditInactivityTimeout(e.target.value)} placeholder="0" min={0} />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="edit-cost-center">{t('apiKeys.costCenter')}</Label>
-            <Input
-              id="edit-cost-center"
-              list="edit-cost-center-options"
-              value={editCostCenter}
-              onChange={(e) => setEditCostCenter(e.target.value)}
-              placeholder={t('apiKeys.costCenterPlaceholder')}
-              maxLength={64}
-            />
-            <datalist id="edit-cost-center-options">
-              {costCenterOptions.map((opt) => (
-                <option key={opt} value={opt} />
-              ))}
-            </datalist>
-            <p className="text-xs text-muted-foreground">{t('apiKeys.costCenterHint')}</p>
-          </div>
-          <McpAccountOverridesField
-            value={editMcpOverrides}
-            onChange={setEditMcpOverrides}
-            visible={editSurfaces.includes('mcp_gateway')}
-          />
-          <DialogFooter>
-            <Button type="submit" disabled={editSubmitting}>
-              {editSubmitting ? t('common.loading') : t('common.save')}
-            </Button>
-          </DialogFooter>
-        </form>
+        {showLimits ? (
+          <Tabs value={activeTab} onValueChange={(v) => setTab(v as 'settings' | 'limits')}>
+            <TabsList>
+              <TabsTrigger value="settings">{t('apiKeys.tab.settings')}</TabsTrigger>
+              <TabsTrigger value="limits">{t('apiKeys.tab.limits')}</TabsTrigger>
+            </TabsList>
+            <TabsContent value="settings" className="pt-2">
+              {settingsForm}
+            </TabsContent>
+            <TabsContent value="limits" className="pt-2">
+              {apiKey && (
+                <KeyLimitsTab
+                  keyId={apiKey.id}
+                  canEdit={hasPermission('rate_limits:write')}
+                />
+              )}
+            </TabsContent>
+          </Tabs>
+        ) : (
+          settingsForm
+        )}
       </DialogContent>
     </Dialog>
   );

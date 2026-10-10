@@ -73,6 +73,14 @@ target.
   without limits of its own sees its owner's totals and limits; a key handed
   to someone else should carry limits of its own. The console's
   Configuration Guide lists the endpoint with the other gateway endpoints.
+- **An API key's own limits are edited in the console.** The key's edit
+  dialog has a Limits tab: rate limits (requests or weighted tokens over
+  1m, 5m, 1h, 5h, 1d or 1w) and budgets (daily, weekly or monthly weighted
+  tokens), each with what it has used, added, changed and removed through
+  the existing limits endpoints. They follow the key across rotations.
+  Reading needs `rate_limits:read` and changing `rate_limits:write`, in a
+  scope that covers the key, as before; without write access the tab is
+  read-only, and without read access the dialog is unchanged.
 
 ## [3.4.0] — 2026-10-11
 

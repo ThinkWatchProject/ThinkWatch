@@ -704,7 +704,11 @@
     "expired": "已过期",
     "rotated": "已轮换",
     "gracePeriod": "过渡期",
-    "inactiveTab": "已失效"
+    "inactiveTab": "已失效",
+    "tab": {
+      "settings": "设置",
+      "limits": "限额"
+    }
   },
   "models": {
     "upstreamRefuses": "上游不提供",
@@ -1281,6 +1285,21 @@
       "type": "类型",
       "expires": "到期",
       "reason": "说明"
+    }
+  },
+  "keyLimits": {
+    "title": "此密钥的限额",
+    "hint": "使用此密钥的请求同时受这些限额和所属用户的限额约束。",
+    "none": "此密钥没有单独的限额。",
+    "add": "添加限额",
+    "saved": "限额已保存",
+    "deleted": "限额已删除",
+    "disabled": "已停用",
+    "confirmDeleteTitle": "删除此限额？",
+    "confirmDeleteBody": "使用此密钥的请求将不再受此限额约束。",
+    "drawer": {
+      "createTitle": "添加限额",
+      "editTitle": "编辑限额"
     }
   },
   "userLimitsTab": {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithQueryClient } from '@/test/render'
 import { ApiKeysPage } from './api-keys'
@@ -22,9 +22,10 @@ vi.mock('@/lib/paginated-fetch', () => ({
   fetchAllPaginated: vi.fn().mockResolvedValue([]),
 }))
 
-import { api } from '@/lib/api'
+import { api, hasPermission } from '@/lib/api'
 
 const mockApi = vi.mocked(api)
+const mockHasPermission = vi.mocked(hasPermission)
 
 const makeKey = (overrides: Record<string, unknown> = {}) => ({
   id: 'key-1',
@@ -52,17 +53,22 @@ const makeKey = (overrides: Record<string, unknown> = {}) => ({
 // Different endpoints have different response shapes — route by URL so
 // /api/keys returns the paginated key list while /api/keys/cost-centers
 // and /api/keys/policy-scope get their own appropriate shapes.
-function mockKeysFetch(keys: ReturnType<typeof makeKey>[]) {
+function mockKeysFetch(
+  keys: ReturnType<typeof makeKey>[],
+  limits: (url: string) => unknown = () => ({ items: [], rules: [], caps: [] }),
+) {
   mockApi.mockImplementation(async (url: string) => {
     if (url.startsWith('/api/keys/cost-centers')) return [] as string[]
     if (url.startsWith('/api/keys/policy-scope'))
       return { allowed_models: null, allowed_mcp_tools: null }
+    if (url.startsWith('/api/admin/limits/')) return limits(url)
     return { data: keys, total: keys.length, page: 1, page_size: 20 }
   })
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockHasPermission.mockImplementation(() => true)
 })
 
 describe('ApiKeysPage', () => {
@@ -142,5 +148,74 @@ describe('ApiKeysPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Generate a new API key for the gateway.')).toBeInTheDocument()
     })
+  })
+
+  it("edits the key's own limits in a tab of the edit dialog", async () => {
+    mockKeysFetch([makeKey()], (url) =>
+      url.endsWith('/usage')
+        ? { rules: [{ rule_id: 'r1', current: 3, limit: 10 }], caps: [] }
+        : url.endsWith('/rules')
+          ? {
+              items: [
+                {
+                  id: 'r1',
+                  surface: 'ai_gateway',
+                  metric: 'requests',
+                  window_secs: 60,
+                  max_count: 10,
+                  enabled: true,
+                },
+              ],
+            }
+          : { items: [] },
+    )
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    await user.click(await screen.findByRole('tab', { name: 'Limits' }))
+
+    expect(await screen.findByText('30%')).toBeInTheDocument()
+    expect(screen.getByText('7 remaining')).toBeInTheDocument()
+    expect(mockApi).toHaveBeenCalledWith(
+      '/api/admin/limits/api_key/key-1/rules',
+      expect.anything(),
+    )
+  })
+
+  it('shows no limits tab without rate_limits:read', async () => {
+    mockHasPermission.mockImplementation((perm) => perm !== 'rate_limits:read')
+    mockKeysFetch([makeKey()])
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    expect(await screen.findByText('Edit Key')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Limits' })).not.toBeInTheDocument()
+    expect(mockApi).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/admin/limits/'),
+      expect.anything(),
+    )
+  })
+
+  it("shows no limits tab when the key is outside the caller's scope", async () => {
+    mockKeysFetch([makeKey()], () => {
+      throw Object.assign(new Error('Forbidden'), { status: 403 })
+    })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(mockApi).toHaveBeenCalledWith(
+        '/api/admin/limits/api_key/key-1/rules',
+        expect.anything(),
+      )
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('tab', { name: 'Limits' })).not.toBeInTheDocument()
+    })
+    // The settings form is there as before.
+    expect(within(screen.getByRole('dialog')).getByText('Gateway access')).toBeInTheDocument()
   })
 })

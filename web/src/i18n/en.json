@@ -704,7 +704,11 @@
     "expired": "Expired",
     "rotated": "Rotated",
     "gracePeriod": "Grace Period",
-    "inactiveTab": "Inactive"
+    "inactiveTab": "Inactive",
+    "tab": {
+      "settings": "Settings",
+      "limits": "Limits"
+    }
   },
   "models": {
     "upstreamRefuses": "upstream refuses",
@@ -1281,6 +1285,21 @@
       "type": "Type",
       "expires": "Expires",
       "reason": "Reason"
+    }
+  },
+  "keyLimits": {
+    "title": "Limits of this key",
+    "hint": "Requests made with this key are held to these limits as well as to its owner's.",
+    "none": "This key has no limits of its own.",
+    "add": "Add limit",
+    "saved": "Limit saved",
+    "deleted": "Limit deleted",
+    "disabled": "Disabled",
+    "confirmDeleteTitle": "Delete this limit?",
+    "confirmDeleteBody": "Requests made with this key are no longer held to it.",
+    "drawer": {
+      "createTitle": "Add limit",
+      "editTitle": "Edit limit"
     }
   },
   "userLimitsTab": {
