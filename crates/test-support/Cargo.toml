@@ -20,7 +20,7 @@ think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
 
-async-trait = "0.1"
+async-trait = "0.1.92"
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -45,8 +45,8 @@ ecdsa = { workspace = true }
 rand = { workspace = true }
 url = { workspace = true }
 clickhouse = { workspace = true }
-once_cell = "1"
-wiremock = "0.6"
+once_cell = "1.21.4"
+wiremock = "0.6.5"
 tokio-tungstenite = "0.30"
 futures = { workspace = true }
 async-stream = { workspace = true }
