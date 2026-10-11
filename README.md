@@ -123,6 +123,8 @@ ThinkWatch uses four crates from [ThinkWatch Core](https://github.com/ThinkWatch
 
 Contributions are welcome. Please open an issue to discuss before submitting a PR for major changes.
 
+Your first pull request asks you to sign the [Contributor License Agreement](CLA.md) once; [CONTRIBUTING.md](CONTRIBUTING.md) explains how.
+
 ## License
 
 ThinkWatch is source-available under the [Business Source License 1.1](LICENSE).
