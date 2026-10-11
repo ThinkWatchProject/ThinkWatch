@@ -847,16 +847,10 @@ impl Surface for ChatCompletionSurface {
         ))
     }
 
-    /// `None` = unrestricted; otherwise the model must match an entry
-    /// (exactly or by prefix). An empty list allows nothing — it is what
-    /// a key narrowed to models its owner's roles do not grant ends up
-    /// with, and the MCP surface reads `[]` the same way.
+    /// See [`GatewayRequestIdentity::may_call`]. The MCP surface reads
+    /// an empty list the same way: nothing is allowed.
     fn is_access_allowed(identity: &Self::Identity, candidate: &str) -> bool {
-        identity.allowed_models.as_ref().is_none_or(|allowed| {
-            allowed
-                .iter()
-                .any(|m| candidate == *m || candidate.starts_with(m))
-        })
+        identity.may_call(candidate)
     }
 
     fn access_denied_response(candidate: &str) -> Self::Response {
