@@ -574,9 +574,15 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             if s.len() > 253 {
                 return Err(AppError::BadRequest("public_host too long".into()));
             }
-            if s.contains("://") || s.contains('/') {
+            // The rule `GET /api/gateway/info` reads the setting with: a
+            // value it would pass over as not set is refused here, so a
+            // mistyped host shows up when it is saved.
+            if !s.is_empty() && think_watch_common::validation::bare_host(s).is_none() {
                 return Err(AppError::BadRequest(
-                    "public_host must be a hostname only (no scheme or path)".into(),
+                    "public_host must be a host name or an IP address only, such as \
+                     gateway.example.com or 10.0.0.5: no scheme, port, path or user \
+                     (the port goes in public_port)"
+                        .into(),
                 ));
             }
         }
@@ -743,6 +749,40 @@ mod tests {
         assert!(validate_setting("api_keys.default_expiry_days", &json!(0)).is_ok());
         assert!(validate_setting("api_keys.default_expiry_days", &json!(30)).is_ok());
         assert!(validate_setting("api_keys.default_expiry_days", &json!(-1)).is_err());
+    }
+
+    #[test]
+    fn validates_the_public_host_with_the_gateway_address_rule() {
+        for ok in [
+            "",
+            "gateway.example.com",
+            "10.0.0.5",
+            "::1",
+            "[fd00::5]",
+            "gw",
+        ] {
+            assert!(
+                validate_setting("general.public_host", &json!(ok)).is_ok(),
+                "{ok:?}"
+            );
+        }
+        for bad in [
+            "gateway.example.com:8443",
+            "https://gateway.example.com",
+            "gateway.example.com/v1",
+            "admin@gateway.example.com",
+            "gateway.example.com?x=1",
+            "gateway example",
+            "${GATEWAY_HOST}",
+            "   ",
+        ] {
+            let e = validate_setting("general.public_host", &json!(bad)).unwrap_err();
+            assert!(
+                e.to_string().contains("host name or an IP address only"),
+                "{bad:?}: {e}"
+            );
+        }
+        assert!(validate_setting("general.public_host", &json!(5)).is_err());
     }
 
     #[test]

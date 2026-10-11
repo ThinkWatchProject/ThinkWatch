@@ -697,17 +697,18 @@ curl -X POST ${mcpUrl}/mcp \\
 
 export function GuidePage() {
   const { t } = useTranslation();
-  const { baseUrl, failed } = useGatewayUrl();
-  const gatewayUrl = baseUrl ?? '';
+  // Until the configured address has loaded, and when it cannot be read,
+  // the address is the browser's: the examples and Copy always have one.
+  const { baseUrl: gatewayUrl, known, failed } = useGatewayUrl();
   const mcpUrl = gatewayUrl; // MCP endpoint is on the gateway port
-  // Until the address has loaded, its boxes hold a placeholder.
+  // While the address loads, its boxes hold a placeholder.
   const urlBox = (suffix = '') =>
-    baseUrl || failed ? (
+    known || failed ? (
       <>
         <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm">
-          {baseUrl ? `${baseUrl}${suffix}` : '—'}
+          {`${gatewayUrl}${suffix}`}
         </code>
-        <CopyButton text={baseUrl ? `${baseUrl}${suffix}` : ''} />
+        <CopyButton text={`${gatewayUrl}${suffix}`} />
       </>
     ) : (
       <Skeleton className="h-9 flex-1" />

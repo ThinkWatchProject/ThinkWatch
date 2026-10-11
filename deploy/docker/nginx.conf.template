@@ -100,7 +100,12 @@ server {
         # proxies it to the console port on the same origin) and the
         # dashboard WebSocket upgrade to /api/dashboard/ws (modern CSP
         # treats `'self'` as ws/wss to the same origin).
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self';" always;
+        #
+        # `frame-src thinkwatch:` lets "Add to ThinkWatch Lite" hand its
+        # `thinkwatch://import` link to the app through a hidden iframe
+        # (web/src/lib/open-app-link.ts), so a browser without the app
+        # shows its error page there instead of in place of the console.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-src 'self' thinkwatch:; frame-ancestors 'self';" always;
         try_files $uri $uri/ /index.html;
     }
 

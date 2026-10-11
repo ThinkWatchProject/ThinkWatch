@@ -11,7 +11,8 @@
 //!   - The per-key allow-list still narrows what the roles grant, and an
 //!     empty result means nothing is allowed, not everything.
 //!   - `GET /v1/models` and `GET /v1beta/models` list the models the
-//!     calling key may use under both, and no others.
+//!     calling key may use under both, and no others — including a model
+//!     the key's allow-list names that a prefix route serves.
 
 use serde_json::Value;
 use think_watch_test_support::client::TestResponse;
@@ -483,4 +484,81 @@ async fn model_listings_follow_the_owners_roles() {
     assign_global(&app.db, prefixed.user.id, prefix).await;
     let gw = gateway_for(&app, prefixed.user.id, Some(&[MODEL_B])).await;
     assert_lists(&gw, &[MODEL_B], "a prefix grant narrowed to model-b").await;
+}
+
+/// A provider with no routes of its own, which the router serves under its
+/// type's model prefixes (`gpt-`, `o1-`, …), behind one mock upstream.
+async fn prefix_routed(app: &TestApp) -> MockProvider {
+    let upstream = MockProvider::openai_chat_ok("gpt-4o").await;
+    fixtures::create_provider(
+        &app.db,
+        &unique_name("authz-prefix-prov"),
+        "openai",
+        &upstream.uri(),
+        None,
+    )
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+    upstream
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn model_listings_name_allowed_models_that_a_prefix_route_serves() {
+    let app = TestApp::spawn().await;
+    let _upstream = prefix_routed(&app).await;
+    let user = bare_user(&app).await;
+    fixtures::assign_role_global(&app.db, user.user.id, "developer")
+        .await
+        .unwrap();
+
+    // No route is named `gpt-4o`; the `gpt-` prefix route serves it, and
+    // the key's allow-list names it.
+    let narrowed = gateway_for(&app, user.user.id, Some(&["gpt-4o"])).await;
+    let (openai, gemini) = listed_models(&narrowed).await;
+    assert_eq!(openai, ["gpt-4o"], "/v1/models");
+    assert_eq!(gemini, ["gpt-4o"], "/v1beta/models");
+    // What is listed is what a request is let through for.
+    chat(&narrowed, "gpt-4o").await.assert_ok();
+
+    // An allowed name nothing routes is not listed; a name that is a
+    // route and an allow-list entry both is listed once.
+    let mixed = gateway_for(
+        &app,
+        user.user.id,
+        Some(&["gpt-", "gpt-4o", "gemini-2.5-pro"]),
+    )
+    .await;
+    let (openai, gemini) = listed_models(&mixed).await;
+    assert_eq!(openai, ["gpt-", "gpt-4o"], "/v1/models");
+    assert_eq!(gemini, ["gpt-", "gpt-4o"], "/v1beta/models");
+
+    // An unrestricted key lists the routes' own names.
+    let unrestricted = gateway_for(&app, user.user.id, None).await;
+    let (openai, _) = listed_models(&unrestricted).await;
+    assert!(openai.iter().any(|m| m == "gpt-"), "{openai:?}");
+    assert!(!openai.iter().any(|m| m == "gpt-4o"), "{openai:?}");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn model_listings_name_role_granted_models_that_a_prefix_route_serves() {
+    let app = TestApp::spawn().await;
+    let _upstream = prefix_routed(&app).await;
+    let user = bare_user(&app).await;
+    let gpt_4o = custom_role(
+        &app.db,
+        "gpt-4o-only",
+        json!({"Effect": "Allow", "Action": ["ai_gateway:use"], "Resource": ["model:gpt-4o"]}),
+    )
+    .await;
+    assign_global(&app.db, user.user.id, gpt_4o).await;
+
+    // The key is not narrowed; its owner's role is.
+    let gw = gateway_for(&app, user.user.id, None).await;
+    let (openai, gemini) = listed_models(&gw).await;
+    assert_eq!(openai, ["gpt-4o"], "/v1/models");
+    assert_eq!(gemini, ["gpt-4o"], "/v1beta/models");
+    chat(&gw, "gpt-4o").await.assert_ok();
 }

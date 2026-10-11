@@ -18,9 +18,18 @@ vi.mock('@/lib/api', () => ({
   // The complete step reads the gateway's address for "Add to
   // ThinkWatch Lite".
   api: vi.fn(async (path: string) => {
-    if (path === '/api/gateway/info') return { base_url: 'https://gateway.example.com' }
+    if (path === '/api/gateway/info')
+      return {
+        public_protocol: 'https',
+        public_host: 'gateway.example.com',
+        public_port: 443,
+        gateway_port: 3000,
+      }
     throw new Error(`unexpected ${path}`)
   }),
+  // No permissions are loaded during setup; the first administrator's
+  // key is offered all the same.
+  hasPermission: vi.fn(() => false),
 }))
 
 beforeEach(() => {
@@ -122,16 +131,18 @@ describe('SetupPage', () => {
     expect(screen.getByDisplayValue('tw-test-key-xyz789')).toBeInTheDocument()
 
     // The first key can be added to ThinkWatch Lite with the gateway's
-    // public address.
-    const add = await screen.findByRole('link', { name: 'Add to ThinkWatch Lite' })
-    expect(add).toHaveAttribute(
-      'href',
+    // public address, through a hidden iframe: the page stays.
+    const add = await screen.findByRole('button', { name: 'Add to ThinkWatch Lite' })
+    await waitFor(() => expect(add).toBeEnabled())
+    const page = window.location.href
+    await user.click(add)
+    expect(window.location.href).toBe(page)
+    expect(document.querySelector('iframe')).toHaveAttribute(
+      'src',
       'thinkwatch://import?service=thinkwatch&name=thinkwatch' +
         '&url=https%3A%2F%2Fgateway.example.com&key=tw-test-key-xyz789',
     )
-    // jsdom cannot follow the link; the app would open.
-    add.addEventListener('click', (e) => e.preventDefault())
-    await user.click(add)
+    expect(screen.getByDisplayValue('tw-test-key-xyz789')).toBeInTheDocument()
     expect(screen.getByText('Nothing happened?')).toBeInTheDocument()
     expect(
       screen.getByRole('link', { name: 'Install ThinkWatch Lite (2026.10.16 or later) first' }),

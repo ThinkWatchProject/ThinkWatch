@@ -11,6 +11,14 @@ target.
 
 ## [Unreleased]
 
+## [3.6.0] — 2026-10-12
+
+A key shown once can go straight into ThinkWatch Lite: the console's key
+screens offer Add to ThinkWatch Lite, and the Configuration Guide has a tab
+for it. Every user, not only administrators, now sees the gateway address
+an administrator configured, and the model listings name only the models
+the calling key may use.
+
 ### Read before upgrading
 
 - **Model listings follow the calling key.** `GET /v1/models` and
@@ -19,37 +27,58 @@ target.
   (see Fixed). A client that lists models with a narrowed key sees fewer
   of them, and a key whose allow-list and owner's roles have nothing in
   common lists none. No setting, schema, Helm value or Redis key changes.
+- **`general.public_host` must be a host name or an IP address.** Saving
+  it used to accept anything without `/` or `://`, such as
+  `gateway.example.com:8443`, and the Configuration Guide then built a
+  broken URL from it. Such a value is now refused when saved, and one
+  already stored counts as not set: the guide uses the host the console is
+  open at instead. If yours carries a port, move the port to
+  `general.public_port`.
+- **The console's Content-Security-Policy allows `frame-src thinkwatch:`.**
+  The web image's nginx now sends
+  `frame-src 'self' thinkwatch:`, which Add to ThinkWatch Lite needs to hand
+  its link to the app (see Added). A policy of your own in front of the
+  console needs the same directive, or the button does nothing.
 
 ### Added
 
-- **"Add to ThinkWatch Lite" beside a key shown once.** The new-key and
-  rotated-key dialogs and the end of first-run setup have an Add to
-  ThinkWatch Lite button next to Copy. It opens a `thinkwatch://import`
-  link that ThinkWatch Lite (2026.10.16 or later) turns into a new upstream
-  for this gateway with the key filled in. The link is built in the browser
-  from the key on screen and the gateway's public address, and is sent
-  nowhere. The button is unavailable, with the reason beside it, for a key
-  without the `ai_gateway` surface and for a gateway whose public address
-  Lite does not accept. Lite takes `https://`, and plain `http://` only on
-  this machine or a private network: private IPv4 ranges (`10/8`,
-  `172.16/12`, `192.168/16`, `100.64/10`, `169.254/16`), private IPv6
-  ranges (`fc00::/7`, `fe80::/10`), and names with no dot or ending in
-  `.local`, `.lan`, `.internal`, `.intranet`, `.corp`, `.home.arpa` or
-  `.localhost`. Elsewhere, set `general.public_protocol` to `https` where
-  the gateway is served over TLS. Once clicked, a line under it links to
-  the download page. Phones get Copy only.
+- **"Add to ThinkWatch Lite" for a key shown once.** The new-key and
+  rotated-key dialogs have an Add to ThinkWatch Lite button next to Copy;
+  at the end of first-run setup it is on its own line under the key. It
+  opens a `thinkwatch://import` link with this gateway and the key, and
+  ThinkWatch Lite (2026.10.16 or later) opens its New upstream dialog with
+  them filled in; the upstream is created when the user confirms it there.
+  The link is built in the browser from the key on screen and the
+  gateway's public address, and is sent nowhere. It is opened in a hidden
+  frame, so a browser without Lite installed keeps the page, and the key
+  on it, instead of showing an error page in its place. The button is
+  unavailable, with the reason beside it, for a key without the
+  `ai_gateway` surface, for a user whose roles do not grant
+  `ai_gateway:use` (a key is always its creator's, and the gateway would
+  refuse its every request), and for a gateway whose public address Lite
+  does not accept. Lite takes `https://`, and plain `http://` only on this
+  machine or a private network: private IPv4 ranges (`10/8`, `172.16/12`,
+  `192.168/16`, `100.64/10`, `169.254/16`), private IPv6 ranges
+  (`fc00::/7`, `fe80::/10`), and names with no dot or ending in `.local`,
+  `.lan`, `.internal`, `.intranet`, `.corp`, `.home.arpa` or `.localhost`.
+  Elsewhere, set `general.public_protocol` to `https` where the gateway is
+  served over TLS. Once clicked, a line under it links to the download
+  page. Phones get Copy only.
 - **The Configuration Guide has a ThinkWatch Lite tab**, first among the
   AI gateway clients: what Lite does, and a button that opens the new-key
   dialog filled in for it (named "ThinkWatch Lite", AI gateway only).
   Users without `api_keys:create` are told how to get a key and add it by
   hand.
 - **`GET /api/gateway/info`** on the console port gives any signed-in user
-  the gateway's public base URL, `{"base_url": "https://gateway.example.com"}`,
-  from `general.public_protocol`, `general.public_host` and
-  `general.public_port`. What is not set comes from the address the console
-  was opened at: the scheme from `X-Forwarded-Proto` (else `http`), the
-  host from `X-Forwarded-Host` or `Host`, the port from the gateway's
-  listening port. A default port is left out.
+  the configured parts of the gateway's public address:
+  `{"public_protocol": "https", "public_host": "gateway.example.com", "public_port": 443, "gateway_port": 3000}`.
+  `public_protocol`, `public_host` and `public_port` are
+  `general.public_protocol`, `general.public_host` and
+  `general.public_port`, each `null` when not set (or when the stored value
+  is not one the setting accepts); `gateway_port` is the port the gateway
+  listens on. The console fills in what is not set from the address it is
+  open at, the browser's scheme and host, and uses `gateway_port` when no
+  public port is set. The server reads no request headers for it.
 
 ### Fixed
 
@@ -57,12 +86,29 @@ target.
   user.** It read the address from `GET /api/admin/settings/system`, which
   needs `settings:read`: everyone else got 403 and an address built from
   the browser's host and port 3000, whatever `general.public_*` said. It
-  now reads `GET /api/gateway/info`.
+  now reads `GET /api/gateway/info`. Until that has loaded, and if it
+  cannot be read, the examples use the browser's scheme and host with port
+  3000, as before.
 - **`GET /v1/models` and `GET /v1beta/models` list only the models the
   calling key may use**: the key's `allowed_models` intersected with what
   its owner's roles grant, matched exactly or by prefix, the check a
   request for the model meets. They listed every routed model, and a
-  request for one outside that scope was then refused.
+  request for one outside that scope was then refused. A model named in
+  that allow-list is listed when a route serves it, so a key narrowed to
+  `gpt-4o` lists `gpt-4o` when the route is a prefix such as the `gpt-`
+  route of a provider with no routes of its own.
+- **Saving `general.public_host` checks it** (see Read before upgrading):
+  `PATCH /api/admin/settings` answers 400, naming what the setting takes,
+  for a value with a scheme, a port, a path, a user or anything else
+  beyond a host name or an IP address. In Settings, the field's save
+  marker turns to an error that gives this message.
+
+### Changed
+
+- The Public Gateway URL hint in Settings says where an empty protocol or
+  host comes from (the address the console is open at) and that port 0 is
+  the gateway's listening port, and names Add to ThinkWatch Lite among
+  what uses the address.
 
 ## [3.5.0] — 2026-10-11
 
@@ -1976,7 +2022,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.5.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.6.0...HEAD
+[3.6.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.6.0
 [3.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.5.0
 [3.4.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.4.0
 [3.3.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.3.1
