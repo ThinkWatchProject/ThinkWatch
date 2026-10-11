@@ -1725,7 +1725,7 @@
     },
     "siteName": "站点名称",
     "publicGatewayUrl": "网关公开地址",
-    "publicGatewayUrlHint": "外部访问网关时使用的地址。用于配置指南中的复制粘贴示例。留空 / 填 0 表示从浏览器自动获取。",
+    "publicGatewayUrlHint": "外部访问网关时使用的地址，用于配置指南、其中的复制粘贴示例和「添加到 ThinkWatch Lite」。协议或主机留空时，取浏览器中控制台的地址；端口填 0 时，使用网关监听端口。",
     "publicProtocol": "协议",
     "publicHost": "主机",
     "publicHostPlaceholder": "自动（使用浏览器主机名）",
@@ -2039,6 +2039,7 @@
   "lite": {
     "add": "添加到 ThinkWatch Lite",
     "reasonNoAiGateway": "这把 API 密钥不能调用 AI 网关，无法添加到 ThinkWatch Lite。",
+    "reasonNoGatewayUse": "当前账号没有可使用 AI 网关的角色（ai_gateway:use），它的 API 密钥无法在 ThinkWatch Lite 中使用。",
     "reasonNoGatewayUrl": "无法读取网关地址。",
     "reasonInsecureUrl": "ThinkWatch Lite 只接受 HTTPS 网关地址，或本机、内网的 HTTP 地址；本网关的地址是 {{url}}。",
     "reasonBadUrl": "网关地址 {{url}} 无法添加到 ThinkWatch Lite。",

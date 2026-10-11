@@ -219,6 +219,33 @@ pub fn validate_url(url_str: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// `host` as it goes into a URL — a domain name in lower case, an IPv4
+/// address, or an IPv6 address in brackets (given with or without them) —
+/// or `None` when it is empty or is anything more than a host: a scheme, a
+/// port, a path, a user or anything else that would change the URL's
+/// shape.
+///
+/// The rule for `general.public_host`: saving a value it refuses is an
+/// error, and one already stored counts as not set.
+pub fn bare_host(host: &str) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let bracketed;
+    let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        bracketed = format!("[{host}]");
+        bracketed.as_str()
+    } else {
+        host
+    };
+    let parsed = url::Host::parse(host).ok()?.to_string();
+    parsed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+        .then_some(parsed)
+}
+
 /// Checks an AWS region code such as `us-east-1` or `us-gov-west-1`.
 ///
 /// Bedrock providers keep a region where other providers keep a URL, and
@@ -505,6 +532,33 @@ mod tests {
         assert!(is_private_ip(&"100.64.0.1".parse().unwrap()));
         assert!(is_private_ip(&"100.127.255.255".parse().unwrap()));
         assert!(!is_private_ip(&"100.63.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn bare_host_takes_a_host_name_or_an_ip_address_only() {
+        assert_eq!(
+            bare_host("GW.Example.com").as_deref(),
+            Some("gw.example.com")
+        );
+        assert_eq!(bare_host(" 10.0.0.5 ").as_deref(), Some("10.0.0.5"));
+        assert_eq!(bare_host("gateway").as_deref(), Some("gateway"));
+        assert_eq!(bare_host("::1").as_deref(), Some("[::1]"));
+        assert_eq!(bare_host("[fd00::5]").as_deref(), Some("[fd00::5]"));
+        for bad in [
+            "",
+            "   ",
+            "gw.example.com:8443",
+            "https://gw.example.com",
+            "gw.example.com/v1",
+            "user@gw.example.com",
+            "gw.example.com?x=1",
+            "gw example",
+            "gw.example.com#top",
+            "${GATEWAY_HOST}",
+            "[::1]:3000",
+        ] {
+            assert_eq!(bare_host(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

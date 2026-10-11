@@ -63,7 +63,13 @@ function mockKeysFetch(
     if (url.startsWith('/api/keys/policy-scope'))
       return { allowed_models: null, allowed_mcp_tools: null }
     if (url.startsWith('/api/admin/limits/')) return limits(url)
-    if (url === '/api/gateway/info') return { base_url: 'https://gateway.example.com' }
+    if (url === '/api/gateway/info')
+      return {
+        public_protocol: 'https',
+        public_host: 'gateway.example.com',
+        public_port: 443,
+        gateway_port: 3000,
+      }
     return { data: keys, total: keys.length, page: 1, page_size: 20 }
   })
 }
@@ -152,7 +158,7 @@ describe('ApiKeysPage', () => {
     })
   })
 
-  it('offers a new key to ThinkWatch Lite beside Copy', async () => {
+  it('offers a new key to ThinkWatch Lite beside Copy, without leaving the page', async () => {
     mockKeysFetch([])
     mockApiPost.mockResolvedValue({ id: 'new', key: 'tw-new-key' })
     const user = userEvent.setup()
@@ -162,13 +168,44 @@ describe('ApiKeysPage', () => {
     await user.type(screen.getByLabelText('Name'), 'laptop')
     await user.click(screen.getByRole('button', { name: 'Create Key' }))
 
-    const add = await screen.findByRole('link', { name: 'Add to ThinkWatch Lite' })
-    expect(add).toHaveAttribute(
-      'href',
+    const add = await screen.findByRole('button', { name: 'Add to ThinkWatch Lite' })
+    await waitFor(() => expect(add).toBeEnabled())
+    expect(screen.getByRole('button', { name: 'Copy to Clipboard' })).toBeInTheDocument()
+    // The button is no link the page itself would follow.
+    expect(screen.queryByRole('link', { name: 'Add to ThinkWatch Lite' })).not.toBeInTheDocument()
+
+    const page = window.location.href
+    await user.click(add)
+    // The link goes to a hidden iframe; the page and its key stay.
+    expect(window.location.href).toBe(page)
+    const frame = document.querySelector('iframe')
+    expect(frame).toHaveAttribute(
+      'src',
       'thinkwatch://import?service=thinkwatch&name=thinkwatch' +
         '&url=https%3A%2F%2Fgateway.example.com&key=tw-new-key',
     )
-    expect(screen.getByRole('button', { name: 'Copy to Clipboard' })).toBeInTheDocument()
+    expect(frame).not.toBeVisible()
+    expect(screen.getByText('tw-new-key')).toBeInTheDocument()
+    expect(screen.getByText('Nothing happened?')).toBeInTheDocument()
+    frame?.remove()
+  })
+
+  it('names why a key cannot be added to Lite when its owner may not use the gateway', async () => {
+    mockKeysFetch([])
+    mockHasPermission.mockImplementation((perm: string) => perm !== 'ai_gateway:use')
+    mockApiPost.mockResolvedValue({ id: 'new', key: 'tw-new-key' })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+
+    await user.click((await screen.findAllByRole('button', { name: /create api key/i }))[0])
+    await user.type(screen.getByLabelText('Name'), 'laptop')
+    await user.click(screen.getByRole('button', { name: 'Create Key' }))
+
+    const add = await screen.findByRole('button', { name: 'Add to ThinkWatch Lite' })
+    expect(add).toBeDisabled()
+    expect(add).toHaveAccessibleDescription(
+      'No role of this account grants use of the AI gateway (ai_gateway:use), so its API keys cannot be used from ThinkWatch Lite.',
+    )
   })
 
   it('names why a key without the AI gateway cannot be added to Lite', async () => {

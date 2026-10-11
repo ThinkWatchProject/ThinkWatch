@@ -1725,7 +1725,7 @@
     },
     "siteName": "Site Name",
     "publicGatewayUrl": "Public Gateway URL",
-    "publicGatewayUrlHint": "How the gateway is reached from the outside world. Used in the Configuration Guide and copy-paste examples. Leave fields empty / 0 to auto-detect from the browser.",
+    "publicGatewayUrlHint": "How the gateway is reached from the outside world. Used in the Configuration Guide, its copy-paste examples and Add to ThinkWatch Lite. An empty protocol or host is taken from the address the console is open at in the browser; port 0 uses the gateway listening port.",
     "publicProtocol": "Protocol",
     "publicHost": "Host",
     "publicHostPlaceholder": "auto (use browser hostname)",
@@ -2039,6 +2039,7 @@
   "lite": {
     "add": "Add to ThinkWatch Lite",
     "reasonNoAiGateway": "This API key cannot call the AI gateway, so it cannot be added to ThinkWatch Lite.",
+    "reasonNoGatewayUse": "No role of this account grants use of the AI gateway (ai_gateway:use), so its API keys cannot be used from ThinkWatch Lite.",
     "reasonNoGatewayUrl": "The gateway address could not be read.",
     "reasonInsecureUrl": "ThinkWatch Lite accepts HTTPS gateway addresses, or HTTP ones on this machine or a private network, and this gateway is at {{url}}.",
     "reasonBadUrl": "The gateway address {{url}} cannot be added to ThinkWatch Lite.",

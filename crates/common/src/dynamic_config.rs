@@ -699,9 +699,12 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             if s.len() > 253 {
                 anyhow::bail!("{key}: host too long");
             }
-            // Reject schemes / paths — host is just a hostname or IP
-            if s.contains("://") || s.contains('/') {
-                anyhow::bail!("{key}: must be a hostname only (no scheme or path)");
+            // A host name or an IP address and nothing else: a value the
+            // gateway address would pass over as not set is refused here.
+            if !s.is_empty() && crate::validation::bare_host(s).is_none() {
+                anyhow::bail!(
+                    "{key}: must be a host name or an IP address only (no scheme, port, path or user)"
+                );
             }
         }
         "general.public_port" => {
