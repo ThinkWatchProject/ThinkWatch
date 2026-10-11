@@ -143,8 +143,11 @@ impl GatewayRequestIdentity {
     /// do not grant ends up with.
     ///
     /// The one decision behind both the request-time check
-    /// (`check_access`) and the model listings, so `/v1/models` lists
-    /// exactly the models a request would be let through for.
+    /// (`check_access`) and the model listings: `/v1/models` lists only
+    /// models a request would be let through for. It cannot list every
+    /// one of them — a prefix entry allows names nobody enumerates — so it
+    /// lists the routed names and the allow-list's own entries that pass
+    /// (see `models::callable_models`).
     pub fn may_call(&self, model: &str) -> bool {
         self.allowed_models.as_ref().is_none_or(|allowed| {
             allowed
