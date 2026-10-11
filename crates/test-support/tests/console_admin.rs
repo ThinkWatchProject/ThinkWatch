@@ -390,6 +390,62 @@ async fn settings_round_trip_updates_dynamic_config() {
 }
 
 // ---------------------------------------------------------------------------
+// Where clients reach the gateway
+// ---------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn gateway_info_gives_any_signed_in_user_the_public_gateway_url() {
+    let app = TestApp::spawn().await;
+    let viewer = fixtures::create_user_with_role(&app.db, "viewer", "global", None)
+        .await
+        .unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": viewer.user.email, "password": viewer.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    // The system settings stay an administrator's to read.
+    con.get("/api/admin/settings/system")
+        .await
+        .unwrap()
+        .assert_status(403);
+
+    let base_url = |con: TestClient| async move {
+        let resp = con.get("/api/gateway/info").await.unwrap();
+        resp.assert_ok();
+        let body: Value = resp.json().unwrap();
+        (body["base_url"].as_str().unwrap().to_string(), con)
+    };
+
+    app.set_setting("general.public_protocol", json!("https"))
+        .await;
+    app.set_setting("general.public_host", json!("gateway.example.com"))
+        .await;
+    app.set_setting("general.public_port", json!(443)).await;
+    let (url, con) = base_url(con).await;
+    assert_eq!(url, "https://gateway.example.com");
+
+    // What is not set comes from the address the console was opened at.
+    app.set_setting("general.public_protocol", json!("")).await;
+    app.set_setting("general.public_host", json!("")).await;
+    app.set_setting("general.public_port", json!(8443)).await;
+    con.set_header("x-forwarded-proto", "https");
+    con.set_header("x-forwarded-host", "console.example.com:8080");
+    let (url, _) = base_url(con).await;
+    assert_eq!(url, "https://console.example.com:8443");
+
+    app.console_client()
+        .get("/api/gateway/info")
+        .await
+        .unwrap()
+        .assert_status(401);
+}
+
+// ---------------------------------------------------------------------------
 // Limits CRUD via console
 // ---------------------------------------------------------------------------
 

@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Copy, Check, AlertCircle } from 'lucide-react';
 import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { AddToLite } from '@/components/add-to-lite';
 import { KeyLimitsTab } from '@/components/limits/key-limits-tab';
 import { isForbidden, keyLimitsQuery } from '@/components/limits/key-limits-query';
 import {
@@ -34,7 +35,16 @@ import {
 
 // Must match ALLOWED_SURFACES in crates/server/src/handlers/api_keys.rs.
 const ALL_SURFACES = ['ai_gateway', 'mcp_gateway', 'console'] as const;
-type Surface = (typeof ALL_SURFACES)[number];
+export type Surface = (typeof ALL_SURFACES)[number];
+
+/// What a new key's form starts from (and returns to when the dialog
+/// closes).
+export interface ApiKeyPreset {
+  name: string;
+  surfaces: Surface[];
+}
+
+const DEFAULT_PRESET: ApiKeyPreset = { name: '', surfaces: ['ai_gateway', 'mcp_gateway'] };
 
 export interface ApiKey {
   id: string;
@@ -105,6 +115,9 @@ interface CreateApiKeyDialogProps {
   mcpToolsByServer: McpToolsByServer;
   costCenterOptions: string[];
   onCostCenterAdded: (tag: string) => void;
+  /// The name and surfaces the form starts with; by default no name and
+  /// both gateways.
+  preset?: ApiKeyPreset;
 }
 
 export function CreateApiKeyDialog({
@@ -115,16 +128,17 @@ export function CreateApiKeyDialog({
   mcpToolsByServer,
   costCenterOptions,
   onCostCenterAdded,
+  preset = DEFAULT_PRESET,
 }: CreateApiKeyDialogProps) {
   const { t } = useTranslation();
 
-  const [name, setName] = useState('');
+  const [name, setName] = useState(preset.name);
   // null = unrestricted (use every model/tool the role grants). Any Set
   // = explicit subset. Scope pickers collapse empty Set → null on
   // change, so "clear all" from the dropdown returns us to unrestricted.
   const [selectedModels, setSelectedModels] = useState<Set<string> | null>(null);
   const [selectedMcpTools, setSelectedMcpTools] = useState<Set<string> | null>(null);
-  const [createSurfaces, setCreateSurfaces] = useState<Surface[]>(['ai_gateway', 'mcp_gateway']);
+  const [createSurfaces, setCreateSurfaces] = useState<Surface[]>(preset.surfaces);
   const [expiresInDays, setExpiresInDays] = useState('');
   const [createCostCenter, setCreateCostCenter] = useState('');
 
@@ -134,10 +148,10 @@ export function CreateApiKeyDialog({
   const [copied, setCopied] = useState(false);
 
   const resetForm = () => {
-    setName('');
+    setName(preset.name);
     setSelectedModels(null);
     setSelectedMcpTools(null);
-    setCreateSurfaces(['ai_gateway', 'mcp_gateway']);
+    setCreateSurfaces(preset.surfaces);
     setExpiresInDays('');
     setCreateCostCenter('');
     setFormError('');
@@ -216,10 +230,12 @@ export function CreateApiKeyDialog({
             <div className="rounded-md border bg-muted p-3">
               <code className="text-sm break-all">{createdKey}</code>
             </div>
-            <Button variant="outline" className="w-full" onClick={handleCopy}>
-              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {copied ? t('common.copied') : t('apiKeys.copyToClipboard')}
-            </Button>
+            <AddToLite apiKey={createdKey} aiGateway={createSurfaces.includes('ai_gateway')}>
+              <Button variant="outline" className="w-full" onClick={handleCopy}>
+                {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {copied ? t('common.copied') : t('apiKeys.copyToClipboard')}
+              </Button>
+            </AddToLite>
             <DialogFooter>
               <Button onClick={() => handleDialogChange(false)}>{t('common.done')}</Button>
             </DialogFooter>
@@ -730,10 +746,15 @@ export function RotateApiKeyDialog({
             <div className="rounded-md border bg-muted p-3">
               <code className="text-sm break-all">{rotatedNewKey}</code>
             </div>
-            <Button variant="outline" className="w-full" onClick={handleRotateCopy}>
-              {rotateCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {rotateCopied ? t('common.copied') : t('apiKeys.copyToClipboard')}
-            </Button>
+            <AddToLite
+              apiKey={rotatedNewKey}
+              aiGateway={apiKey?.surfaces.includes('ai_gateway') ?? false}
+            >
+              <Button variant="outline" className="w-full" onClick={handleRotateCopy}>
+                {rotateCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {rotateCopied ? t('common.copied') : t('apiKeys.copyToClipboard')}
+              </Button>
+            </AddToLite>
             <DialogFooter>
               <Button onClick={() => handleOpenChange(false)}>{t('common.done')}</Button>
             </DialogFooter>

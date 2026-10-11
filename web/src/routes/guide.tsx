@@ -1,7 +1,13 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from '@tanstack/react-router';
-import { api } from '@/lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { hasPermission } from '@/lib/api';
+import { liteDownloadUrl } from '@/lib/lite-link';
+import { useGatewayUrl } from '@/hooks/use-gateway-url';
+import { Skeleton } from '@/components/ui/skeleton';
+import { CreateApiKeyDialog, type ApiKeyPreset } from './api-key-dialogs';
+import { useKeyDialogCatalogs } from './api-key-catalogs';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,42 +26,13 @@ import {
   MonitorSmartphone,
   Workflow,
   Bot,
+  MonitorDown,
+  ExternalLink,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-interface PublicGatewayConfig {
-  gateway_port: number;
-  public_protocol: string;
-  public_host: string;
-  public_port: number;
-}
-
-function useGatewayUrl(): string {
-  const [config, setConfig] = useState<PublicGatewayConfig | null>(null);
-
-  useEffect(() => {
-    api<PublicGatewayConfig>('/api/admin/settings/system')
-      .then(setConfig)
-      .catch((e) => console.error('Failed to load gateway public config:', e));
-  }, []);
-
-  return useMemo(() => {
-    const browserProto = window.location.protocol.replace(':', '');
-    const browserHost = window.location.hostname;
-    const protocol = config?.public_protocol || browserProto || 'http';
-    const host = config?.public_host || browserHost || 'localhost';
-    const port = config?.public_port && config.public_port > 0
-      ? config.public_port
-      : config?.gateway_port || 3000;
-    // Omit the port suffix for the standard port of the chosen protocol
-    const isStandardPort =
-      (protocol === 'http' && port === 80) || (protocol === 'https' && port === 443);
-    return isStandardPort ? `${protocol}://${host}` : `${protocol}://${host}:${port}`;
-  }, [config]);
-}
 
 function CopyButton({ text }: { text: string }) {
   const { t } = useTranslation();
@@ -152,6 +129,55 @@ function McpPromptTab({ mcpUrl }: { mcpUrl: string }) {
 // ===========================================================================
 // AI Gateway tab contents
 // ===========================================================================
+
+/// The key the Lite tab's button creates: named for Lite, AI gateway only.
+const LITE_KEY_PRESET: ApiKeyPreset = { name: 'ThinkWatch Lite', surfaces: ['ai_gateway'] };
+
+function LiteTab() {
+  const { t, i18n } = useTranslation();
+  const queryClient = useQueryClient();
+  const canCreate = hasPermission('api_keys:create');
+  const [createOpen, setCreateOpen] = useState(false);
+  // The pickers' catalogs load when the dialog opens, not with the guide.
+  const catalogs = useKeyDialogCatalogs(createOpen);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <MonitorDown className="h-5 w-5" />
+        <h3 className="text-lg font-semibold">ThinkWatch Lite</h3>
+      </div>
+      <p className="text-sm text-muted-foreground">{t('guide.liteDesc')}</p>
+      {!canCreate && <InfoBox>{t('guide.liteAskForKey')}</InfoBox>}
+      <div className="flex flex-wrap gap-2">
+        {/* Lite is a desktop app: phones are not offered the key for it. */}
+        {canCreate && (
+          <Button className="hidden md:inline-flex" onClick={() => setCreateOpen(true)}>
+            {t('guide.liteCreateKey')}
+          </Button>
+        )}
+        <Button variant="outline" asChild>
+          <a href={liteDownloadUrl(i18n.language)} target="_blank" rel="noopener noreferrer">
+            {t('guide.liteDownload')}
+            <ExternalLink className="h-4 w-4" />
+          </a>
+        </Button>
+      </div>
+      {canCreate && (
+        <CreateApiKeyDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          onSuccess={() => void queryClient.invalidateQueries({ queryKey: ['keys'] })}
+          modelsByProvider={catalogs.modelsByProvider}
+          mcpToolsByServer={catalogs.mcpToolsByServer}
+          costCenterOptions={catalogs.costCenterOptions}
+          onCostCenterAdded={catalogs.handleCostCenterAdded}
+          preset={LITE_KEY_PRESET}
+        />
+      )}
+    </div>
+  );
+}
 
 function ClaudeCodeTab({ gatewayUrl }: { gatewayUrl: string }) {
   const { t } = useTranslation();
@@ -671,8 +697,21 @@ curl -X POST ${mcpUrl}/mcp \\
 
 export function GuidePage() {
   const { t } = useTranslation();
-  const gatewayUrl = useGatewayUrl();
+  const { baseUrl, failed } = useGatewayUrl();
+  const gatewayUrl = baseUrl ?? '';
   const mcpUrl = gatewayUrl; // MCP endpoint is on the gateway port
+  // Until the address has loaded, its boxes hold a placeholder.
+  const urlBox = (suffix = '') =>
+    baseUrl || failed ? (
+      <>
+        <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm">
+          {baseUrl ? `${baseUrl}${suffix}` : '—'}
+        </code>
+        <CopyButton text={baseUrl ? `${baseUrl}${suffix}` : ''} />
+      </>
+    ) : (
+      <Skeleton className="h-9 flex-1" />
+    );
 
   return (
     <div className="min-w-0 space-y-6">
@@ -696,10 +735,7 @@ export function GuidePage() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm">
-                {gatewayUrl}
-              </code>
-              <CopyButton text={gatewayUrl} />
+              {urlBox()}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">{t('guide.gatewayUrlDesc')}</p>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -726,10 +762,7 @@ export function GuidePage() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm">
-                {mcpUrl}/mcp
-              </code>
-              <CopyButton text={`${mcpUrl}/mcp`} />
+              {urlBox('/mcp')}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">{t('guide.mcpEndpointDesc')}</p>
           </CardContent>
@@ -795,8 +828,9 @@ export function GuidePage() {
           {/* AI Gateway tool tabs */}
           <Card>
             <CardContent className="pt-6">
-              <Tabs defaultValue="claude-code">
+              <Tabs defaultValue="lite">
                 <TabsList className="flex-wrap">
+                  <TabsTrigger value="lite">{t('guide.lite')}</TabsTrigger>
                   <TabsTrigger value="claude-code">{t('guide.claudeCode')}</TabsTrigger>
                   <TabsTrigger value="cursor">{t('guide.cursor')}</TabsTrigger>
                   <TabsTrigger value="continue">{t('guide.continue')}</TabsTrigger>
@@ -806,6 +840,9 @@ export function GuidePage() {
                   <TabsTrigger value="curl">{t('guide.curl')}</TabsTrigger>
                 </TabsList>
 
+                <TabsContent value="lite" className="mt-4">
+                  <LiteTab />
+                </TabsContent>
                 <TabsContent value="claude-code" className="mt-4">
                   <ClaudeCodeTab gatewayUrl={gatewayUrl} />
                 </TabsContent>

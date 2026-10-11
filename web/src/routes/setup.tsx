@@ -22,6 +22,7 @@ import {
 import { Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Eye, EyeOff, Wand2 } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AddToLite } from '@/components/add-to-lite';
 import { API_BASE, registerKeyPair } from '@/lib/api';
 
 const STEPS = ['welcome', 'admin', 'settings', 'complete'] as const;
@@ -446,6 +447,8 @@ export function SetupPage() {
                 {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               </Button>
             </div>
+            {/* The first key opens every surface, the AI gateway included. */}
+            <AddToLite apiKey={result.api_key} aiGateway />
             <div className="flex items-start gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{t('setup.complete.apiKeyWarning')}</span>

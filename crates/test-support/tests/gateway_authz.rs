@@ -10,6 +10,8 @@
 //!     model to them.
 //!   - The per-key allow-list still narrows what the roles grant, and an
 //!     empty result means nothing is allowed, not everything.
+//!   - `GET /v1/models` and `GET /v1beta/models` list the models the
+//!     calling key may use under both, and no others.
 
 use serde_json::Value;
 use think_watch_test_support::client::TestResponse;
@@ -381,4 +383,104 @@ async fn key_allow_list_within_a_prefix_grant_is_kept() {
 
     chat(&gw, MODEL_A).await.assert_ok();
     assert_refused(&chat(&gw, MODEL_B).await, "model-b outside the key list");
+}
+
+// ---------------------------------------------------------------------------
+// The model listings
+// ---------------------------------------------------------------------------
+
+/// The model ids `/v1/models` lists and those `/v1beta/models` lists
+/// (without Gemini's `models/` prefix), in that order.
+async fn listed_models(gw: &TestClient) -> (Vec<String>, Vec<String>) {
+    let openai = gw.get("/v1/models").await.unwrap();
+    openai.assert_ok();
+    let openai: Value = openai.json().unwrap();
+    let gemini = gw.get("/v1beta/models").await.unwrap();
+    gemini.assert_ok();
+    let gemini: Value = gemini.json().unwrap();
+    let ids = openai["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    let names = gemini["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .map(|m| {
+            let name = m["name"].as_str().unwrap();
+            name.strip_prefix("models/").unwrap_or(name).to_string()
+        })
+        .collect();
+    (ids, names)
+}
+
+/// Both listings name `expected` (in order) among this test's two models.
+async fn assert_lists(gw: &TestClient, expected: &[&str], what: &str) {
+    let (openai, gemini) = listed_models(gw).await;
+    for (listing, ids) in [("/v1/models", &openai), ("/v1beta/models", &gemini)] {
+        let ours: Vec<&str> = ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| [MODEL_A, MODEL_B].contains(id))
+            .collect();
+        assert_eq!(ours, expected, "{what}: {listing} listed {ids:?}");
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn model_listings_follow_the_key_allow_list() {
+    let app = TestApp::spawn().await;
+    let _upstream = two_models(&app).await;
+    let user = bare_user(&app).await;
+    fixtures::assign_role_global(&app.db, user.user.id, "developer")
+        .await
+        .unwrap();
+
+    let unrestricted = gateway_for(&app, user.user.id, None).await;
+    assert_lists(&unrestricted, &[MODEL_A, MODEL_B], "an unrestricted key").await;
+
+    let narrowed = gateway_for(&app, user.user.id, Some(&[MODEL_A])).await;
+    assert_lists(&narrowed, &[MODEL_A], "a key narrowed to model-a").await;
+    // What is listed is what a request is let through for.
+    chat(&narrowed, MODEL_A).await.assert_ok();
+    assert_refused(&chat(&narrowed, MODEL_B).await, "model-b, not listed");
+
+    // A key entry is a prefix, as at request time.
+    let by_prefix = gateway_for(&app, user.user.id, Some(&["authz-model-"])).await;
+    assert_lists(&by_prefix, &[MODEL_A, MODEL_B], "a key narrowed by prefix").await;
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn model_listings_follow_the_owners_roles() {
+    let app = TestApp::spawn().await;
+    let _upstream = two_models(&app).await;
+
+    // A role granting model-a only: model-b is not listed for any key.
+    let user = bare_user(&app).await;
+    assign_global(&app.db, user.user.id, only_model_a(&app.db).await).await;
+    let gw = gateway_for(&app, user.user.id, None).await;
+    assert_lists(&gw, &[MODEL_A], "a model-a-only role").await;
+
+    // A key list disjoint from the role grants allows nothing, and lists
+    // nothing at all.
+    let disjoint = gateway_for(&app, user.user.id, Some(&[MODEL_B])).await;
+    let (openai, gemini) = listed_models(&disjoint).await;
+    assert!(openai.is_empty(), "/v1/models listed {openai:?}");
+    assert!(gemini.is_empty(), "/v1beta/models listed {gemini:?}");
+
+    // A prefix grant narrowed by the key keeps the key's model.
+    let prefixed = bare_user(&app).await;
+    let prefix = custom_role(
+        &app.db,
+        "prefix",
+        json!({"Effect": "Allow", "Action": ["ai_gateway:use"], "Resource": ["model:authz-model-"]}),
+    )
+    .await;
+    assign_global(&app.db, prefixed.user.id, prefix).await;
+    let gw = gateway_for(&app, prefixed.user.id, Some(&[MODEL_B])).await;
+    assert_lists(&gw, &[MODEL_B], "a prefix grant narrowed to model-b").await;
 }
