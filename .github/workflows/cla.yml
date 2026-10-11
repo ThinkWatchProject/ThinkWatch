@@ -1,0 +1,94 @@
+# Contributor License Agreement (CLA.md).
+#
+# On a contributor's first pull request the bot comments with a link to
+# CLA.md and the phrase to sign with. Commenting the phrase once records
+# the signature in signatures/cla.json on the `cla-signatures` branch of
+# this repository, and it covers every later pull request here.
+#
+# `pull_request_target` rather than `pull_request` because a PR from a
+# fork gets a read-only token under the latter, and this workflow has to
+# comment and write the signature file. That trigger runs with the base
+# repository's token, so this workflow **must never check out or execute
+# PR code**. It doesn't: no actions/checkout, no build; the action reads
+# PR metadata and comments through the API.
+#
+# Two consequences of the triggers worth knowing:
+# - `issue_comment` always runs the copy of this file on the default
+#   branch (`main`), so signing by comment takes effect immediately only
+#   once this file is on `main`. Until then a signature comment is picked
+#   up by the next run that `pull_request_target` starts (a push to the PR).
+# - Only `GITHUB_TOKEN` is used: no personal access token, no
+#   cross-repository token. That is why signatures live in this repository.
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed]
+  issue_comment:
+    types: [created]
+
+# What the action calls: comments and the post-merge lock (pull-requests),
+# the signature file (contents), and re-running the failed check after a
+# signature (actions). It never uses the commit status API, so no
+# `statuses` here.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Pull request events, except a close without a merge (nothing to lock),
+    # and comments on pull requests that are exactly the signature or
+    # `recheck`. Expression comparisons ignore case.
+    if: >-
+      (github.event_name == 'pull_request_target' &&
+       (github.event.action != 'closed' || github.event.pull_request.merged)) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       (github.event.comment.body == 'recheck' ||
+        github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    steps:
+      # The action cannot start the record itself: it compares the 404 it
+      # gets for a missing file with the string "404", so a missing branch
+      # or file fails every run. Create the branch once, as an orphan that
+      # holds only the signature file. No workflow lives on it, and writes
+      # made with GITHUB_TOKEN start no workflow runs anyway, so recording
+      # a signature triggers no CI.
+      - name: Create the signature branch if missing
+        if: github.event.action != 'closed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: cla-signatures
+        run: |
+          set -euo pipefail
+          if gh api "repos/$REPO/branches/$BRANCH" --silent 2>/dev/null; then
+            exit 0
+          fi
+          tree=$(jq -n '{tree: [{path: "signatures/cla.json", mode: "100644", type: "blob",
+                                 content: "{\n  \"signedContributors\": []\n}\n"}]}' |
+            gh api "repos/$REPO/git/trees" --input - --jq .sha)
+          commit=$(jq -n --arg tree "$tree" \
+                     '{message: "Start the CLA signature record", tree: $tree, parents: []}' |
+            gh api "repos/$REPO/git/commits" --input - --jq .sha)
+          # A concurrent run may have created it in the meantime; that is fine.
+          gh api "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$commit" --silent ||
+            gh api "repos/$REPO/branches/$BRANCH" --silent
+
+      - name: Check signatures
+        # v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/ThinkWatchProject/ThinkWatch/blob/main/CLA.md
+          branch: cla-signatures
+          path-to-signatures: signatures/cla.json
+          custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
+          # The maintainer, and bots, which cannot sign. `*[bot]` is a
+          # wildcard the action supports; the named bots are listed anyway.
+          allowlist: fylorn,dependabot[bot],renovate[bot],github-actions[bot],*[bot]
+          # Lock the conversation after a merge, as the action recommends,
+          # so the signature comments on it stay as they were.
+          lock-pullrequest-aftermerge: true

@@ -123,6 +123,8 @@ ThinkWatch 使用 [ThinkWatch Core](https://github.com/ThinkWatchProject/ThinkWa
 
 欢迎贡献。提交大型变更前请先开 Issue 讨论。
 
+首次提交 PR 时需签署一次[贡献者许可协议](CLA.zh-CN.md)，签署方法见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 授权协议
 
 ThinkWatch 采用 [Business Source License 1.1](LICENSE) 进行源码可见分发。
