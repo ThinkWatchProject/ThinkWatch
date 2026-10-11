@@ -30,10 +30,14 @@ target.
   from the key on screen and the gateway's public address, and is sent
   nowhere. The button is unavailable, with the reason beside it, for a key
   without the `ai_gateway` surface and for a gateway whose public address
-  is plain HTTP on another machine, which Lite does not accept: set
-  `general.public_protocol` to `https` where the gateway is served over
-  TLS. Once clicked, a line under it links to the download page. Phones
-  get Copy only.
+  Lite does not accept. Lite takes `https://`, and plain `http://` only on
+  this machine or a private network: private IPv4 ranges (`10/8`,
+  `172.16/12`, `192.168/16`, `100.64/10`, `169.254/16`), private IPv6
+  ranges (`fc00::/7`, `fe80::/10`), and names with no dot or ending in
+  `.local`, `.lan`, `.internal`, `.intranet`, `.corp`, `.home.arpa` or
+  `.localhost`. Elsewhere, set `general.public_protocol` to `https` where
+  the gateway is served over TLS. Once clicked, a line under it links to
+  the download page. Phones get Copy only.
 - **The Configuration Guide has a ThinkWatch Lite tab**, first among the
   AI gateway clients: what Lite does, and a button that opens the new-key
   dialog filled in for it (named "ThinkWatch Lite", AI gateway only).

@@ -2040,7 +2040,7 @@
     "add": "Add to ThinkWatch Lite",
     "reasonNoAiGateway": "This API key cannot call the AI gateway, so it cannot be added to ThinkWatch Lite.",
     "reasonNoGatewayUrl": "The gateway address could not be read.",
-    "reasonInsecureUrl": "ThinkWatch Lite accepts HTTPS gateway addresses only, and this gateway is at {{url}}.",
+    "reasonInsecureUrl": "ThinkWatch Lite accepts HTTPS gateway addresses, or HTTP ones on this machine or a private network, and this gateway is at {{url}}.",
     "reasonBadUrl": "The gateway address {{url}} cannot be added to ThinkWatch Lite.",
     "reasonBadKey": "This API key cannot be added to ThinkWatch Lite.",
     "noResponse": "Nothing happened?",

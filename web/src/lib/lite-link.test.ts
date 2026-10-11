@@ -18,12 +18,63 @@ describe('liteImportLink', () => {
     })
   })
 
-  it('takes plain http only on this machine', () => {
-    for (const local of ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://[::1]:3000']) {
-      expect(liteImportLink(local, KEY)).toHaveProperty('link')
+  it('takes plain http on this machine and on private networks only', () => {
+    const allowed = [
+      // This machine.
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      'http://[::1]:3000',
+      // Private IPv4 ranges, at their edges.
+      'http://10.0.0.5:3000',
+      'http://10.255.255.255',
+      'http://172.16.0.1:3000',
+      'http://172.31.255.254',
+      'http://192.168.1.10',
+      'http://100.64.0.1',
+      'http://100.127.255.254',
+      'http://169.254.10.20',
+      // Private IPv6 ranges.
+      'http://[fd00::5]:3000',
+      'http://[fc00::1]',
+      'http://[fe80::1]',
+      'http://[febf::1]',
+      // Intranet-style names.
+      'http://corp',
+      'http://gateway:3000',
+      'http://example.corp',
+      'http://gw.example.local',
+      'http://gw.lan',
+      'http://gw.internal:8080',
+      'http://gw.intranet',
+      'http://gw.home.arpa',
+      'http://gw.localhost',
+    ]
+    for (const url of allowed) {
+      expect(liteImportLink(url, KEY), url).toHaveProperty('link')
     }
-    expect(liteImportLink('http://10.0.0.5:3000', KEY)).toEqual({ problem: 'insecure-url' })
-    expect(liteImportLink('http://gateway.internal', KEY)).toEqual({ problem: 'insecure-url' })
+    const refused = [
+      'http://172.15.255.254',
+      'http://172.32.0.1',
+      'http://100.63.255.254',
+      'http://100.128.0.1',
+      'http://192.169.0.1',
+      'http://169.253.0.1',
+      'http://11.0.0.1',
+      'http://127.0.0.2',
+      'http://8.8.8.8',
+      'http://[2001:db8::1]',
+      'http://[fec0::1]',
+      'http://example.com',
+      'http://gw.example.com:3000',
+      'http://corp.example.com',
+      'http://gw.locals',
+    ]
+    for (const url of refused) {
+      expect(liteImportLink(url, KEY), url).toEqual({ problem: 'insecure-url' })
+    }
+    // https is taken whatever the host.
+    expect(liteImportLink('https://example.com', KEY)).toHaveProperty('link')
+    expect(liteImportLink('https://8.8.8.8', KEY)).toHaveProperty('link')
   })
 
   it('refuses anything but a bare scheme://host[:port]', () => {
