@@ -11,7 +11,7 @@ target.
 
 ## [Unreleased]
 
-## [3.6.0] — 2026-10-11
+## [3.6.0] — 2026-10-12
 
 A key shown once can go straight into ThinkWatch Lite: the console's key
 screens offer Add to ThinkWatch Lite, and the Configuration Guide has a tab
