@@ -631,6 +631,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         )
         .route("/api/mcp/logs", get(handlers::mcp_logs::list_mcp_logs))
         .route(
+            "/api/gateway/info",
+            get(handlers::gateway_info::get_gateway_info),
+        )
+        .route(
             "/api/gateway/logs",
             get(handlers::gateway_logs::list_gateway_logs),
         )

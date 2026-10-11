@@ -11,6 +11,55 @@ target.
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **Model listings follow the calling key.** `GET /v1/models` and
+  `GET /v1beta/models` listed every routed model whatever the key; they
+  now list only the models a request with that key is let through for
+  (see Fixed). A client that lists models with a narrowed key sees fewer
+  of them, and a key whose allow-list and owner's roles have nothing in
+  common lists none. No setting, schema, Helm value or Redis key changes.
+
+### Added
+
+- **"Add to ThinkWatch Lite" beside a key shown once.** The new-key and
+  rotated-key dialogs and the end of first-run setup have an Add to
+  ThinkWatch Lite button next to Copy. It opens a `thinkwatch://import`
+  link that ThinkWatch Lite (2026.10.16 or later) turns into a new upstream
+  for this gateway with the key filled in. The link is built in the browser
+  from the key on screen and the gateway's public address, and is sent
+  nowhere. The button is unavailable, with the reason beside it, for a key
+  without the `ai_gateway` surface and for a gateway whose public address
+  is plain HTTP on another machine, which Lite does not accept: set
+  `general.public_protocol` to `https` where the gateway is served over
+  TLS. Once clicked, a line under it links to the download page. Phones
+  get Copy only.
+- **The Configuration Guide has a ThinkWatch Lite tab**, first among the
+  AI gateway clients: what Lite does, and a button that opens the new-key
+  dialog filled in for it (named "ThinkWatch Lite", AI gateway only).
+  Users without `api_keys:create` are told how to get a key and add it by
+  hand.
+- **`GET /api/gateway/info`** on the console port gives any signed-in user
+  the gateway's public base URL, `{"base_url": "https://gateway.example.com"}`,
+  from `general.public_protocol`, `general.public_host` and
+  `general.public_port`. What is not set comes from the address the console
+  was opened at: the scheme from `X-Forwarded-Proto` (else `http`), the
+  host from `X-Forwarded-Host` or `Host`, the port from the gateway's
+  listening port. A default port is left out.
+
+### Fixed
+
+- **The Configuration Guide shows the configured gateway address to every
+  user.** It read the address from `GET /api/admin/settings/system`, which
+  needs `settings:read`: everyone else got 403 and an address built from
+  the browser's host and port 3000, whatever `general.public_*` said. It
+  now reads `GET /api/gateway/info`.
+- **`GET /v1/models` and `GET /v1beta/models` list only the models the
+  calling key may use**: the key's `allowed_models` intersected with what
+  its owner's roles grant, matched exactly or by prefix, the check a
+  request for the model meets. They listed every routed model, and a
+  request for one outside that scope was then refused.
+
 ## [3.5.0] — 2026-10-11
 
 Limits hold where they used to leak: route caps are enforced, a limits

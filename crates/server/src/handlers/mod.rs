@@ -10,6 +10,7 @@ pub(crate) mod clickhouse_util;
 pub mod client_errors;
 pub mod cost_forecast;
 pub mod dashboard;
+pub mod gateway_info;
 pub mod gateway_logs;
 pub mod health;
 pub mod key_usage;

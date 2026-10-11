@@ -22,9 +22,10 @@ vi.mock('@/lib/paginated-fetch', () => ({
   fetchAllPaginated: vi.fn().mockResolvedValue([]),
 }))
 
-import { api, hasPermission } from '@/lib/api'
+import { api, apiPost, hasPermission } from '@/lib/api'
 
 const mockApi = vi.mocked(api)
+const mockApiPost = vi.mocked(apiPost)
 const mockHasPermission = vi.mocked(hasPermission)
 
 const makeKey = (overrides: Record<string, unknown> = {}) => ({
@@ -62,6 +63,7 @@ function mockKeysFetch(
     if (url.startsWith('/api/keys/policy-scope'))
       return { allowed_models: null, allowed_mcp_tools: null }
     if (url.startsWith('/api/admin/limits/')) return limits(url)
+    if (url === '/api/gateway/info') return { base_url: 'https://gateway.example.com' }
     return { data: keys, total: keys.length, page: 1, page_size: 20 }
   })
 }
@@ -148,6 +150,43 @@ describe('ApiKeysPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Generate a new API key for the gateway.')).toBeInTheDocument()
     })
+  })
+
+  it('offers a new key to ThinkWatch Lite beside Copy', async () => {
+    mockKeysFetch([])
+    mockApiPost.mockResolvedValue({ id: 'new', key: 'tw-new-key' })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+
+    await user.click((await screen.findAllByRole('button', { name: /create api key/i }))[0])
+    await user.type(screen.getByLabelText('Name'), 'laptop')
+    await user.click(screen.getByRole('button', { name: 'Create Key' }))
+
+    const add = await screen.findByRole('link', { name: 'Add to ThinkWatch Lite' })
+    expect(add).toHaveAttribute(
+      'href',
+      'thinkwatch://import?service=thinkwatch&name=thinkwatch' +
+        '&url=https%3A%2F%2Fgateway.example.com&key=tw-new-key',
+    )
+    expect(screen.getByRole('button', { name: 'Copy to Clipboard' })).toBeInTheDocument()
+  })
+
+  it('names why a key without the AI gateway cannot be added to Lite', async () => {
+    mockKeysFetch([])
+    mockApiPost.mockResolvedValue({ id: 'new', key: 'tw-new-key' })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+
+    await user.click((await screen.findAllByRole('button', { name: /create api key/i }))[0])
+    await user.type(screen.getByLabelText('Name'), 'tools only')
+    await user.click(screen.getByRole('checkbox', { name: /AI gateway/ }))
+    await user.click(screen.getByRole('button', { name: 'Create Key' }))
+
+    const add = await screen.findByRole('button', { name: 'Add to ThinkWatch Lite' })
+    expect(add).toBeDisabled()
+    expect(add).toHaveAccessibleDescription(
+      'This API key cannot call the AI gateway, so it cannot be added to ThinkWatch Lite.',
+    )
   })
 
   it("edits the key's own limits in a tab of the edit dialog", async () => {
