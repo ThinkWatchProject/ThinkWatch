@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { renderWithQueryClient } from '@/test/render'
 import { SetupPage } from './setup'
 
 // SetupPage dynamically imports @/lib/api once init succeeds to register
@@ -14,6 +15,21 @@ vi.mock('@/lib/api', () => ({
   registerKeyPair: vi.fn().mockResolvedValue(undefined),
   invalidateSetupStatusCache: vi.fn(),
   API_BASE: '',
+  // The complete step reads the gateway's address for "Add to
+  // ThinkWatch Lite".
+  api: vi.fn(async (path: string) => {
+    if (path === '/api/gateway/info')
+      return {
+        public_protocol: 'https',
+        public_host: 'gateway.example.com',
+        public_port: 443,
+        gateway_port: 3000,
+      }
+    throw new Error(`unexpected ${path}`)
+  }),
+  // No permissions are loaded during setup; the first administrator's
+  // key is offered all the same.
+  hasPermission: vi.fn(() => false),
 }))
 
 beforeEach(() => {
@@ -93,7 +109,7 @@ describe('SetupPage', () => {
     })
     vi.stubGlobal('fetch', mockFetch)
 
-    render(<SetupPage />)
+    renderWithQueryClient(<SetupPage />)
 
     // Welcome -> Admin
     await user.click(screen.getByRole('button', { name: /get started/i }))
@@ -113,5 +129,23 @@ describe('SetupPage', () => {
       expect(screen.getByText('Setup Complete!')).toBeInTheDocument()
     })
     expect(screen.getByDisplayValue('tw-test-key-xyz789')).toBeInTheDocument()
+
+    // The first key can be added to ThinkWatch Lite with the gateway's
+    // public address, through a hidden iframe: the page stays.
+    const add = await screen.findByRole('button', { name: 'Add to ThinkWatch Lite' })
+    await waitFor(() => expect(add).toBeEnabled())
+    const page = window.location.href
+    await user.click(add)
+    expect(window.location.href).toBe(page)
+    expect(document.querySelector('iframe')).toHaveAttribute(
+      'src',
+      'thinkwatch://import?service=thinkwatch&name=thinkwatch' +
+        '&url=https%3A%2F%2Fgateway.example.com&key=tw-test-key-xyz789',
+    )
+    expect(screen.getByDisplayValue('tw-test-key-xyz789')).toBeInTheDocument()
+    expect(screen.getByText('Nothing happened?')).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'Install ThinkWatch Lite (2026.10.16 or later) first' }),
+    ).toHaveAttribute('href', 'https://thinkwat.ch/lite')
   })
 })

@@ -12,6 +12,7 @@ use crate::handlers::{
         DashboardLayout, DashboardLive, DashboardStats, LiveLogRow, ProviderHealth, RpmBucket,
         WsTicketResponse,
     },
+    gateway_info::GatewayInfo,
     gateway_logs::{GatewayLogBodyResponse, GatewayLogEntry, GatewayLogsResponse},
     limits::{
         CapListResponse, CapRow, CapUsage, RuleListResponse, RuleRow, RuleUsage, UpsertCapRequest,
@@ -184,6 +185,8 @@ use crate::services::team_repository::Team;
         crate::handlers::dashboard::create_dashboard_ws_ticket,
         crate::handlers::dashboard::get_dashboard_layout,
         crate::handlers::dashboard::put_dashboard_layout,
+        // Gateway
+        crate::handlers::gateway_info::get_gateway_info,
         // Audit & Logs
         crate::handlers::audit::list_audit_logs,
         crate::handlers::gateway_logs::list_gateway_logs,
@@ -248,6 +251,8 @@ use crate::services::team_repository::Team;
             // Dashboard
             DashboardStats, ProviderHealth, RpmBucket, LiveLogRow, DashboardLive, WsTicketResponse,
             DashboardLayout,
+            // Gateway
+            GatewayInfo,
             // Logs
             GatewayLogEntry, GatewayLogsResponse, GatewayLogBodyResponse,
             McpLogEntry, McpLogsResponse, McpLogBodyResponse,
@@ -287,6 +292,7 @@ use crate::services::team_repository::Team;
         (name = "Analytics",     description = "Usage and cost analytics"),
         (name = "Dashboard",     description = "Real-time dashboard stats and live log stream"),
         (name = "Audit Logs",    description = "Platform audit trail"),
+        (name = "Gateway",       description = "Where clients reach the gateway"),
         (name = "Gateway Logs",  description = "AI gateway request logs"),
         (name = "MCP Logs",      description = "MCP tool call logs"),
         (name = "System Logs",   description = "Platform, access, and application logs"),

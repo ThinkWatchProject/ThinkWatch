@@ -390,6 +390,124 @@ async fn settings_round_trip_updates_dynamic_config() {
 }
 
 // ---------------------------------------------------------------------------
+// Where clients reach the gateway
+// ---------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn gateway_info_gives_any_signed_in_user_the_configured_gateway_address() {
+    let app = TestApp::spawn().await;
+    let viewer = fixtures::create_user_with_role(&app.db, "viewer", "global", None)
+        .await
+        .unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": viewer.user.email, "password": viewer.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    // The system settings stay an administrator's to read.
+    con.get("/api/admin/settings/system")
+        .await
+        .unwrap()
+        .assert_status(403);
+
+    let info = |con: TestClient| async move {
+        let resp = con.get("/api/gateway/info").await.unwrap();
+        resp.assert_ok();
+        let body: Value = resp.json().unwrap();
+        (body, con)
+    };
+    let gateway_port = app.state.config.gateway_port;
+
+    app.set_setting("general.public_protocol", json!("https"))
+        .await;
+    app.set_setting("general.public_host", json!("Gateway.Example.com"))
+        .await;
+    app.set_setting("general.public_port", json!(443)).await;
+    let (body, con) = info(con).await;
+    assert_eq!(
+        body,
+        json!({
+            "public_protocol": "https",
+            "public_host": "gateway.example.com",
+            "public_port": 443,
+            "gateway_port": gateway_port,
+        })
+    );
+
+    // What is not set is null, for the browser to fill in from the
+    // address the console is open at. Forwarded headers change nothing.
+    app.set_setting("general.public_protocol", json!("")).await;
+    app.set_setting("general.public_host", json!("")).await;
+    app.set_setting("general.public_port", json!(0)).await;
+    con.set_header("x-forwarded-proto", "https");
+    con.set_header("x-forwarded-host", "console.example.com:8080");
+    let (body, con) = info(con).await;
+    assert_eq!(
+        body,
+        json!({
+            "public_protocol": null,
+            "public_host": null,
+            "public_port": null,
+            "gateway_port": gateway_port,
+        })
+    );
+
+    // A host stored before saving checked it, and that is more than a
+    // host, counts as not set.
+    app.set_setting("general.public_host", json!("gateway.example.com:8443"))
+        .await;
+    let (body, _) = info(con).await;
+    assert_eq!(body["public_host"], Value::Null, "{body}");
+
+    app.console_client()
+        .get("/api/gateway/info")
+        .await
+        .unwrap()
+        .assert_status(401);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn saving_a_public_host_that_is_more_than_a_host_is_refused() {
+    let app = TestApp::spawn().await;
+    let (con, _) = admin_session_with_user(&app).await;
+
+    for bad in [
+        "gateway.example.com:8443",
+        "https://gateway.example.com",
+        "admin@gateway.example.com",
+    ] {
+        let resp = con
+            .patch(
+                "/api/admin/settings",
+                json!({"settings": {"general.public_host": bad}}),
+            )
+            .await
+            .unwrap();
+        resp.assert_status(400);
+        assert!(
+            resp.text().contains("host name or an IP address only"),
+            "{bad}: {}",
+            resp.text()
+        );
+    }
+
+    for ok in ["gateway.example.com", "10.0.0.5", ""] {
+        con.patch(
+            "/api/admin/settings",
+            json!({"settings": {"general.public_host": ok}}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Limits CRUD via console
 // ---------------------------------------------------------------------------
 

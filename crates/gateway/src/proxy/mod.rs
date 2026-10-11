@@ -134,6 +134,29 @@ pub struct GatewayRequestIdentity {
     pub key_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+impl GatewayRequestIdentity {
+    /// Whether this caller may call `model` (the name after aliases).
+    /// `allowed_models` is the key's list intersected with its owner's
+    /// role grants: `None` is unrestricted; otherwise the model must
+    /// match an entry exactly or start with it. An empty list allows
+    /// nothing — it is what a key narrowed to models its owner's roles
+    /// do not grant ends up with.
+    ///
+    /// The one decision behind both the request-time check
+    /// (`check_access`) and the model listings: `/v1/models` lists only
+    /// models a request would be let through for. It cannot list every
+    /// one of them — a prefix entry allows names nobody enumerates — so it
+    /// lists the routed names and the allow-list's own entries that pass
+    /// (see `models::callable_models`).
+    pub fn may_call(&self, model: &str) -> bool {
+        self.allowed_models.as_ref().is_none_or(|allowed| {
+            allowed
+                .iter()
+                .any(|m| model == m || model.starts_with(m.as_str()))
+        })
+    }
+}
+
 /// Thin wrapper kept for call-site readability; delegates to
 /// `GatewayError::status_code` so the error-path `gateway_logs` row,
 /// the streaming `StreamOutcome::UpstreamError` log row, and
@@ -466,5 +489,22 @@ mod helper_tests {
             retry_after_secs: Some(7200),
         };
         assert_eq!(err.retry_after_secs(), Some(3600));
+    }
+
+    #[test]
+    fn a_model_is_callable_when_an_entry_matches_it_exactly_or_as_a_prefix() {
+        let with = |allowed: Option<&[&str]>| GatewayRequestIdentity {
+            allowed_models: allowed.map(|a| a.iter().map(|m| m.to_string()).collect()),
+            ..Default::default()
+        };
+        assert!(with(None).may_call("anything"));
+        let narrowed = with(Some(&["gpt-4o", "claude-"]));
+        assert!(narrowed.may_call("gpt-4o"));
+        assert!(narrowed.may_call("gpt-4o-mini"));
+        assert!(narrowed.may_call("claude-sonnet-4-5"));
+        assert!(!narrowed.may_call("gpt-4"));
+        assert!(!narrowed.may_call("gemini-2.5-pro"));
+        // An empty list allows nothing.
+        assert!(!with(Some(&[])).may_call("gpt-4o"));
     }
 }

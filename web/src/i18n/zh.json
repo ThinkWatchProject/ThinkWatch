@@ -1725,7 +1725,7 @@
     },
     "siteName": "站点名称",
     "publicGatewayUrl": "网关公开地址",
-    "publicGatewayUrlHint": "外部访问网关时使用的地址。用于配置指南中的复制粘贴示例。留空 / 填 0 表示从浏览器自动获取。",
+    "publicGatewayUrlHint": "外部访问网关时使用的地址，用于配置指南、其中的复制粘贴示例和「添加到 ThinkWatch Lite」。协议或主机留空时，取浏览器中控制台的地址；端口填 0 时，使用网关监听端口。",
     "publicProtocol": "协议",
     "publicHost": "主机",
     "publicHostPlaceholder": "自动（使用浏览器主机名）",
@@ -2029,7 +2029,23 @@
       "anthropicSdkBaseUrl": "将 base_url 设置为：{{url}}（不含 /v1 后缀）",
       "anthropicSdkApiKey": "将 api_key 设置为刚刚创建的 API Key",
       "anthropicSdkModel": "使用任意在 ThinkWatch 中配置的 Claude 模型"
-    }
+    },
+    "lite": "ThinkWatch Lite",
+    "liteDesc": "ThinkWatch Lite 是一款桌面应用，在本机接管 Claude Code、Codex 等 AI 客户端，并记录它们的每一次请求。本网关添加为它的上游后，这些客户端用一把 API 密钥经由本网关访问模型。",
+    "liteCreateKey": "新建密钥并添加到 Lite",
+    "liteAskForKey": "当前账号不能创建 API 密钥。请管理员创建一把可调用 AI 网关的 API 密钥，再在 ThinkWatch Lite 中新建上游：服务选择「ThinkWatch」，填入上方的网关地址和这把密钥。",
+    "liteDownload": "下载 ThinkWatch Lite"
+  },
+  "lite": {
+    "add": "添加到 ThinkWatch Lite",
+    "reasonNoAiGateway": "这把 API 密钥不能调用 AI 网关，无法添加到 ThinkWatch Lite。",
+    "reasonNoGatewayUse": "当前账号没有可使用 AI 网关的角色（ai_gateway:use），它的 API 密钥无法在 ThinkWatch Lite 中使用。",
+    "reasonNoGatewayUrl": "无法读取网关地址。",
+    "reasonInsecureUrl": "ThinkWatch Lite 只接受 HTTPS 网关地址，或本机、内网的 HTTP 地址；本网关的地址是 {{url}}。",
+    "reasonBadUrl": "网关地址 {{url}} 无法添加到 ThinkWatch Lite。",
+    "reasonBadKey": "这把 API 密钥无法添加到 ThinkWatch Lite。",
+    "noResponse": "没有反应？",
+    "installFirst": "先安装 ThinkWatch Lite（{{version}} 或更新版本）"
   },
   "notFound": {
     "title": "404",

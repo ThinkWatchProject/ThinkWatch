@@ -1725,7 +1725,7 @@
     },
     "siteName": "Site Name",
     "publicGatewayUrl": "Public Gateway URL",
-    "publicGatewayUrlHint": "How the gateway is reached from the outside world. Used in the Configuration Guide and copy-paste examples. Leave fields empty / 0 to auto-detect from the browser.",
+    "publicGatewayUrlHint": "How the gateway is reached from the outside world. Used in the Configuration Guide, its copy-paste examples and Add to ThinkWatch Lite. An empty protocol or host is taken from the address the console is open at in the browser; port 0 uses the gateway listening port.",
     "publicProtocol": "Protocol",
     "publicHost": "Host",
     "publicHostPlaceholder": "auto (use browser hostname)",
@@ -2029,7 +2029,23 @@
       "anthropicSdkBaseUrl": "Set base_url to: {{url}} (no /v1 suffix)",
       "anthropicSdkApiKey": "Set api_key to the key you just created",
       "anthropicSdkModel": "Use any Claude model configured in ThinkWatch"
-    }
+    },
+    "lite": "ThinkWatch Lite",
+    "liteDesc": "ThinkWatch Lite is a desktop app that sets up Claude Code, Codex and other AI clients on the computer it runs on and records every request they make. With this gateway added as its upstream, those clients reach the gateway's models through one API key.",
+    "liteCreateKey": "Create a key and add it to Lite",
+    "liteAskForKey": "This account cannot create API keys. Ask an administrator for an API key that can call the AI gateway, then create an upstream in ThinkWatch Lite with ThinkWatch as the service, the gateway URL above and the key.",
+    "liteDownload": "Download ThinkWatch Lite"
+  },
+  "lite": {
+    "add": "Add to ThinkWatch Lite",
+    "reasonNoAiGateway": "This API key cannot call the AI gateway, so it cannot be added to ThinkWatch Lite.",
+    "reasonNoGatewayUse": "No role of this account grants use of the AI gateway (ai_gateway:use), so its API keys cannot be used from ThinkWatch Lite.",
+    "reasonNoGatewayUrl": "The gateway address could not be read.",
+    "reasonInsecureUrl": "ThinkWatch Lite accepts HTTPS gateway addresses, or HTTP ones on this machine or a private network, and this gateway is at {{url}}.",
+    "reasonBadUrl": "The gateway address {{url}} cannot be added to ThinkWatch Lite.",
+    "reasonBadKey": "This API key cannot be added to ThinkWatch Lite.",
+    "noResponse": "Nothing happened?",
+    "installFirst": "Install ThinkWatch Lite ({{version}} or later) first"
   },
   "notFound": {
     "title": "404",
