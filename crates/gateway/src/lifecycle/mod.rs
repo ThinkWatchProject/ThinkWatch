@@ -476,8 +476,9 @@ pub(crate) fn build_chat_pump(
 /// `body` (placeholder form) with the caller's values restored and the
 /// text through the content rules — **the rules always run on restored
 /// text**, so a rule never cuts into a placeholder — and then the values
-/// masked again with the same placeholders, so the row holds no more of
-/// the caller's values than it did before answers were filtered. Nothing
+/// masked again with the same placeholders, by the rules and by the ledger
+/// ([`crate::redaction::Redaction::mask_for_storage`]), so the row holds no
+/// more of the caller's values than it did before answers were filtered. Nothing
 /// is recorded here: the hits were recorded on the way to the client.
 pub(crate) fn for_the_log(
     content: &crate::content_filter::ContentFilter,
@@ -491,7 +492,7 @@ pub(crate) fn for_the_log(
     }
     let restored = crate::redaction::restore_body(ledger, body);
     let (filtered, _) = content.whole(client, restored);
-    redaction.replace(filtered, ledger).0
+    redaction.mask_for_storage(filtered, ledger)
 }
 
 /// What the pump reads off the upstream's bytes as they pass, for the

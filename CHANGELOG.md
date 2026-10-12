@@ -57,7 +57,10 @@ they match with a text of their own.
   cache keeps the answer unfiltered, in placeholder form, and the rules in
   force run again on every cache hit; the request's log row stores the
   answer as the client received it, with the caller's values masked again
-  as before. A rule that checks answers cannot refuse, and
+  as before: by the redaction rules, and wherever a value the request's
+  placeholders stand for appears as written, so a value its rule
+  recognises only in context (a connection string's password) is masked
+  even when the model repeats it alone. A rule that checks answers cannot refuse, and
   cannot match by code points; such a policy is refused when saved.
 - **Replace.** A content rule can replace what it matches with a text of
   its own (`action: replace`, `replacement`, `***` when left out, at most

@@ -1316,3 +1316,120 @@ async fn an_answer_rule_runs_on_restored_text_on_a_miss_a_cache_hit_and_in_the_l
         );
     }
 }
+
+/// An upstream that answers with the first placeholder of the request
+/// alone: `The password <<TW_SECRET_1>> is wrong.`
+async fn repeating_upstream() -> MockProvider {
+    let upstream = MockProvider {
+        server: wiremock::MockServer::start().await,
+    };
+    upstream
+        .mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(|req: &Request| {
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                    let text = String::from_utf8_lossy(&req.body).into_owned();
+                    let placeholder = text
+                        .find("<<TW_")
+                        .and_then(|at| {
+                            text[at..]
+                                .find(">>")
+                                .map(|end| text[at..at + end + 2].to_string())
+                        })
+                        .unwrap_or_default();
+                    let said = format!("The password {placeholder} is wrong.");
+                    let mut fake = Value::Null;
+                    fake["messages"] = json!([{"role": "user", "content": said}]);
+                    fake["stream"] = body["stream"].clone();
+                    let fake_req = Request {
+                        body: fake.to_string().into_bytes(),
+                        ..req.clone()
+                    };
+                    answer(&fake_req)
+                }),
+        )
+        .await;
+    upstream
+}
+
+/// A value its rule recognises only in context — a connection string's
+/// password — repeated alone by the model is masked in the log row with
+/// its placeholder, on a miss (whole and streamed) and on a cache hit,
+/// while the client reads it restored.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_value_repeated_without_its_context_is_masked_in_the_log_row() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("security.redact", json!({"mode": "enforce"}))
+        .await;
+    // Any rule that checks answers: the log row is then the client's copy.
+    app.set_setting("security.content", answer_rule("unrelated-word", "strip"))
+        .await;
+    let upstream = repeating_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-context").await;
+
+    let mut calls = 0;
+    for stream in [false, true] {
+        let body = json!({"model": "cf-context", "stream": stream, "messages": [{"role": "user",
+            "content": format!("connect with postgres://app:hunter2@db.internal:5432/orders ({stream})")}]});
+        let mut hit = false;
+        for _ in 0..20 {
+            let resp = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", app.gateway_url))
+                .bearer_auth(&key)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            hit = resp.headers().get("x-cache").and_then(|v| v.to_str().ok()) == Some("HIT");
+            let text = resp.text().await.unwrap();
+            calls += 1;
+            // What the client reads: the deltas of a streamed miss, the
+            // message of a whole answer or of a replayed hit.
+            let shown: String = text
+                .lines()
+                .map(|l| l.strip_prefix("data: ").unwrap_or(l))
+                .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+                .map(|v| {
+                    let c = &v["choices"][0];
+                    c["delta"]["content"]
+                        .as_str()
+                        .or(c["message"]["content"].as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(
+                shown, "The password hunter2 is wrong.",
+                "stream={stream} hit={hit}: {text}"
+            );
+            assert!(!text.contains("<<TW_"), "stream={stream} hit={hit}: {text}");
+            if hit {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(hit, "stream={stream}: no cache hit");
+    }
+
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        bodies = ch
+            .query("SELECT ifNull(response_body, '') FROM gateway_logs WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if bodies.len() >= calls && bodies.iter().all(|b| !b.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(bodies.len(), calls, "{bodies:?}");
+    for b in &bodies {
+        assert!(!b.contains("hunter2"), "{b}");
+        assert!(b.contains("<<TW_SECRET_1>>"), "{b}");
+    }
+}

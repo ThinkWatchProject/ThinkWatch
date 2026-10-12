@@ -867,7 +867,7 @@ async fn run(
         // byte cap and offload all apply — with the status marked. The row
         // gets what this client was shown, its values masked again.
         let logged = if guards.content.answer.is_some() {
-            guards.redaction.replace(restored.clone(), &ledger).0
+            guards.redaction.mask_for_storage(restored.clone(), &ledger)
         } else {
             cached.body.clone()
         };
@@ -1109,11 +1109,11 @@ async fn run(
     // unfiltered: the content rules run on the restored text of every hit.
     // The log row gets what the client was shown, its values masked again.
     let completed = Completed {
-        logged: guards
-            .content
-            .answer
-            .is_some()
-            .then(|| guards.redaction.replace(restored.clone(), &answer_ledger).0),
+        logged: guards.content.answer.is_some().then(|| {
+            guards
+                .redaction
+                .mask_for_storage(restored.clone(), &answer_ledger)
+        }),
         ..completed
     };
     let deps = snapshot(entry, sel_record);

@@ -71,6 +71,29 @@ impl Redaction {
         (Vec::from(out), ledger)
     }
 
+    /// Restored text masked again for storage — a log row, never what is
+    /// sent: every value the rules find gets its placeholder from `ledger`
+    /// (or a new one), and then **every value `ledger` holds is put back
+    /// as its placeholder wherever it appears as written**, JSON-escaped
+    /// once or twice. The rules alone miss a value that needs its context
+    /// to be recognised — a connection string's password, a custom rule
+    /// written as `OPENAI_API_KEY=…` — when the model repeats it on its
+    /// own; the ledger knows the value itself.
+    pub fn mask_for_storage(&self, body: Vec<u8>, ledger: &Ledger) -> Vec<u8> {
+        let (body, ledger) = self.replace(body, ledger);
+        match std::str::from_utf8(&body) {
+            Ok(text) => match tw_guard::redact::replace::hide_values(
+                text,
+                &ledger,
+                tw_guard::redact::replace::Form::Json,
+            ) {
+                std::borrow::Cow::Borrowed(_) => body,
+                std::borrow::Cow::Owned(hidden) => hidden.into_bytes(),
+            },
+            Err(_) => body,
+        }
+    }
+
     /// `text` with every value the rules find masked (`sk-an…7f9c`, `…1234`),
     /// whatever the mode: for anything the gateway writes down that quotes
     /// a request or an answer — an audit event's excerpt, an error that
@@ -513,5 +536,31 @@ mod tests {
             ..r.clone()
         };
         assert!(!replaced(&observing, &project.rule));
+    }
+
+    #[test]
+    fn a_value_repeated_without_its_context_is_masked_for_storage() {
+        let r = redaction(Mode::Enforce);
+        let body = serde_json::json!({"messages": [{"role": "user",
+            "content": "connect with postgres://app:hunter2@db.internal:5432/orders"}]})
+        .to_string();
+        let (_, ledger) = r.look(body.as_bytes());
+        assert_eq!(ledger.len(), 1, "the password is numbered");
+        // The model repeats the password alone: no rule recognises it there.
+        let answer =
+            br#"{"content":[{"type":"text","text":"The password <<TW_SECRET_1>> is wrong."}]}"#;
+        let restored = restore_body(&ledger, answer);
+        assert!(String::from_utf8_lossy(&restored).contains("hunter2"));
+        let (rescanned, _) = r.replace(restored.clone(), &ledger);
+        assert!(
+            String::from_utf8_lossy(&rescanned).contains("hunter2"),
+            "rules alone miss it"
+        );
+        let stored = String::from_utf8(r.mask_for_storage(restored, &ledger)).unwrap();
+        assert!(!stored.contains("hunter2"), "{stored}");
+        assert!(
+            stored.contains("The password <<TW_SECRET_1>> is wrong."),
+            "{stored}"
+        );
     }
 }
