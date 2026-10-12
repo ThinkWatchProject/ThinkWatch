@@ -37,7 +37,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  check:
+  cla:
     runs-on: ubuntu-latest
     # Pull request events, except a close without a merge (nothing to lock),
     # and comments on pull requests that are exactly the signature or
