@@ -11,6 +11,103 @@ target.
 
 ## [Unreleased]
 
+## [3.7.0] — 2026-10-12
+
+Outbound redaction keeps away from the structure of a request: it no longer
+looks inside field names, and custom rules leave alone the identifiers a
+protocol needs as they are, so a rule can no longer break the ids a client
+sends back with its history. A custom redaction rule now says whether it
+looks for its text as written or for a regular expression, and whether case
+matters. The thinkwatch-core crates move from v0.70.0 to v0.71.0.
+
+### Read before upgrading
+
+- **Custom redaction rules saved before 3.7.0 now match their text as
+  written, ignoring case.** A custom rule in `security.redact` takes two new
+  optional keys, `match` (`contains` or `regex`) and `case_sensitive`. A
+  rule without `match` is looked for as plain text, in which `.`, `*`, `\d`
+  and the like have no special meaning; a rule without `case_sensitive`
+  ignores case. Until now every custom redaction rule was a case-sensitive
+  regular expression, and no rule saved by 3.0 to 3.6 carries either key,
+  including the rules an earlier upgrade converted from the old
+  `security.pii_redactor_patterns` setting. A rule written as a regular
+  expression still loads and nothing reports it, but it stops matching:
+  what it used to replace is sent upstream as it is and, with
+  `audit.body_redact_pii` on, stored unmasked. Nothing is converted
+  automatically. **Once every replica runs 3.7.0, open each custom
+  redaction rule on the console's security page, set Match by to Regex
+  for one written as a regular expression, and tick Case-sensitive where
+  case mattered.** A policy written by a script or through
+  `PATCH /api/admin/settings` needs `"match": "regex"` and
+  `"case_sensitive": true` on each such rule. Settings still in the format
+  from before 3.0.0, converted on the first start of 3.7.0, become
+  case-sensitive regex rules and keep matching as before.
+- **Upgrade every replica before editing redaction rules, and do not roll
+  back afterwards.** 3.6 refuses a redaction policy with keys it does not
+  know. A 3.6 instance that reads a policy in which any custom rule has
+  `match` or `case_sensitive` logs `Unreadable guard policy` and runs
+  redaction on the factory policy: observe mode, the built-in rules as
+  shipped, no custom rules, so nothing is replaced on the wire. Any change
+  to outbound redaction saved from the 3.7.0 console, even a mode switch,
+  writes `match` on every custom rule. During a rolling upgrade,
+  edit redaction rules only once no 3.6 instance is left; to roll back to
+  3.6 after editing them, first remove `match` and `case_sensitive` from
+  every custom rule in `security.redact`.
+- **Redaction no longer searches field names, and custom rules skip
+  protocol identifiers.** No rule looks inside a JSON key any more. Custom
+  rules also leave alone the values of `id`, `call_id`, `item_id`,
+  `tool_use_id`, `tool_call_id`, `toolUseId`, `previous_response_id`,
+  `response_id`, `type`, `role`, `name`, `namespace`, `model`, `status`,
+  `object` and `phase`. Built-in rules still search those values, and every
+  other value is searched by every rule as before, including fields such as
+  `user_id` or `aws_access_key_id` inside tool arguments. A custom rule
+  meant to catch a value under one of those keys, such as a tool name or a
+  model name, no longer does. The same holds for masking stored bodies
+  (`audit.body_redact_pii`).
+- **The private-key rule replaces less.** The header of a key block and its
+  end line are now looked for within the same text (see Fixed). A header
+  in one message and an end line in another are no longer replaced, along
+  with everything between them, as one key.
+
+### Added
+
+- **Match by and Case-sensitive for custom redaction rules.** The custom
+  rule dialog for outbound redaction offers Contains and Regex, as the
+  content filter's does, and a Case-sensitive checkbox. Contains looks for
+  the text exactly as written; leading and trailing spaces count. The rule
+  list says how each rule matches, such as "Contains `x`, ignoring case" or
+  "Regex `x`, case-sensitive". Trying a sample in the dialog uses the same
+  settings: `POST /api/admin/security/redact/test` takes `match` and
+  `case_sensitive`. Code points remain a content filter matcher and are
+  refused for redaction.
+
+### Fixed
+
+- **Custom redaction rules no longer break the ids a client sends back.**
+  Rules ran over the whole request body, field names and identifiers
+  included, so a custom rule could match inside an id: Codex sends ids such
+  as `fco_` followed by a hexadecimal UUID, and a rule whose text can be
+  spelled in hexadecimal turned one into `fco_…<<TW_SECRET_1>>…`. The
+  upstream rejected the request, and since the history is sent again on
+  every turn, every later turn of that conversation as well. See Read
+  before upgrading for what is no longer searched.
+- **Private keys stay within one text.** The private-key rule looked for
+  the end of a key block anywhere after its header. A header without an
+  end in one message, such as a file read halfway or code that spells the
+  marker, joined up with an end line in a later message, and everything in
+  between, earlier turns included, was replaced by a single placeholder.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.70.0 → v0.71.0.
+- The Licensor in `LICENSE` is now the project's owner, named in the file,
+  instead of "ThinkWatch Contributors"; the Business Source License 1.1
+  terms are unchanged.
+- A first pull request to this repository asks its author to sign the
+  Contributor License Agreement (`CLA.md`) once, by a comment on the pull
+  request; `CONTRIBUTING.md` explains how.
+
 ## [3.6.0] — 2026-10-12
 
 A key shown once can go straight into ThinkWatch Lite: the console's key
@@ -2022,7 +2119,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.6.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.7.0...HEAD
+[3.7.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.0
 [3.6.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.6.0
 [3.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.5.0
 [3.4.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.4.0
