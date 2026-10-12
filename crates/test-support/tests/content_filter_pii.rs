@@ -1196,3 +1196,123 @@ async fn the_view_and_the_trial_know_what_a_content_rule_checks() {
         .unwrap();
     assert_eq!(r["output"], "the [y] plan", "{r}");
 }
+
+/// An answer rule whose text is also part of a placeholder's label
+/// (`email` in `<<TW_EMAIL_1>>`) runs on the restored answer every time:
+/// the first answer, every cache hit, and the copy in the log row. The
+/// cache keeps the placeholder form, unfiltered; the log row keeps what the
+/// client was shown, with the caller's value masked again.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_answer_rule_runs_on_restored_text_on_a_miss_a_cache_hit_and_in_the_log() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.redact",
+        json!({"mode": "enforce", "enable": ["email"]}),
+    )
+    .await;
+    app.set_setting("security.content", answer_rule("email", "strip"))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-cache").await;
+    // A request each, different once redacted: the cache does not tell a
+    // streamed request from a whole one, and each is to start with a miss.
+    let address = |stream: bool| format!("alice{}@corp.example.org", u8::from(stream));
+    let said = |stream: bool| if stream { "streamed" } else { "whole" };
+
+    for stream in [false, true] {
+        let shown_expected = format!("my  is {} ({})", address(stream), said(stream));
+        let body = json!({"model": "cf-cache", "stream": stream, "messages": [{"role": "user",
+                          "content": format!("my email is {} ({})", address(stream), said(stream))}]});
+        let mut seen = Vec::new();
+        // The first call is a miss; the cache is written once the answer
+        // is done, so a few calls may pass before the first hit.
+        for _ in 0..20 {
+            let resp = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", app.gateway_url))
+                .bearer_auth(&key)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let cache = resp
+                .headers()
+                .get("x-cache")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let text = resp.text().await.unwrap();
+            let shown: String = if stream {
+                // A miss streams chunks; a hit replays the whole answer.
+                text.lines()
+                    .filter_map(|l| l.strip_prefix("data: "))
+                    .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+                    .map(|v| {
+                        let c = &v["choices"][0];
+                        c["delta"]["content"]
+                            .as_str()
+                            .or(c["message"]["content"].as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .collect()
+            } else {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                v["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            };
+            assert_eq!(
+                shown, shown_expected,
+                "stream={stream} cache={cache}: {text}"
+            );
+            assert!(
+                !text.contains("<<TW_"),
+                "stream={stream} cache={cache}: {text}"
+            );
+            seen.push(cache.clone());
+            if cache == "HIT" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // A streamed miss carries no `X-Cache` header.
+        assert_ne!(
+            seen.first().map(String::as_str),
+            Some("HIT"),
+            "stream={stream}"
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("HIT"),
+            "stream={stream}: {seen:?}"
+        );
+    }
+
+    // Every log row, misses and hits: what the client was shown, the
+    // address masked with its intact placeholder.
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        bodies = ch
+            .query("SELECT ifNull(response_body, '') FROM gateway_logs WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if bodies.len() >= 4 && bodies.iter().all(|b| !b.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(bodies.len() >= 4, "{bodies:?}");
+    for b in &bodies {
+        assert!(b.contains("my  is <<TW_EMAIL_1>>"), "{b}");
+        assert!(!b.contains("<<TW__"), "{b}");
+        assert!(
+            !b.contains(&address(false)) && !b.contains(&address(true)),
+            "{b}"
+        );
+    }
+}

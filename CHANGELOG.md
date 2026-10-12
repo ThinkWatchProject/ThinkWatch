@@ -52,8 +52,12 @@ they match with a text of their own.
   gone out). What a rule deletes or replaces never reaches the client, and
   the frames that repeat the whole text (`response.output_text.done`,
   `response.output_item.done`, `response.completed`) say what the client
-  received. The answer stored in the request's log row and in the response
-  cache is the filtered one. A rule that checks answers cannot refuse, and
+  received. The rules always run on the answer with the caller's redacted
+  values restored, so a rule never cuts into a placeholder. The response
+  cache keeps the answer unfiltered, in placeholder form, and the rules in
+  force run again on every cache hit; the request's log row stores the
+  answer as the client received it, with the caller's values masked again
+  as before. A rule that checks answers cannot refuse, and
   cannot match by code points; such a policy is refused when saved.
 - **Replace.** A content rule can replace what it matches with a text of
   its own (`action: replace`, `replacement`, `***` when left out, at most

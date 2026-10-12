@@ -606,6 +606,7 @@ pub(crate) async fn read_whole(
     };
     Ok(Completed {
         body: rewrite_model(&body, caller_model),
+        logged: None,
         usage,
         usage_estimated,
     })
@@ -863,14 +864,20 @@ async fn run(
         .await;
 
         // Same capture pipeline as a fresh request — redaction toggle,
-        // byte cap and offload all apply — with the status marked.
+        // byte cap and offload all apply — with the status marked. The row
+        // gets what this client was shown, its values masked again.
+        let logged = if guards.content.answer.is_some() {
+            guards.redaction.replace(restored.clone(), &ledger).0
+        } else {
+            cached.body.clone()
+        };
         let mut capture = prepare_body_capture(
             &state.dynamic_config,
             &guards.redaction,
             &state.blob_store,
             &metadata.request_id,
             &request_for_audit,
-            Some(&cached.body),
+            Some(&logged),
         )
         .await;
         capture.status = Some(BodyCaptureStatus::FromCache.as_str());
@@ -1098,11 +1105,15 @@ async fn run(
     }
 
     // Cache fill, audit, breaker and budget debit — the same hooks the
-    // stream runs in its tail. The cache keeps the placeholder form, with
-    // the answer's text as the content rules left it: what is stored is
-    // what the client was shown. (Its hits were recorded above.)
+    // stream runs in its tail. The cache keeps the placeholder form,
+    // unfiltered: the content rules run on the restored text of every hit.
+    // The log row gets what the client was shown, its values masked again.
     let completed = Completed {
-        body: guards.content.whole(surface.dialect, completed.body).0,
+        logged: guards
+            .content
+            .answer
+            .is_some()
+            .then(|| guards.redaction.replace(restored.clone(), &answer_ledger).0),
         ..completed
     };
     let deps = snapshot(entry, sel_record);
