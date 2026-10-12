@@ -364,7 +364,7 @@ async fn redaction_replaces_values_in_the_whole_request_and_restores_the_answer(
     app.set_setting(
         "security.redact",
         json!({"mode": "enforce", "custom": [
-            {"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}", "label": "SSN"}
+            {"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}", "match": "regex", "label": "SSN"}
         ]}),
     )
     .await;
@@ -438,7 +438,7 @@ async fn a_custom_redaction_rule_records_one_event_with_counts_and_no_values() {
     let app = TestApp::spawn_with_clickhouse().await;
     app.set_setting(
         "security.redact",
-        json!({"custom": [{"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}"}]}),
+        json!({"custom": [{"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}", "match": "regex"}]}),
     )
     .await;
     let upstream = echo_upstream().await;

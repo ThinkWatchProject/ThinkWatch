@@ -37,6 +37,9 @@ export type ContentAction = 'block' | 'strip' | 'record';
 /** How a content rule matches. */
 export type ContentMatch = 'contains' | 'regex' | 'codepoints';
 
+/** How a custom redaction rule matches: the text as written, or a regex. */
+export type RedactMatch = Exclude<ContentMatch, 'codepoints'>;
+
 export interface CardPrefix {
   from: number;
   to: number;
@@ -51,7 +54,9 @@ export interface CardNetwork {
 
 /**
  * What a rule matches, for display. Built-in rules use the specific kinds;
- * custom rules are `regex`, `contains` or `codepoints`. A built-in rule's
+ * custom rules are `regex`, `contains` or `codepoints`. `case_sensitive`
+ * is left out when false: tool-call regexes are case-sensitive, content
+ * rules are not, a custom redaction rule is when it says so. A built-in rule's
  * `codepoints.ranges` is the canonical spelling (`U+200B`,
  * `U+E0000–U+E007F`); a custom rule's is the items as written, so joining
  * them with `, ` gives back what is stored. `builtin` is a check
@@ -70,8 +75,8 @@ export type Matcher =
   | { kind: 'bank-card'; networks: CardNetwork[] }
   | { kind: 'email' }
   | { kind: 'cn-mobile-phone' }
-  | { kind: 'regex'; pattern: string }
-  | { kind: 'contains'; text: string }
+  | { kind: 'regex'; pattern: string; case_sensitive?: boolean }
+  | { kind: 'contains'; text: string; case_sensitive?: boolean }
   | { kind: 'codepoints'; ranges: string[] }
   | { kind: 'builtin'; check: string };
 
@@ -117,14 +122,18 @@ export interface SecurityDetail {
 
 /**
  * `POST /api/admin/security/{guard}/test`. With `pattern` only that pattern
- * is tried (content: matched by `match`, redaction: replaced under `label`);
+ * is tried (content and redaction: matched by `match`, redaction also by
+ * `case_sensitive` and replaced under `label`; tool calls: a regex);
  * with `rule` only that built-in rule, even when it is off; with neither,
  * every rule that is on.
  */
 export interface SecurityTestRequest {
   sample: string;
   pattern?: string | null;
+  /** Left out: `contains`. Redaction takes `contains` or `regex` only. */
   match?: ContentMatch | null;
+  /** Redaction only. Left out: ignoring case. */
+  case_sensitive?: boolean | null;
   rule?: string | null;
   label?: string | null;
   /**
@@ -173,8 +182,12 @@ export interface SecurityTestResult {
 export interface CustomRedactRule {
   /** Also the rule's identity: unique within the guard. */
   name: string;
-  /** Regular expression. */
+  /** The text to find, or a regular expression, as `match` says. */
   pattern: string;
+  /** Left out: `contains` — the text as written, `.` and `*` included. */
+  match?: RedactMatch;
+  /** Left out: ignoring case. */
+  case_sensitive?: boolean;
   /** Placeholder label, `^[A-Z][A-Z0-9_]{0,23}$`. Left out: `SECRET`. */
   label?: string;
   disabled?: boolean;

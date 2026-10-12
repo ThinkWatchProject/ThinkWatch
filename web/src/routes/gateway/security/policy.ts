@@ -20,6 +20,7 @@ import type {
   GuardMode,
   GuardPolicies,
   Matcher,
+  RedactMatch,
   RedactPolicy,
   RuleAction,
   SecurityRuleView,
@@ -111,37 +112,56 @@ export function checkCodepoints(text: string): CodepointProblem | null {
 // Matchers
 // ---------------------------------------------------------------------------
 
+/** What a custom rule writes. */
+export interface WrittenPattern {
+  pattern: string;
+  match: ContentMatch;
+  /** Only redaction rules choose; the view says it for every regex and text. */
+  caseSensitive: boolean;
+}
+
 /** What a rule's matcher says, as a custom rule writes it. `null` for the built-in kinds. */
-export function patternOf(r: SecurityRuleView): { pattern: string; match: ContentMatch } | null {
-  switch (r.matcher.kind) {
+export function patternOf(r: SecurityRuleView): WrittenPattern | null {
+  const m = r.matcher;
+  switch (m.kind) {
     case 'regex':
-      return { pattern: r.matcher.pattern, match: 'regex' };
+      return { pattern: m.pattern, match: 'regex', caseSensitive: m.case_sensitive === true };
     case 'contains':
-      return { pattern: r.matcher.text, match: 'contains' };
+      return { pattern: m.text, match: 'contains', caseSensitive: m.case_sensitive === true };
     case 'codepoints':
-      return { pattern: r.matcher.ranges.join(', '), match: 'codepoints' };
+      return { pattern: m.ranges.join(', '), match: 'codepoints', caseSensitive: false };
     default:
       return null;
   }
 }
 
-export function matcherOf(match: ContentMatch, pattern: string): Matcher {
+export function matcherOf(match: ContentMatch, pattern: string, caseSensitive = false): Matcher {
+  const exact = caseSensitive ? { case_sensitive: true } : {};
   switch (match) {
     case 'regex':
-      return { kind: 'regex', pattern };
+      return { kind: 'regex', pattern, ...exact };
     case 'contains':
-      return { kind: 'contains', text: pattern };
+      return { kind: 'contains', text: pattern, ...exact };
     case 'codepoints':
       return { kind: 'codepoints', ranges: codepointItems(pattern) };
   }
 }
 
+/** How each guard's custom rules can match, the default first. */
+export const MATCHES: Record<Guard, readonly ContentMatch[]> = {
+  redact: ['contains', 'regex'],
+  inspect_tools: ['regex'],
+  content: ['contains', 'regex', 'codepoints'],
+};
+
 /** A custom rule as the dialog saves it. */
 export interface CustomRuleInput {
   name: string;
   pattern: string;
-  /** Content rules choose; the other two guards' custom rules are regexes. */
+  /** Content and redaction rules choose; tool rules are regexes. */
   match: ContentMatch;
+  /** Redaction only; the other guards' rules have a fixed case rule. */
+  caseSensitive: boolean;
   /** Tool and content rules only. */
   action: RuleAction | null;
   /** Redaction only. */
@@ -156,7 +176,7 @@ export function customRuleView(input: CustomRuleInput): SecurityRuleView {
     custom: true,
     name: input.name,
     kind: 'custom',
-    matcher: matcherOf(input.match, input.pattern),
+    matcher: matcherOf(input.match, input.pattern, input.caseSensitive),
     enabled: input.enabled,
     on_by_default: true,
     action: input.action,
@@ -224,20 +244,27 @@ function changedActions<A extends RuleAction>(builtins: SecurityRuleView[], allo
   return out;
 }
 
-function customPattern(r: SecurityRuleView): { pattern: string; match: ContentMatch } {
-  return patternOf(r) ?? { pattern: '', match: 'regex' };
+function customPattern(r: SecurityRuleView): WrittenPattern {
+  return patternOf(r) ?? { pattern: '', match: 'regex', caseSensitive: false };
 }
 
 function redactPolicy(d: GuardDetail): RedactPolicy {
   const { enable, disable } = builtinSwitches(d);
   const custom: CustomRedactRule[] = d.rules
     .filter((r) => r.custom)
-    .map((r) => ({
-      name: r.id,
-      pattern: customPattern(r).pattern,
-      label: r.label || DEFAULT_LABEL,
-      ...(r.enabled ? {} : { disabled: true }),
-    }));
+    .map((r) => {
+      const { pattern, match, caseSensitive } = customPattern(r);
+      // Code points never reach a redaction rule; written as text if one did.
+      const how: RedactMatch = match === 'regex' ? 'regex' : 'contains';
+      return {
+        name: r.id,
+        pattern,
+        match: how,
+        ...(caseSensitive ? { case_sensitive: true } : {}),
+        label: r.label || DEFAULT_LABEL,
+        ...(r.enabled ? {} : { disabled: true }),
+      };
+    });
   return {
     mode: d.mode,
     ...(enable.length ? { enable } : {}),

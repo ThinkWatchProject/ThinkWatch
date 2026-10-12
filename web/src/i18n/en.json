@@ -235,10 +235,12 @@
         "regex": "Regex",
         "codepoints": "Code points"
       },
+      "caseSensitive": "Case-sensitive",
       "patternContains": "Text to find",
       "patternRegex": "Regular expression",
       "patternCodepoints": "Code points",
       "containsHint": "Searched for in user messages and tool results, ignoring case. Leading and trailing spaces count.",
+      "redactContainsHint": "Every occurrence of this text is replaced with a placeholder. It is found as written: characters such as . and * have no special meaning, and leading and trailing spaces count.",
       "codepointsHint": "A code point or a range of them; separate several with commas, as in U+200B, U+E0000–U+E007F",
       "regexHint": {
         "redact": "Everything the pattern matches is replaced with a placeholder.",
@@ -293,8 +295,10 @@
       "bankCard": "A {{networks}} card number whose prefix and length match and that passes the Luhn check; public test card numbers excepted",
       "email": "Email addresses, such as {{example}}",
       "cnMobilePhone": "11-digit mobile numbers starting with 13–19, not run together with other digits",
-      "regex": "Regex {{pattern}}",
+      "regex": "Regex {{pattern}}, ignoring case",
+      "regexCaseSensitive": "Regex {{pattern}}, case-sensitive",
       "contains": "Contains {{text}}, ignoring case",
+      "containsCaseSensitive": "Contains {{text}}, case-sensitive",
       "codepoints": "Code points {{ranges}}",
       "other": "Built-in check"
     },

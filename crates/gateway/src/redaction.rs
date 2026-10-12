@@ -321,6 +321,8 @@ mod tests {
             custom: vec![tw_guard::policy::CustomRedactRule {
                 name: "ssn".into(),
                 pattern: r"\d{3}-\d{2}-\d{4}".into(),
+                matching: tw_guard::policy::ContentMatch::Regex,
+                case_sensitive: true,
                 label: None,
                 disabled: false,
             }],

@@ -78,7 +78,7 @@ pub async fn get_security(
     ),
     request_body(
         content = inline(serde_json::Value),
-        description = "sample: string; pattern?, match?, rule?, label?, action? (thinkwatch-core's SecurityTestRequest)",
+        description = "sample: string; pattern?, match?, case_sensitive?, rule?, label?, action? (thinkwatch-core's SecurityTestRequest)",
     ),
     responses(
         (status = 200, description = "Hits, output and refusal (thinkwatch-core's SecurityTestResult)", body = serde_json::Value),

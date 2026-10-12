@@ -493,6 +493,10 @@ pub fn redact(patterns: Option<&Value>) -> RedactPolicy {
                 policy.custom.push(CustomRedactRule {
                     name: names.unique(&name),
                     pattern: p.regex.clone(),
+                    // The old runtime compiled each pattern as a
+                    // case-sensitive regex.
+                    matching: ContentMatch::Regex,
+                    case_sensitive: true,
                     label: label_of(&p.placeholder_prefix),
                     disabled: false,
                 });
@@ -973,6 +977,10 @@ mod tests {
             .map(|c| (c.name.as_str(), c.label.as_deref()))
             .collect();
         assert_eq!(custom, [("phone_us", Some("PHONE")), ("ipv4", Some("IP"))]);
+        // Matched the way the old runtime did: a case-sensitive regex.
+        for c in &p.custom {
+            assert_eq!((c.matching, c.case_sensitive), (ContentMatch::Regex, true));
+        }
 
         let rules = p.rules().unwrap();
         for id in ["cn-resident-id", "bank-card", "email", "cn-mobile-phone"] {

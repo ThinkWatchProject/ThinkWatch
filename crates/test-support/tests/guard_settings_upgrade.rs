@@ -221,8 +221,10 @@ async fn the_old_settings_are_converted_once_and_behave_as_before() {
             "mode": "enforce",
             "enable": ["email", "cn-mobile-phone"],
             "custom": [
-                {"name": "phone_us", "pattern": "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b", "label": "PHONE"},
-                {"name": "ipv4", "pattern": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b", "label": "IP"}
+                {"name": "phone_us", "pattern": "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b",
+                 "match": "regex", "case_sensitive": true, "label": "PHONE"},
+                {"name": "ipv4", "pattern": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
+                 "match": "regex", "case_sensitive": true, "label": "IP"}
             ]
         })
     );

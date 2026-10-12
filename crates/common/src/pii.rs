@@ -225,6 +225,8 @@ mod tests {
             custom: vec![CustomRedactRule {
                 name: "project".into(),
                 pattern: r"PRJ-\d{6}".into(),
+                matching: tw_guard::policy::ContentMatch::Regex,
+                case_sensitive: true,
                 label: None,
                 disabled: false,
             }],
