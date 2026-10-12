@@ -4,6 +4,7 @@ import { AlertCircle, Copy, Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -47,6 +48,7 @@ import {
 import {
   ACTIONS,
   DEFAULT_LABEL,
+  MATCHES,
   MAX_CODEPOINT_ITEMS,
   NEW_RULE_ACTION,
   checkCodepoints,
@@ -66,8 +68,6 @@ export interface RuleSeed {
   match: ContentMatch;
   action: RuleAction | null;
 }
-
-const MATCHES: readonly ContentMatch[] = ['contains', 'regex', 'codepoints'];
 
 function errorText(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
@@ -218,10 +218,11 @@ function TrialBox({
 /**
  * Create or edit a custom rule.
  *
- * Content rules match by text, regex or code points; redaction rules name
- * the placeholder a hit becomes; tool and content rules choose what a hit
- * does. Code points and the placeholder name are checked as they are typed;
- * a regex is checked by the server, which marks the sample as it changes.
+ * Content rules match by text, regex or code points; redaction rules match
+ * by text or regex, case-sensitive or not, and name the placeholder a hit
+ * becomes; tool and content rules choose what a hit does. Code points and
+ * the placeholder name are checked as they are typed; a regex is checked by
+ * the server, which marks the sample as it changes.
  */
 export function CustomRuleDialog({
   guard,
@@ -249,10 +250,13 @@ export function CustomRuleDialog({
   const was = editing ? patternOf(editing) : null;
 
   const [name, setName] = useState(editing?.id ?? seed?.name ?? '');
-  // Only content rules choose; the other guards' custom rules are regexes.
-  const [match, setMatch] = useState<ContentMatch>(
-    content ? (was?.match ?? seed?.match ?? 'contains') : 'regex',
-  );
+  // Content and redaction rules choose; tool rules are regexes.
+  const matches = MATCHES[guard];
+  const [match, setMatch] = useState<ContentMatch>(() => {
+    const written = was?.match ?? seed?.match;
+    return written && matches.includes(written) ? written : matches[0];
+  });
+  const [caseSensitive, setCaseSensitive] = useState(redact && (was?.caseSensitive ?? false));
   const [pattern, setPattern] = useState(was?.pattern ?? seed?.pattern ?? '');
   const [label, setLabel] = useState(editing?.label || DEFAULT_LABEL);
   const [action, setAction] = useState<RuleAction>(
@@ -287,7 +291,8 @@ export function CustomRuleDialog({
       ? {
           sample,
           pattern,
-          match: content ? match : undefined,
+          match: matches.length > 1 ? match : undefined,
+          case_sensitive: redact ? caseSensitive : undefined,
           label: redact ? label : undefined,
           // Redaction rules have no action; the server refuses one there.
           action: acts ? action : undefined,
@@ -295,19 +300,19 @@ export function CustomRuleDialog({
       : null;
   const trial = useTrial(guard, request);
 
-  const patternLabel = !content
-    ? t('contentSecurity.dialog.patternRegex')
-    : match === 'contains'
+  const patternLabel =
+    match === 'contains'
       ? t('contentSecurity.dialog.patternContains')
       : match === 'regex'
         ? t('contentSecurity.dialog.patternRegex')
         : t('contentSecurity.dialog.patternCodepoints');
-  const patternHint = !content
-    ? t(`contentSecurity.dialog.regexHint.${guard}`)
-    : match === 'contains'
-      ? t('contentSecurity.dialog.containsHint')
+  const patternHint =
+    match === 'contains'
+      ? redact
+        ? t('contentSecurity.dialog.redactContainsHint')
+        : t('contentSecurity.dialog.containsHint')
       : match === 'regex'
-        ? t('contentSecurity.dialog.regexHint.content')
+        ? t(`contentSecurity.dialog.regexHint.${guard}`)
         : t('contentSecurity.dialog.codepointsHint');
 
   async function save() {
@@ -318,6 +323,7 @@ export function CustomRuleDialog({
         name: trimmed,
         pattern,
         match,
+        caseSensitive: redact && caseSensitive,
         action: acts ? action : null,
         label: redact ? label : null,
         enabled: editing?.enabled ?? true,
@@ -360,13 +366,13 @@ export function CustomRuleDialog({
             />
           </Field>
 
-          {content && (
+          {matches.length > 1 && (
             <Field label={t('contentSecurity.dialog.matchKind')}>
-              <div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <Segmented
                   label={t('contentSecurity.dialog.matchKind')}
                   value={match}
-                  options={MATCHES.map((m) => ({
+                  options={matches.map((m) => ({
                     value: m,
                     label: t(`contentSecurity.dialog.match.${m}`),
                   }))}
@@ -376,6 +382,19 @@ export function CustomRuleDialog({
                   }}
                   disabled={readOnly}
                 />
+                {redact && (
+                  <label className="flex cursor-pointer items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={caseSensitive}
+                      onCheckedChange={(v) => {
+                        setError(null);
+                        setCaseSensitive(v === true);
+                      }}
+                      disabled={readOnly}
+                    />
+                    {t('contentSecurity.dialog.caseSensitive')}
+                  </label>
+                )}
               </div>
             </Field>
           )}
