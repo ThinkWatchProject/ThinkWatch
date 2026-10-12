@@ -11,6 +11,52 @@ target.
 
 ## [Unreleased]
 
+## [3.7.1] — 2026-10-12
+
+Tool-call inspection no longer crashes on a URL written right after a
+non-ASCII character, which cut streamed answers off, and redacted values
+come back exactly as the caller sent them. The thinkwatch-core crates move
+from v0.71.0 to v0.72.0.
+
+### Fixed
+
+- **A tool call with a URL right after a non-ASCII character no longer
+  breaks the answer.** Tool-call inspection, on in observe mode by default,
+  looks for URLs in the arguments of the tool calls an upstream returns.
+  When a non-ASCII character stood directly before a URL, as in
+  `文档见：https://…`, finding the URL's scheme cut that character in two
+  and the gateway panicked. A streamed answer stopped partway, with no
+  error event and no end of stream, and the request was logged with status
+  499 and `client_cancelled`, as if the client had left; on the Responses
+  WebSocket the whole connection closed. A whole answer was refused with a
+  500 whose body is `Service panicked`, and logged with status 499 as
+  cancelled before the response. No tool-call event was written for that
+  call. Rust's panic message (`… is not a char boundary …`, at tw-guard's
+  `tools/net.rs`) went to standard error, and for a whole answer the
+  gateway's log also has a `Service panicked` error. Affected since 3.0.0.
+- **Redacted values come back exactly as the caller sent them.** With
+  outbound redaction in enforce mode, a value is now remembered as it
+  reads rather than as the request's JSON wrote it, and is escaped for each
+  place it goes back into. A value holding characters that JSON writes
+  with an escape, such as the line breaks of a private key, a quote or a
+  backslash, came back wrong:
+  - In a streamed answer, put back into text (the answer's own, or the
+    input of a freeform tool such as Codex's `apply_patch`), a private key
+    arrived with `\n` in place of each line break.
+  - In a whole answer, including one served from the cache, such a value
+    inside a tool call's arguments, which are JSON written into a JSON
+    string, was escaped once instead of twice, so the arguments the client
+    received did not parse, or parsed to a different value.
+
+  A placeholder split across two pieces of a freeform tool's streamed
+  input (`response.custom_tool_call_input.delta`) also reached the client
+  as written; it is now put back.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.71.0 → v0.72.0. Only tw-guard changes.
+
 ## [3.7.0] — 2026-10-12
 
 Outbound redaction keeps away from the structure of a request: it no longer
@@ -2119,7 +2165,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.7.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.7.1...HEAD
+[3.7.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.1
 [3.7.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.0
 [3.6.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.6.0
 [3.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.5.0

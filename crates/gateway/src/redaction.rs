@@ -105,9 +105,12 @@ impl Redaction {
 /// Put the caller's values back into a whole answer's bytes. A stream is
 /// restored frame by frame instead (see `proxy::shaper`).
 ///
-/// The values went out as they were written in the request's JSON, escapes
-/// and all, and go back in the same way: a placeholder sits inside a JSON
-/// string in the answer, and so does what replaces it.
+/// The ledger holds each value as it reads, its JSON escapes undone, and
+/// each one goes back escaped as deeply as its placeholder sits: once in a
+/// JSON string, such as the answer's text, and twice inside a tool call's
+/// arguments, which are JSON written into a JSON string. So a private
+/// key's line breaks come back as line breaks, and the arguments still
+/// parse. Bytes around the placeholders are left exactly as they were.
 pub fn restore_body(ledger: &Ledger, body: &[u8]) -> Vec<u8> {
     if ledger.is_empty() {
         return body.to_vec();
@@ -297,6 +300,71 @@ mod tests {
         let back = restore_body(&ledger, answer);
         let v: serde_json::Value = serde_json::from_slice(&back).unwrap();
         assert_eq!(v["content"][0]["text"], format!("you sent {KEY}"));
+    }
+
+    const PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END RSA PRIVATE KEY-----";
+
+    /// The ledger of a request that pasted a private key, and the request.
+    fn pem_request() -> (String, Ledger) {
+        let r = redaction(Mode::Enforce);
+        let body = serde_json::json!({"messages": [
+            {"role": "user", "content": format!("deploy with this key:\n{PEM}")}
+        ]})
+        .to_string();
+        // In the JSON the key's line breaks are written `\n`.
+        assert!(body.contains("KEY-----\\nMIIB"), "{body}");
+        let (_, ledger) = r.look(body.as_bytes());
+        assert_eq!(ledger.len(), 1);
+        (body, ledger)
+    }
+
+    #[test]
+    fn a_value_with_line_breaks_comes_back_whole_in_text_and_in_tool_arguments() {
+        let (body, ledger) = pem_request();
+        let (sent, _) = redaction(Mode::Enforce).replace(body.into_bytes(), &ledger);
+        let sent = String::from_utf8(sent).unwrap();
+        assert!(
+            sent.contains("<<TW_SECRET_1>>") && !sent.contains("MIIB"),
+            "{sent}"
+        );
+
+        // A tool call's arguments are JSON inside a JSON string: the key
+        // goes back escaped twice there, once in the text.
+        let args = serde_json::json!({"path": "id_rsa", "content": "<<TW_SECRET_1>>"}).to_string();
+        let answer = serde_json::json!({"choices": [{"message": {
+            "content": "Saved <<TW_SECRET_1>>",
+            "tool_calls": [{"id": "c1", "type": "function",
+                "function": {"name": "write_file", "arguments": args}}]
+        }}]})
+        .to_string();
+        let back = restore_body(&ledger, answer.as_bytes());
+        let v: serde_json::Value = serde_json::from_slice(&back).expect("still JSON");
+        let m = &v["choices"][0]["message"];
+        assert_eq!(m["content"], format!("Saved {PEM}"));
+        let args: serde_json::Value = serde_json::from_str(
+            m["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .expect("the arguments still parse");
+        assert_eq!(args["content"], PEM);
+
+        // Anthropic's tool input is an object: one level, like the text.
+        let answer = serde_json::json!({"content": [
+            {"type": "tool_use", "id": "t1", "name": "write_file",
+             "input": {"content": "<<TW_SECRET_1>>"}}
+        ]})
+        .to_string();
+        let v: serde_json::Value =
+            serde_json::from_slice(&restore_body(&ledger, answer.as_bytes())).unwrap();
+        assert_eq!(v["content"][0]["input"]["content"], PEM);
+    }
+
+    #[test]
+    fn an_answer_with_nothing_to_restore_is_passed_on_byte_for_byte() {
+        let (_, ledger) = pem_request();
+        let answer = b"{ \"text\": \"caf\\u00e9\",\n  \"arguments\": \"{}\" }";
+        assert_eq!(restore_body(&ledger, answer), answer.to_vec());
     }
 
     #[test]
