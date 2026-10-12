@@ -706,23 +706,34 @@ mod tests {
     #[test]
     fn only_the_tail_that_could_still_match_is_held_back() {
         use tw_guard::policy::{ContentAction, Mode};
-        let mut s =
-            StreamShaper::new("m".into(), &ctx(None), Dialect::Chat).filtering(answer_filter(
-                Mode::Enforce,
-                "Polaris",
-                ContentAction::Strip,
-                Dialect::Chat,
-            ));
-        // Seven characters to find: at most six are held.
-        let out = s.process(chat_chunk("a long answer that goes on").as_bytes());
-        let sent = chat_text(&out);
-        assert!(
-            sent.len() >= "a long answer that goes on".len() - 6,
-            "{sent}"
-        );
-        let mut rest = s.finish();
-        rest.splice(0..0, out);
-        assert_eq!(chat_text(&rest), "a long answer that goes on");
+        const TEXT: &str = "a long answer that goes on";
+        // How many characters of TEXT reach the client at once, with one
+        // rule looking for the seven characters of "Polaris".
+        let sent_at_once = |action: ContentAction| {
+            let mut s = StreamShaper::new("m".into(), &ctx(None), Dialect::Chat).filtering(
+                answer_filter(Mode::Enforce, "Polaris", action, Dialect::Chat),
+            );
+            let out = s.process(chat_chunk(TEXT).as_bytes());
+            let sent = chat_text(&out);
+            let mut all = out;
+            all.extend(s.finish());
+            assert_eq!(
+                chat_text(&all),
+                TEXT,
+                "{action:?}: all of it goes out in the end"
+            );
+            sent.chars().count()
+        };
+        let len = TEXT.chars().count();
+        // A replacement with text: at most the keyword's length less one.
+        assert!(sent_at_once(ContentAction::Replace) >= len - 6);
+        // A deletion holds back as many again: text that comes together
+        // where something was deleted is checked again.
+        let strip = sent_at_once(ContentAction::Strip);
+        assert!(strip >= len - 12, "{strip}");
+        assert!(strip <= len - 6, "{strip}");
+        // Recording changes nothing, so nothing waits.
+        assert_eq!(sent_at_once(ContentAction::Record), len);
     }
 
     #[test]

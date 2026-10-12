@@ -42,30 +42,61 @@ they match with a text of their own.
   (`scope: [request]`, `[response]` or `[request, response]`; left out:
   requests). On an answer the rule reads the text the client is shown and
   the input of freeform tools such as Codex's `apply_patch`, not tool calls
-  and not thinking. It applies to whole answers, streamed answers on every
+  and not reasoning. It applies to whole answers, streamed answers on every
   API surface, answers served from the cache and the Responses WebSocket,
   in the client's format, after redacted values are restored and before
-  tool calls are inspected. A streamed answer is not held back whole: each
-  text holds back only the tail that could still grow into a match (for a
-  keyword, its length less one character; for a regular expression, at
-  most 256 characters, so of a longer match the beginning may already have
-  gone out). What a rule deletes or replaces never reaches the client, and
-  the frames that repeat the whole text (`response.output_text.done`,
-  `response.output_item.done`, `response.completed`) say what the client
-  received. The rules always run on the answer with the caller's redacted
-  values restored, so a rule never cuts into a placeholder. The response
-  cache keeps the answer unfiltered, in placeholder form, and the rules in
-  force run again on every cache hit; the request's log row stores the
-  answer as the client received it, with the caller's values masked again
-  as before: by the redaction rules, and wherever a value the request's
-  placeholders stand for appears as written, so a value its rule
-  recognises only in context (a connection string's password) is masked
-  even when the model repeats it alone. A rule that checks answers cannot refuse, and
+  tool calls are inspected. A rule that checks answers cannot refuse, and
   cannot match by code points; such a policy is refused when saved.
+  - **Streamed answers are never held back whole.** Each text holds back
+    only the last characters that could still grow into a match: at most
+    one fewer than the longest keyword, and at most 256 for a regular
+    expression, so of a longer match the beginning may already have been
+    sent. Under On, when a rule deletes (or replaces with an empty text,
+    or is a regular expression that looks at the next character, such as
+    `\b` or `$`), as many characters again are held back.
+  - **Deleting is repeated until no match is left.** Text that comes
+    together where something was deleted is checked again (`sesecretcret`
+    becomes empty, not `secret`); a replacement is never checked again.
+    A whole answer always comes out clean, and a streamed one comes out the
+    same as the whole one wherever it is split, as long as a match is
+    nested no more than one level deep. A match nested deeper may have its
+    beginning sent already; the rest of it is deleted, so the client never
+    receives a whole match, except a regular expression that looks at the
+    next character whose match lies entirely in text already sent. After
+    64 further passes, what is still changing is dropped from the answer.
+  - **Anchored regular expressions** (`^`, `$`, `\A`, `\z`) are checked
+    once on the model's own text of an answer, and a deletion at the very
+    start or end of a text does not make a new match, so whole and
+    streamed answers agree. Rules that only record see the model's own
+    text, not what deletions leave.
+  - **What the client receives is consistent.** The frames that repeat the
+    whole text (`response.output_text.done`, `response.output_item.done`,
+    `response.completed`) say what the client received. Under On, when a
+    rule that checks answers deletes or replaces, logprobs are removed from
+    streamed answers, and from a whole answer whose text changed, since
+    they repeat the text token by token. Text held back is sent when the
+    stream ends, breaks off or carries an error from the upstream. On the
+    Responses WebSocket each turn is filtered as a stream of its own.
+  - **The rules always run on the answer with the caller's redacted values
+    restored**, so a rule never cuts into a placeholder. The response cache
+    keeps the answer unfiltered, in placeholder form, and the rules in
+    force run again on every cache hit. The request's log row stores the
+    answer as the client received it, with the caller's values masked
+    again: by the redaction rules, and wherever a value the request's
+    placeholders stand for appears as written, so a value its rule
+    recognises only in context (a connection string's password) is masked
+    even when the model repeats it alone. In a JSON body that masking
+    touches only the contents of strings (also escaped inside them), never
+    numbers, literals or structure, so the stored body stays valid JSON;
+    other stored text is also searched outside strings, skipping whole
+    numbers and literals.
 - **Replace.** A content rule can replace what it matches with a text of
   its own (`action: replace`, `replacement`, `***` when left out, at most
   200 characters), in requests and in answers. A replacement is not put
-  back.
+  back, and is not checked again. In a request, deleting and replacing are
+  repeated until no match is left (a keyword split by hidden characters is
+  caught once they are gone); a part still changing after 64 rounds is
+  emptied.
 - **Case-sensitive content rules** (`case_sensitive: true`), as redaction
   rules already were.
 - **Record-only redaction rules.** A redaction rule's action is to replace
