@@ -110,9 +110,18 @@ export function MatcherText({ m }: { m: Matcher }) {
     case 'cn-mobile-phone':
       return t('contentSecurity.matcher.cnMobilePhone');
     case 'regex':
-      return fill(t('contentSecurity.matcher.regex', RAW), { pattern: <Code>{m.pattern}</Code> });
+      return fill(
+        t(m.case_sensitive ? 'contentSecurity.matcher.regexCaseSensitive' : 'contentSecurity.matcher.regex', RAW),
+        { pattern: <Code>{m.pattern}</Code> },
+      );
     case 'contains':
-      return fill(t('contentSecurity.matcher.contains', RAW), { text: <Code>{m.text}</Code> });
+      return fill(
+        t(
+          m.case_sensitive ? 'contentSecurity.matcher.containsCaseSensitive' : 'contentSecurity.matcher.contains',
+          RAW,
+        ),
+        { text: <Code>{m.text}</Code> },
+      );
     case 'codepoints':
       return fill(t('contentSecurity.matcher.codepoints', RAW), {
         ranges: <Codepoints ranges={m.ranges} />,

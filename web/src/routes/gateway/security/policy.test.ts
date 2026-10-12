@@ -4,6 +4,7 @@ import {
   checkCodepoints,
   customRuleView,
   isLabel,
+  patternOf,
   placeholder,
   policyOf,
   withAction,
@@ -41,6 +42,7 @@ const content: GuardDetail = {
       name: 'Project X',
       pattern: 'project-x',
       match: 'contains',
+      caseSensitive: false,
       action: 'strip',
       label: null,
       enabled: true,
@@ -49,6 +51,7 @@ const content: GuardDetail = {
       name: 'Tags',
       pattern: 'U+E0000–U+E007F, U+200B',
       match: 'codepoints',
+      caseSensitive: false,
       action: 'block',
       label: null,
       enabled: false,
@@ -88,8 +91,9 @@ describe('policyOf', () => {
       rules: [
         builtin({ id: 'internal-ip', kind: 'internal', matcher: { kind: 'private-ip' }, on_by_default: false, label: 'SECRET' }),
         builtin({ id: 'jwt', kind: 'jwt', matcher: { kind: 'jwt' }, enabled: false, label: 'SECRET' }),
-        customRuleView({ name: 'Project', pattern: 'PRJ-\\d{6}', match: 'regex', action: null, label: 'PROJECT', enabled: true }),
-        { ...customRuleView({ name: 'Ticket', pattern: 'T-\\d+', match: 'regex', action: null, label: null, enabled: true }), label: null },
+        customRuleView({ name: 'Project', pattern: 'PRJ-\\d{6}', match: 'regex', caseSensitive: true, action: null, label: 'PROJECT', enabled: true }),
+        { ...customRuleView({ name: 'Ticket', pattern: 'T-\\d+', match: 'regex', caseSensitive: false, action: null, label: null, enabled: true }), label: null },
+        customRuleView({ name: 'Codename', pattern: 'blue.fox', match: 'contains', caseSensitive: false, action: null, label: null, enabled: false }),
       ],
     }
     expect(policyOf('redact', d)).toEqual({
@@ -97,9 +101,28 @@ describe('policyOf', () => {
       enable: ['internal-ip'],
       disable: ['jwt'],
       custom: [
-        { name: 'Project', pattern: 'PRJ-\\d{6}', label: 'PROJECT' },
-        { name: 'Ticket', pattern: 'T-\\d+', label: 'SECRET' },
+        { name: 'Project', pattern: 'PRJ-\\d{6}', match: 'regex', case_sensitive: true, label: 'PROJECT' },
+        { name: 'Ticket', pattern: 'T-\\d+', match: 'regex', label: 'SECRET' },
+        { name: 'Codename', pattern: 'blue.fox', match: 'contains', label: 'SECRET', disabled: true },
       ],
+    })
+  })
+
+  it('reads how a custom redaction rule matches back from the view', () => {
+    const view = (matcher: SecurityRuleView['matcher']): SecurityRuleView => ({
+      ...customRuleView({ name: 'r', pattern: '', match: 'contains', caseSensitive: false, action: null, label: null, enabled: true }),
+      matcher,
+    })
+    expect(patternOf(view({ kind: 'contains', text: 'a.b' }))).toEqual({ pattern: 'a.b', match: 'contains', caseSensitive: false })
+    expect(patternOf(view({ kind: 'regex', pattern: 'a+', case_sensitive: true }))).toEqual({
+      pattern: 'a+',
+      match: 'regex',
+      caseSensitive: true,
+    })
+    expect(customRuleView({ name: 'r', pattern: 'x', match: 'regex', caseSensitive: true, action: null, label: null, enabled: true }).matcher).toEqual({
+      kind: 'regex',
+      pattern: 'x',
+      case_sensitive: true,
     })
   })
 
@@ -109,7 +132,7 @@ describe('policyOf', () => {
       rules: [
         builtin({ id: 'rm-rf-root', kind: 'command', matcher: { kind: 'regex', pattern: 'rm' }, action: 'record', default_action: 'cut' }),
         builtin({ id: 'chmod-777', kind: 'command', matcher: { kind: 'regex', pattern: 'chmod' }, action: 'cut', default_action: 'cut' }),
-        customRuleView({ name: 'kubectl', pattern: 'kubectl\\s+delete', match: 'regex', action: 'cut', label: null, enabled: true }),
+        customRuleView({ name: 'kubectl', pattern: 'kubectl\\s+delete', match: 'regex', caseSensitive: false, action: 'cut', label: null, enabled: true }),
       ],
     }
     expect(policyOf('inspect_tools', d)).toEqual({
@@ -137,7 +160,7 @@ describe('edits', () => {
       mode: 'observe',
       rules: [
         builtin({ id: 'dan', action: 'block', default_action: 'block' }),
-        customRuleView({ name: 'dan', pattern: 'dan', match: 'contains', action: 'record', label: null, enabled: true }),
+        customRuleView({ name: 'dan', pattern: 'dan', match: 'contains', caseSensitive: false, action: 'record', label: null, enabled: true }),
       ],
     }
     const next = withEnabled(d, { id: 'dan', custom: true }, false)
@@ -148,14 +171,14 @@ describe('edits', () => {
     const renamed = withCustom(
       content,
       'Project X',
-      customRuleView({ name: 'Project Y', pattern: 'project-y', match: 'regex', action: 'block', label: null, enabled: true }),
+      customRuleView({ name: 'Project Y', pattern: 'project-y', match: 'regex', caseSensitive: false, action: 'block', label: null, enabled: true }),
     )
     expect(renamed.rules.filter((r) => r.custom).map((r) => r.id)).toEqual(['Project Y', 'Tags'])
 
     const added = withCustom(
       content,
       null,
-      customRuleView({ name: 'New', pattern: 'x', match: 'contains', action: 'record', label: null, enabled: true }),
+      customRuleView({ name: 'New', pattern: 'x', match: 'contains', caseSensitive: false, action: 'record', label: null, enabled: true }),
     )
     expect(added.rules.at(-1)?.id).toBe('New')
     expect(withoutCustom(added, 'New').rules).toHaveLength(content.rules.length)

@@ -235,10 +235,12 @@
         "regex": "正则",
         "codepoints": "码位"
       },
+      "caseSensitive": "区分大小写",
       "patternContains": "匹配内容",
       "patternRegex": "正则表达式",
       "patternCodepoints": "码位",
       "containsHint": "在用户消息和工具结果中查找这段文字，不区分大小写，首尾空格也参与匹配。",
+      "redactContainsHint": "这段文字出现的每一处都替换为占位符。按原样查找：. 和 * 等字符没有特殊含义，首尾空格也参与匹配。",
       "codepointsHint": "码位或码位范围，多个之间用逗号分隔，如 U+200B, U+E0000–U+E007F",
       "regexHint": {
         "redact": "匹配到的整段内容替换为占位符。",
@@ -293,8 +295,10 @@
       "bankCard": "{{networks}} 的卡号：号段、位数对得上并通过 Luhn 校验；公开的测试卡号除外",
       "email": "邮箱地址，如 {{example}}",
       "cnMobilePhone": "11 位手机号，以 13–19 开头，前后不紧挨其他数字",
-      "regex": "正则 {{pattern}}",
+      "regex": "正则 {{pattern}}，不区分大小写",
+      "regexCaseSensitive": "正则 {{pattern}}，区分大小写",
       "contains": "包含 {{text}}，不区分大小写",
+      "containsCaseSensitive": "包含 {{text}}，区分大小写",
       "codepoints": "码位 {{ranges}}",
       "other": "内置判据"
     },

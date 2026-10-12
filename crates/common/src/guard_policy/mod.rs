@@ -374,8 +374,8 @@ mod tests {
         assert!(ids.contains(&"curl-pipe-sh".to_string()));
 
         let redact: RedactPolicy = serde_json::from_value(json!({"custom": [
-            {"name": "bad", "pattern": "("},
-            {"name": "good", "pattern": "PRJ-\\d+"}
+            {"name": "bad", "pattern": "(", "match": "regex"},
+            {"name": "good", "pattern": "PRJ-\\d+", "match": "regex"}
         ]}))
         .unwrap();
         let rules = redact_rules(&redact);

@@ -207,16 +207,32 @@ describe('GatewaySecurityPage', () => {
 
     await user.click(await screen.findByRole('button', { name: 'New rule' }))
     const dialog = await screen.findByRole('dialog')
-    await user.type(within(dialog).getByLabelText('Regular expression'), 'PRJ-\\d+')
+    // Text as written, ignoring case, unless the rule says otherwise.
+    expect(within(dialog).getByRole('radio', { name: 'Contains' })).toBeChecked()
+    expect(within(dialog).queryByRole('radio', { name: 'Code points' })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('checkbox', { name: 'Case-sensitive' })).not.toBeChecked()
+    await user.type(within(dialog).getByLabelText('Text to find'), 'PRJ-')
+    await user.type(within(dialog).getByLabelText('Test text'), 'see prj-12')
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith(
+        '/api/admin/security/redact/test',
+        expect.objectContaining({
+          body: { sample: 'see prj-12', pattern: 'PRJ-', match: 'contains', case_sensitive: false, label: 'SECRET' },
+        }),
+      ),
+    )
+
+    await user.click(within(dialog).getByRole('radio', { name: 'Regex' }))
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Case-sensitive' }))
+    await user.type(within(dialog).getByLabelText('Regular expression'), '\\d+')
     await user.clear(within(dialog).getByLabelText('Placeholder name'))
     await user.type(within(dialog).getByLabelText('Placeholder name'), 'PROJECT')
-    await user.type(within(dialog).getByLabelText('Test text'), 'see PRJ-12')
 
     await waitFor(() =>
       expect(api).toHaveBeenCalledWith(
         '/api/admin/security/redact/test',
         expect.objectContaining({
-          body: { sample: 'see PRJ-12', pattern: 'PRJ-\\d+', label: 'PROJECT' },
+          body: { sample: 'see prj-12', pattern: 'PRJ-\\d+', match: 'regex', case_sensitive: true, label: 'PROJECT' },
         }),
       ),
     )
@@ -230,6 +246,7 @@ describe('GatewaySecurityPage', () => {
     await user.click(await screen.findByRole('button', { name: 'New rule' }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByLabelText('Name'), 'Broken')
+    await user.click(within(dialog).getByRole('radio', { name: 'Regex' }))
     await user.type(within(dialog).getByLabelText('Regular expression'), 'PRJ-(')
     await user.click(within(dialog).getByRole('button', { name: 'Create' }))
 
@@ -238,7 +255,7 @@ describe('GatewaySecurityPage', () => {
       settings: {
         'security.redact': {
           mode: 'observe',
-          custom: [{ name: 'Broken', pattern: 'PRJ-(', label: 'SECRET' }],
+          custom: [{ name: 'Broken', pattern: 'PRJ-(', match: 'regex', label: 'SECRET' }],
         },
       },
     })
