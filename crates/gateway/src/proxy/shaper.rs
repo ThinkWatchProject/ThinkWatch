@@ -14,10 +14,12 @@
 //! **Redacted values.** A whole response has its placeholders intact and
 //! is restored in one pass (`redaction::restore_body`). A stream does not:
 //! `<<TW_EM` can end one frame and `AIL_1>>` start the next, with frame
-//! structure in between. Restoration happens per frame, on the text and the
-//! tool arguments of whichever format this is, with one lane per content
-//! block or tool call — thinkwatch-core's `FrameRestorer`, the same one the
-//! desktop gateway uses.
+//! structure in between. Restoration happens per frame, on the text, the
+//! tool arguments and the freeform tool input (Codex's `apply_patch`) of
+//! whichever format this is, with one lane per content block or tool call —
+//! thinkwatch-core's `FrameRestorer`, the same one the desktop gateway uses.
+//! A value goes into text as it reads and into tool arguments, which are
+//! JSON, escaped.
 //!
 //! **Usage.** A Chat stream is always sent upstream asking for its usage
 //! chunk, or there would be nothing to bill. When the caller did not ask
@@ -467,6 +469,91 @@ mod tests {
             })
             .collect();
         assert_eq!(args, r#"{"to":"a@x.com"}"#);
+    }
+
+    const PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END RSA PRIVATE KEY-----";
+
+    /// A ledger that issued `<<TW_SECRET_1>>` for a private key, found in a
+    /// request body where its line breaks are written `\n`.
+    fn pem_ctx() -> Ledger {
+        let r = crate::redaction::Redaction::new(&tw_guard::policy::RedactPolicy {
+            mode: tw_guard::policy::Mode::Enforce,
+            ..Default::default()
+        });
+        let body = serde_json::json!({"text": PEM}).to_string();
+        let ledger = r.look(body.as_bytes()).1;
+        assert_eq!(ledger.len(), 1);
+        ledger
+    }
+
+    #[test]
+    fn a_private_key_in_streamed_text_comes_back_with_its_line_breaks() {
+        let mut s = StreamShaper::new("m".into(), &pem_ctx(), Dialect::Anthropic);
+        let ev = |t: &str| {
+            format!(
+                "event: content_block_delta\ndata: {}\n\n",
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":t}})
+            )
+        };
+        let mut out = s.process(ev("key: <<TW_SEC").as_bytes());
+        out.extend(s.process(ev("RET_1>> done").as_bytes()));
+        out.extend(s.finish());
+        let text: String = frames(&out)
+            .iter()
+            .filter_map(|f| f["delta"]["text"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(text, format!("key: {PEM} done"));
+    }
+
+    #[test]
+    fn a_private_key_in_streamed_tool_arguments_leaves_them_parseable() {
+        let mut s = StreamShaper::new("m".into(), &pem_ctx(), Dialect::Chat);
+        let call = |args: &str| {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({"model":"up","choices":[{"index":0,"delta":{"tool_calls":[
+                    {"index":0,"function":{"arguments":args}}
+                ]},"finish_reason":null}]})
+            )
+        };
+        let mut out = s.process(call(r#"{"content":"<<TW_SECRET"#).as_bytes());
+        out.extend(s.process(call(r#"_1>>"}"#).as_bytes()));
+        out.extend(s.finish());
+        let args: String = frames(&out)
+            .iter()
+            .filter_map(|f| {
+                f["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        let args: Value = serde_json::from_str(&args).expect("the arguments parse");
+        assert_eq!(args["content"], PEM);
+    }
+
+    #[test]
+    fn a_freeform_tool_input_gets_a_split_placeholder_back() {
+        // Codex's `apply_patch` streams its input as plain text, in its own
+        // event; a placeholder cut across two of them is put back too.
+        let mut s = StreamShaper::new("m".into(), &pem_ctx(), Dialect::Responses);
+        let delta = |d: &str| {
+            format!(
+                "event: response.custom_tool_call_input.delta\ndata: {}\n\n",
+                serde_json::json!({"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":1,"delta":d})
+            )
+        };
+        let mut out = s.process(delta("*** Begin Patch\n+key = <<TW_").as_bytes());
+        out.extend(s.process(delta("SECRET_1>>\n*** End Patch").as_bytes()));
+        out.extend(s.finish());
+        let input: String = frames(&out)
+            .iter()
+            .filter(|f| f["type"] == "response.custom_tool_call_input.delta")
+            .filter_map(|f| f["delta"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            input,
+            format!("*** Begin Patch\n+key = {PEM}\n*** End Patch")
+        );
     }
 
     #[test]
