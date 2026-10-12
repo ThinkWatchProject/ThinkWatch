@@ -51,12 +51,16 @@ they match with a text of their own.
     only the last characters that could still grow into a match: at most
     one fewer than the longest keyword, and at most 256 for a regular
     expression, so of a longer match the beginning may already have been
-    sent. Under On, when a rule deletes (or replaces with an empty text,
-    or is a regular expression that looks at the next character, such as
-    `\b` or `$`), as many characters again are held back.
+    sent; a regular expression that looks at the next character (`\b`,
+    `$`) holds back one more. Under On, when a rule deletes (`strip`, or
+    `replace` with an empty text), as many characters again are held back;
+    deletions at the very start of a text do not add to that.
   - **Deleting is repeated until no match is left.** Text that comes
     together where something was deleted is checked again (`sesecretcret`
-    becomes empty, not `secret`); a replacement is never checked again.
+    becomes empty, not `secret`); a replacement is never checked again,
+    and only a deletion joins text: a rule that looks at the next
+    character (`\d{4}\b`) does not match again next to a non-empty
+    replacement.
     A whole answer always comes out clean, and a streamed one comes out the
     same as the whole one wherever it is split, as long as a match is
     nested no more than one level deep. A match nested deeper may have its
@@ -85,11 +89,13 @@ they match with a text of their own.
     again: by the redaction rules, and wherever a value the request's
     placeholders stand for appears as written, so a value its rule
     recognises only in context (a connection string's password) is masked
-    even when the model repeats it alone. In a JSON body that masking
-    touches only the contents of strings (also escaped inside them), never
-    numbers, literals or structure, so the stored body stays valid JSON;
-    other stored text is also searched outside strings, skipping whole
-    numbers and literals.
+    even when the model repeats it alone. In a body that is valid JSON
+    that masking touches only the contents of strings (also written
+    escaped inside them, up to six levels deep), never numbers, literals or
+    structure, so the stored body stays valid JSON. Stored text that is not
+    strictly valid JSON (an event stream, a plain-text error) is masked
+    wherever a value appears, numbers included. Where values overlap, the
+    longest one at each place is masked.
 - **Replace.** A content rule can replace what it matches with a text of
   its own (`action: replace`, `replacement`, `***` when left out, at most
   200 characters), in requests and in answers. A replacement is not put
