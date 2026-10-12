@@ -692,6 +692,28 @@ async fn saving_a_policy_the_gateway_cannot_run_is_refused() {
             json!({"disable": ["no-such-rule"]}),
             "no-such-rule",
         ),
+        (
+            "security.content",
+            json!({"custom": [{"name": "a", "pattern": "x", "scope": ["response"], "action": "block"}]}),
+            "checks answers and blocks",
+        ),
+        (
+            "security.content",
+            json!({"custom": [{"name": "a", "pattern": "U+200B", "match": "codepoints",
+                                "scope": ["request", "response"]}]}),
+            "checks answers",
+        ),
+        (
+            "security.content",
+            json!({"custom": [{"name": "a", "pattern": "x", "action": "replace",
+                                "replacement": "r".repeat(201)}]}),
+            "replacement text",
+        ),
+        (
+            "security.redact",
+            json!({"actions": {"email": "strip"}}),
+            "security.redact",
+        ),
     ] {
         let r = con
             .patch("/api/admin/settings", json!({"settings": {key: value}}))
@@ -873,4 +895,304 @@ async fn a_policy_past_the_limits_is_refused() {
         .unwrap();
     assert_eq!(r.status.as_u16(), 400, "{}", r.text());
     assert!(r.text().contains("built-in rule"), "{}", r.text());
+}
+
+// ---------------------------------------------------------------- answers
+
+/// A content rule that checks answers, in enforce mode.
+fn answer_rule(pattern: &str, action: &str) -> Value {
+    json!({"mode": "enforce", "custom": [
+        {"name": "Codename", "pattern": pattern, "scope": ["response"], "action": action}
+    ]})
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_answer_rule_replaces_the_text_on_every_surface_streamed_or_whole() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("security.content", answer_rule("Polaris", "replace"))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-answer").await;
+
+    for stream in [false, true] {
+        for (path, body) in every_surface("cf-answer", "Polaris ships, polaris lands", stream) {
+            let (status, text) = post_as(&app, &key, &path, &body).await;
+            assert_eq!(status, 200, "{path} stream={stream}: {text}");
+            // The echo answers with the caller's words; the client reads
+            // them with the codename replaced.
+            assert!(
+                !text.to_lowercase().contains("polaris"),
+                "{path} stream={stream}: {text}"
+            );
+            // A stream may carry it over several frames (and Responses
+            // repeats it whole at the end); a whole answer in one piece.
+            assert!(text.contains("***"), "{path} stream={stream}: {text}");
+            if !stream {
+                assert!(text.contains("*** ships, *** lands"), "{path}: {text}");
+            }
+        }
+    }
+    // The request is not the rule's: it went out as written.
+    for r in upstream.received_requests().await {
+        assert!(String::from_utf8_lossy(&r.body).contains("Polaris ships"));
+    }
+    let events = audited(&app, &user_id, "gateway.content_replaced").await;
+    let e = &events[0];
+    assert_eq!(e["rule"], "Codename", "{e}");
+    assert_eq!(e["direction"], "response", "{e}");
+    assert_eq!(e["part"], "response_text", "{e}");
+    assert_eq!(e["outcome"], "replaced");
+    assert_eq!(e["mode"], "enforce");
+    assert_eq!(e["count"], 2, "{e}");
+    assert!(
+        !e.to_string().contains("ships"),
+        "no text of the answer: {e}"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_stored_answer_is_the_one_the_client_received() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("security.content", answer_rule("Polaris", "strip"))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-stored").await;
+    for stream in [false, true] {
+        let (status, text) = post_as(
+            &app,
+            &key,
+            "/v1/chat/completions",
+            &json!({"model": "cf-stored", "stream": stream, "temperature": 0.5,
+                    "messages": [{"role": "user", "content": "the Polaris plan"}]}),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        assert!(!text.contains("Polaris"), "{text}");
+    }
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        bodies = ch
+            .query("SELECT ifNull(response_body, '') FROM gateway_logs WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if bodies.len() >= 2 && bodies.iter().all(|b| !b.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    for b in bodies {
+        assert!(!b.contains("Polaris"), "{b}");
+        assert!(b.contains("the  plan"), "{b}");
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn monitoring_an_answer_rule_records_and_changes_nothing() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "observe", "custom": [
+            {"name": "Codename", "pattern": "Polaris", "scope": ["request", "response"], "action": "replace"}
+        ]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-answer-observe").await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "cf-answer-observe", "stream": true,
+                "messages": [{"role": "user", "content": "Polaris ships"}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains("Polaris ships"), "{text}");
+    let events = audited(&app, &user_id, "gateway.content_flagged").await;
+    let mut directions: Vec<&str> = events
+        .iter()
+        .map(|e| e["direction"].as_str().unwrap_or(""))
+        .collect();
+    // The events land in batches: wait for both sides.
+    if directions.len() < 2 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let events = audited(&app, &user_id, "gateway.content_flagged").await;
+    directions = events
+        .iter()
+        .map(|e| e["direction"].as_str().unwrap_or(""))
+        .collect();
+    directions.sort_unstable();
+    assert_eq!(directions, ["request", "response"], "{events:?}");
+    assert!(
+        events
+            .iter()
+            .all(|e| e["mode"] == "observe" && e["outcome"] == "recorded")
+    );
+    assert!(
+        events.iter().all(|e| e["action"] == "replace"),
+        "what On would do"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_replacing_rule_on_requests_writes_its_text_before_the_request_goes_out() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce", "custom": [
+            {"name": "Codename", "pattern": "Polaris", "case_sensitive": true,
+             "action": "replace", "replacement": "[codename]"}
+        ]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-request-replace").await;
+    for stream in [false, true] {
+        for (path, body) in every_surface("cf-request-replace", "Polaris and polaris", stream) {
+            let (status, text) = post_as(&app, &key, &path, &body).await;
+            assert_eq!(status, 200, "{path} stream={stream}: {text}");
+        }
+    }
+    for r in upstream.received_requests().await {
+        let body = String::from_utf8_lossy(&r.body);
+        // Case-sensitive: only the capitalised one.
+        assert!(body.contains("[codename] and polaris"), "{body}");
+    }
+    let events = audited(&app, &user_id, "gateway.content_replaced").await;
+    assert_eq!(events[0]["direction"], "request", "{events:?}");
+    assert_eq!(
+        events[0]["replacement"],
+        Value::Null,
+        "the request side names the rule only"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_redaction_rule_that_records_sends_the_value_and_records_it() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.redact",
+        json!({"mode": "enforce", "actions": {"anthropic-api-key": "record"}, "custom": [
+            {"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}", "match": "regex", "label": "SSN"}
+        ]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "redact-record").await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "redact-record", "messages": [
+            {"role": "user", "content": format!("{KEY} and 123-45-6789")}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let body = String::from_utf8_lossy(&upstream.received_requests().await[0].body).into_owned();
+    assert!(body.contains(KEY), "the key only recorded: {body}");
+    assert!(
+        body.contains("<<TW_SSN_1>>") && !body.contains("123-45-6789"),
+        "{body}"
+    );
+
+    let flagged = audited(&app, &user_id, "gateway.redaction_flagged").await;
+    assert_eq!(flagged[0]["rule"], "anthropic-api-key", "{flagged:?}");
+    assert_eq!(flagged[0]["action"], "record");
+    assert_eq!(flagged[0]["mode"], "enforce");
+    let replaced = audited(&app, &user_id, "gateway.redaction_replaced").await;
+    assert_eq!(replaced[0]["rule"], "ssn", "{replaced:?}");
+    assert_eq!(replaced[0]["action"], "placeholder");
+
+    // The console's log reads both back in one query.
+    let con = admin_session(&app).await;
+    let mut found = Vec::new();
+    for _ in 0..100 {
+        let r: Value = con
+            .get(&format!(
+                "/api/audit/logs?user_id={user_id}&action=gateway.redaction_flagged,gateway.redaction_replaced"
+            ))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        found = r["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["action"].as_str().unwrap().to_string())
+            .collect();
+        if found.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    found.sort();
+    assert_eq!(
+        found,
+        ["gateway.redaction_flagged", "gateway.redaction_replaced"]
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_view_and_the_trial_know_what_a_content_rule_checks() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+    con.patch(
+        "/api/admin/settings",
+        json!({"settings": {"security.content": {"mode": "enforce", "custom": [
+            {"name": "Codename", "pattern": "Polaris", "scope": ["request", "response"],
+             "action": "replace", "replacement": "[x]"}
+        ]}}}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    let view: Value = con
+        .get("/api/admin/security")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let rules = view["content"]["rules"].as_array().unwrap();
+    let mine = rules.iter().find(|r| r["id"] == "Codename").unwrap();
+    assert_eq!(mine["scope"], json!(["request", "response"]), "{mine}");
+    assert_eq!(mine["replacement"], "[x]", "{mine}");
+    assert_eq!(mine["action"], "replace");
+    let tags = rules.iter().find(|r| r["id"] == "unicode-tags").unwrap();
+    assert_eq!(
+        tags["scope"],
+        json!(["request"]),
+        "built-in rules check requests: {tags}"
+    );
+    let email = view["redact"]["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "email")
+        .unwrap();
+    assert_eq!(email["default_action"], "placeholder", "{email}");
+
+    let r: Value = con
+        .post(
+            "/api/admin/security/content/test",
+            json!({"sample": "the Polaris plan", "pattern": "polaris", "action": "replace",
+                   "replacement": "[y]", "scope": "response"}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(r["output"], "the [y] plan", "{r}");
 }

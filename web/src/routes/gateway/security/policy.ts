@@ -6,26 +6,32 @@
 // rule goes into `enable` when it is on but off out of the box, into
 // `disable` the other way round, and into `actions` when its action is not
 // the factory one; custom rules are written back from their matcher. What
-// the table shows is therefore exactly what gets saved.
+// the table shows is therefore exactly what gets saved. A field left at its
+// default (a content rule checking requests only, a replacement of `***`,
+// a redaction rule replacing with a placeholder) is left out, so a policy
+// saved by an earlier console reads the same.
 
-import type {
-  ContentAction,
-  ContentMatch,
-  ContentPolicy,
-  CustomContentRule,
-  CustomRedactRule,
-  CustomToolRule,
-  Guard,
-  GuardDetail,
-  GuardMode,
-  GuardPolicies,
-  Matcher,
-  RedactMatch,
-  RedactPolicy,
-  RuleAction,
-  SecurityRuleView,
-  ToolAction,
-  ToolPolicy,
+import {
+  DEFAULT_REPLACEMENT,
+  type ContentAction,
+  type ContentMatch,
+  type ContentPolicy,
+  type CustomContentRule,
+  type CustomRedactRule,
+  type CustomToolRule,
+  type Guard,
+  type GuardDetail,
+  type GuardMode,
+  type GuardPolicies,
+  type Matcher,
+  type RedactAction,
+  type RedactMatch,
+  type RedactPolicy,
+  type RuleAction,
+  type RuleScope,
+  type SecurityRuleView,
+  type ToolAction,
+  type ToolPolicy,
 } from '@/lib/security-types';
 
 /** Placeholder label a redaction rule gets when none is written. */
@@ -43,24 +49,66 @@ export function placeholder(label: string | null | undefined, n = 1): string {
   return `<<TW_${label || DEFAULT_LABEL}_${n}>>`;
 }
 
-/** The guards whose rules carry an action of their own. */
-export type ActionGuard = 'inspect_tools' | 'content';
+/** The actions a rule can take, strongest first. */
+export const ACTIONS: Record<Guard, readonly RuleAction[]> = {
+  redact: ['placeholder', 'record'],
+  inspect_tools: ['cut', 'record'],
+  content: ['block', 'strip', 'replace', 'record'],
+};
 
-export function hasAction(guard: Guard): guard is ActionGuard {
-  return guard !== 'redact';
+/**
+ * What a new custom rule does. A redaction or tool-call rule written on
+ * purpose is usually meant to act; a content rule starts by only
+ * recording, to see what it would catch.
+ */
+export const NEW_RULE_ACTION: Record<Guard, RuleAction> = {
+  redact: 'placeholder',
+  inspect_tools: 'cut',
+  content: 'record',
+};
+
+// ---------------------------------------------------------------------------
+// What a content rule checks
+// ---------------------------------------------------------------------------
+
+/** The three choices the content rule dialog offers. */
+export type ScopeChoice = 'request' | 'response' | 'both';
+
+export const SCOPE_CHOICES: readonly ScopeChoice[] = ['request', 'response', 'both'];
+
+export function scopeOfChoice(c: ScopeChoice): RuleScope[] {
+  return c === 'both' ? ['request', 'response'] : [c];
 }
 
-/** The actions a rule can take, strongest first. */
-export const ACTIONS: Record<ActionGuard, readonly RuleAction[]> = {
-  inspect_tools: ['cut', 'record'],
-  content: ['block', 'strip', 'record'],
-};
+/** What a rule checks. Rules that say nothing (built-in ones, other guards) check requests. */
+export function ruleScope(r: Pick<SecurityRuleView, 'scope'>): RuleScope[] {
+  const s = r.scope?.filter((x) => x === 'request' || x === 'response') ?? [];
+  return s.length ? (['request', 'response'] as const).filter((x) => s.includes(x)) : ['request'];
+}
 
-/** What a new custom rule does: a rule written on purpose is usually meant to act. */
-export const NEW_RULE_ACTION: Record<ActionGuard, RuleAction> = {
-  inspect_tools: 'cut',
-  content: 'block',
-};
+export function choiceOfScope(scope: readonly RuleScope[]): ScopeChoice {
+  const req = scope.includes('request');
+  const res = scope.includes('response');
+  return req && res ? 'both' : res ? 'response' : 'request';
+}
+
+/** Whether a rule with this scope checks the model's answers. */
+export function checksAnswers(scope: readonly RuleScope[]): boolean {
+  return scope.includes('response');
+}
+
+/**
+ * Whether a content rule may take `action`: an answer that streams has
+ * partly reached the client when a rule matches, so it cannot be refused.
+ */
+export function actionAllowed(action: RuleAction, scope: readonly RuleScope[]): boolean {
+  return !(action === 'block' && checksAnswers(scope));
+}
+
+/** Code points are a request check: the answer is checked by text and regex. */
+export function matchAllowed(match: ContentMatch, scope: readonly RuleScope[]): boolean {
+  return !(match === 'codepoints' && checksAnswers(scope));
+}
 
 /** Built-in and custom rules may share a name. */
 export function sameRule(a: Pick<SecurityRuleView, 'id' | 'custom'>, b: Pick<SecurityRuleView, 'id' | 'custom'>) {
@@ -116,7 +164,7 @@ export function checkCodepoints(text: string): CodepointProblem | null {
 export interface WrittenPattern {
   pattern: string;
   match: ContentMatch;
-  /** Only redaction rules choose; the view says it for every regex and text. */
+  /** Redaction and content rules choose; the view says it for every regex and text. */
   caseSensitive: boolean;
 }
 
@@ -160,12 +208,15 @@ export interface CustomRuleInput {
   pattern: string;
   /** Content and redaction rules choose; tool rules are regexes. */
   match: ContentMatch;
-  /** Redaction only; the other guards' rules have a fixed case rule. */
+  /** Redaction and content; tool rules have a fixed case rule. */
   caseSensitive: boolean;
-  /** Tool and content rules only. */
-  action: RuleAction | null;
+  action: RuleAction;
   /** Redaction only. */
   label: string | null;
+  /** Content only. */
+  scope?: RuleScope[];
+  /** Content rules that replace. */
+  replacement?: string | null;
   enabled: boolean;
 }
 
@@ -182,6 +233,8 @@ export function customRuleView(input: CustomRuleInput): SecurityRuleView {
     action: input.action,
     default_action: null,
     label: input.label,
+    ...(input.scope ? { scope: input.scope } : {}),
+    ...(input.action === 'replace' ? { replacement: input.replacement ?? DEFAULT_REPLACEMENT } : {}),
   };
 }
 
@@ -197,12 +250,54 @@ export function withEnabled(d: GuardDetail, rule: Pick<SecurityRuleView, 'id' | 
   return { ...d, rules: d.rules.map((r) => (sameRule(r, rule) ? { ...r, enabled } : r)) };
 }
 
-/** A built-in rule's action. */
-export function withAction(d: GuardDetail, id: string, action: RuleAction): GuardDetail {
+/** Switches several rules at once: a group's checkbox. */
+export function withEnabledMany(
+  d: GuardDetail,
+  rules: readonly Pick<SecurityRuleView, 'id' | 'custom'>[],
+  enabled: boolean,
+): GuardDetail {
   return {
     ...d,
-    rules: d.rules.map((r) => (!r.custom && r.id === id ? { ...r, action } : r)),
+    rules: d.rules.map((r) => (rules.some((x) => sameRule(r, x)) ? { ...r, enabled } : r)),
   };
+}
+
+/**
+ * A rule's action, built-in or custom. A content rule that replaces keeps
+ * the text it had, or gets the default one.
+ */
+export function withAction(d: GuardDetail, rule: Pick<SecurityRuleView, 'id' | 'custom'>, action: RuleAction): GuardDetail {
+  return {
+    ...d,
+    rules: d.rules.map((r) => {
+      if (!sameRule(r, rule)) return r;
+      const next = { ...r, action };
+      if (r.custom && action === 'replace' && !r.replacement) next.replacement = DEFAULT_REPLACEMENT;
+      return next;
+    }),
+  };
+}
+
+/** How many of `rules` are on. */
+export function enabledCount(rules: readonly SecurityRuleView[]): number {
+  return rules.filter((r) => r.enabled).length;
+}
+
+/** A group checkbox: on, off or partly on. */
+export function groupState(rules: readonly SecurityRuleView[]): boolean | 'indeterminate' {
+  const on = enabledCount(rules);
+  return on === 0 ? false : on === rules.length ? true : 'indeterminate';
+}
+
+/**
+ * Whether a rule matches a search: its name (as shown, or its id) or what it
+ * matches, ignoring case. An empty search matches every rule.
+ */
+export function matchesSearch(r: SecurityRuleView, shownName: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  const pattern = patternOf(r)?.pattern ?? '';
+  return [shownName, r.id, r.name, pattern].some((s) => s.toLowerCase().includes(q));
 }
 
 /**
@@ -248,8 +343,11 @@ function customPattern(r: SecurityRuleView): WrittenPattern {
   return patternOf(r) ?? { pattern: '', match: 'regex', caseSensitive: false };
 }
 
+const REDACT_ACTIONS: readonly RedactAction[] = ['placeholder', 'record'];
+
 function redactPolicy(d: GuardDetail): RedactPolicy {
-  const { enable, disable } = builtinSwitches(d);
+  const { builtins, enable, disable } = builtinSwitches(d);
+  const actions = changedActions(builtins, REDACT_ACTIONS);
   const custom: CustomRedactRule[] = d.rules
     .filter((r) => r.custom)
     .map((r) => {
@@ -262,6 +360,7 @@ function redactPolicy(d: GuardDetail): RedactPolicy {
         match: how,
         ...(caseSensitive ? { case_sensitive: true } : {}),
         label: r.label || DEFAULT_LABEL,
+        ...(r.action === 'record' ? { action: 'record' as const } : {}),
         ...(r.enabled ? {} : { disabled: true }),
       };
     });
@@ -269,12 +368,13 @@ function redactPolicy(d: GuardDetail): RedactPolicy {
     mode: d.mode,
     ...(enable.length ? { enable } : {}),
     ...(disable.length ? { disable } : {}),
+    ...(Object.keys(actions).length ? { actions } : {}),
     ...(custom.length ? { custom } : {}),
   };
 }
 
 const TOOL_ACTIONS: readonly ToolAction[] = ['cut', 'record'];
-const CONTENT_ACTIONS: readonly ContentAction[] = ['block', 'strip', 'record'];
+const CONTENT_ACTIONS: readonly ContentAction[] = ['block', 'strip', 'replace', 'record'];
 
 function toolPolicy(d: GuardDetail): ToolPolicy {
   const { builtins, enable, disable } = builtinSwitches(d);
@@ -302,9 +402,21 @@ function contentPolicy(d: GuardDetail): ContentPolicy {
   const custom: CustomContentRule[] = d.rules
     .filter((r) => r.custom)
     .map((r) => {
-      const { pattern, match } = customPattern(r);
-      const action: ContentAction = r.action === 'block' || r.action === 'strip' ? r.action : 'record';
-      return { name: r.id, pattern, match, action, ...(r.enabled ? {} : { disabled: true }) };
+      const { pattern, match, caseSensitive } = customPattern(r);
+      const action: ContentAction =
+        r.action === 'block' || r.action === 'strip' || r.action === 'replace' ? r.action : 'record';
+      const scope = ruleScope(r);
+      const replacement = r.replacement ?? DEFAULT_REPLACEMENT;
+      return {
+        name: r.id,
+        pattern,
+        ...(scope.length === 1 && scope[0] === 'request' ? {} : { scope }),
+        match,
+        ...(caseSensitive && match !== 'codepoints' ? { case_sensitive: true } : {}),
+        action,
+        ...(action === 'replace' && replacement !== DEFAULT_REPLACEMENT ? { replacement } : {}),
+        ...(r.enabled ? {} : { disabled: true }),
+      };
     });
   return {
     mode: d.mode,

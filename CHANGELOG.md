@@ -11,6 +11,103 @@ target.
 
 ## [Unreleased]
 
+The security page is organised by what each guard protects against: Secrets
+& privacy (outbound redaction), Dangerous commands (tool-call inspection)
+and Content filter, after a Log of what they found. Each guard is On,
+Monitor or Off, and every rule has an action of its own. Content rules can
+now check the text of answers as well as requests, and can replace what
+they match with a text of their own.
+
+### Read before upgrading
+
+- **Policies saved before this release keep working as they did.** Every
+  new key is optional, and a policy without it behaves as before: redaction
+  rules replace with placeholders, content rules check requests only and
+  ignore case, and nothing is replaced in answers.
+- **Upgrade every replica before editing a guard from the new console, and
+  do not roll back afterwards.** An earlier version refuses a policy with
+  keys it does not know: an instance that reads a `security.redact` policy
+  with `actions` or a custom rule's `action`, or a `security.content`
+  policy with a custom rule's `scope`, `case_sensitive` or `replacement`,
+  or the action `replace`, logs `Unreadable guard policy` and runs that
+  guard on its factory policy (monitoring, built-in rules as shipped, no
+  custom rules). To roll back after editing, first remove those keys.
+- **The audit events carry two new fields, and there is one new event.**
+  See Changed.
+
+### Added
+
+- **Answer text filtering.** A custom content rule says what it checks:
+  requests (the caller's messages and tool results), answers, or both
+  (`scope: [request]`, `[response]` or `[request, response]`; left out:
+  requests). On an answer the rule reads the text the client is shown and
+  the input of freeform tools such as Codex's `apply_patch`, not tool calls
+  and not thinking. It applies to whole answers, streamed answers on every
+  API surface, answers served from the cache and the Responses WebSocket,
+  in the client's format, after redacted values are restored and before
+  tool calls are inspected. A streamed answer is not held back whole: each
+  text holds back only the tail that could still grow into a match (for a
+  keyword, its length less one character; for a regular expression, at
+  most 256 characters, so of a longer match the beginning may already have
+  gone out). What a rule deletes or replaces never reaches the client, and
+  the frames that repeat the whole text (`response.output_text.done`,
+  `response.output_item.done`, `response.completed`) say what the client
+  received. The answer stored in the request's log row and in the response
+  cache is the filtered one. A rule that checks answers cannot refuse, and
+  cannot match by code points; such a policy is refused when saved.
+- **Replace.** A content rule can replace what it matches with a text of
+  its own (`action: replace`, `replacement`, `***` when left out, at most
+  200 characters), in requests and in answers. A replacement is not put
+  back.
+- **Case-sensitive content rules** (`case_sensitive: true`), as redaction
+  rules already were.
+- **Record-only redaction rules.** A redaction rule's action is to replace
+  with a placeholder or to record only: built-in rules through
+  `security.redact.actions` (`{"email": "record"}`), custom rules through
+  `action`. A recorded value goes upstream unchanged and is written to the
+  audit log.
+- **Console.** The security page has a Log tab (for holders of
+  `logs:read_all`) listing the guards' audit events, filtered by guard,
+  with the rule, where it matched (request, tool result, answer text, tool
+  call), what was done and a link to the trace. Each guard tab shows its
+  state with a dot (green On, amber Monitor, grey Off), one line on what
+  the state does, and how many rules are on. Rules are grouped, with a
+  checkbox per group that switches every rule shown in it in one save, and
+  a search over names and patterns; each row has its switch and its
+  action, chosen in place. While a guard monitors, each action is shown
+  with "Monitoring". The content rule dialog sets what the rule checks,
+  how it matches (with a Case-sensitive switch), its action and its
+  replacement text; options that do not apply to answers are shown but
+  unavailable, with the reason, and switch with a notice when the scope
+  changes. Samples can be tried as a request or as an answer
+  (`POST /api/admin/security/content/test` takes `scope` and
+  `replacement`). The redaction rule dialog's Case-sensitive is a switch,
+  and the dialog sets the rule's action.
+- **`GET /api/audit/logs` takes several actions** in `action`, separated
+  by commas (at most 32).
+
+### Changed
+
+- **Names.** Outbound redaction is Secrets & privacy, tool-call inspection
+  is Dangerous commands; the modes are On, Monitor and Off on every guard
+  (formerly Replace, Cut off and Enforce for the third). The settings keys
+  (`security.redact`, `security.inspect_tools`, `security.content`), the
+  mode values (`enforce`, `observe`, `off`) and the permissions are
+  unchanged.
+- **Audit events.** `gateway.content_replaced` is new, for text a content
+  rule replaced. Every content event has `direction` (`request` or
+  `response`); an answer's events also have `part: response_text`, name
+  the upstream in `resource`, and a replaced one carries the rule's
+  `replacement`. Content, redaction and tool-call events carry the guard's
+  `mode` (`observe` for hits recorded while monitoring). Redaction events
+  are now per rule: `gateway.redaction_replaced` for values replaced with
+  placeholders and `gateway.redaction_flagged` for values only recorded,
+  whether the guard monitors or the rule's `action` is `record`.
+  `gateway_content_matched_total` has a `direction` label. Like every
+  audit event, these are sent on by the log forwarders.
+- Requires the thinkwatch-core release that adds per-rule actions and
+  answer filtering to tw-guard; the pin moves when it is tagged.
+
 ## [3.7.1] — 2026-10-12
 
 Tool-call inspection no longer crashes on a URL written right after a

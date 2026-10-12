@@ -21,17 +21,34 @@
 //! A value goes into text as it reads and into tool arguments, which are
 //! JSON, escaped.
 //!
+//! **Answer text.** Content rules that check answers run next, on the
+//! text with the caller's values back in it — what the client would read —
+//! and before tool calls are inspected on the shaper's output. Each text
+//! lane holds back only the tail that could still grow into a match, and
+//! frames that repeat the whole text (Responses' `output_text.done`,
+//! `output_item.done`, `response.completed`) are written as the client
+//! received it — thinkwatch-core's `FrameFilter`. The rules found are
+//! collected for the request's audit events ([`AnswerHits`]).
+//!
 //! **Usage.** A Chat stream is always sent upstream asking for its usage
 //! chunk, or there would be nothing to bill. When the caller did not ask
 //! for it, the shaper takes it back out: the trailing chunk that carries
 //! only `usage`, and the `"usage": null` the upstream adds to every other
 //! chunk once asked.
 
+use std::sync::{Arc, Mutex};
+
 use serde_json::Value;
 use tw_dialect::frame::{self, Decoder, Frame};
 use tw_dialect::ir::Dialect;
+use tw_guard::content::answer::{AnswerHit, FrameFilter};
 use tw_guard::redact::replace::Ledger;
 use tw_guard::redact::sse::{FrameRestorer, Synth};
+
+/// What the content rules found in a streamed answer so far, one entry per
+/// rule. Shared with the stream's tail, which writes the audit events
+/// whether or not the client stayed to the end.
+pub type AnswerHits = Arc<Mutex<Vec<AnswerHit>>>;
 
 /// Rewrite the model name in a whole (non-streaming) response.
 pub fn rewrite_model(body: &[u8], model: &str) -> Vec<u8> {
@@ -71,6 +88,8 @@ pub struct StreamShaper {
     model: String,
     client: Dialect,
     restorer: Option<FrameRestorer>,
+    filter: Option<FrameFilter>,
+    hits: AnswerHits,
     hide_usage: bool,
 }
 
@@ -81,6 +100,8 @@ impl StreamShaper {
             model,
             client,
             restorer: None,
+            filter: None,
+            hits: AnswerHits::default(),
             hide_usage: false,
         };
         shaper.restore_with(redaction);
@@ -95,6 +116,18 @@ impl StreamShaper {
         self.restorer = (!restorer.is_noop()).then_some(restorer);
     }
 
+    /// Filter the answer's text with the content rules that check answers.
+    /// `None`: no rule does.
+    pub fn filtering(mut self, filter: Option<FrameFilter>) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// What the content rules found so far, for the stream's tail.
+    pub fn answer_hits(&self) -> AnswerHits {
+        self.hits.clone()
+    }
+
     /// Take the usage the caller did not ask for out of a Chat stream.
     pub fn hiding_usage(mut self, hide: bool) -> Self {
         self.hide_usage = hide;
@@ -103,7 +136,9 @@ impl StreamShaper {
 
     pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
         let frames = self.decoder.feed(chunk);
-        self.write(frames).into_bytes()
+        let out = self.write(frames).into_bytes();
+        self.collect_hits();
+        out
     }
 
     /// Frames the gateway writes itself (a refusal that ends the stream),
@@ -136,7 +171,21 @@ impl StreamShaper {
         let frames = self.decoder.flush();
         let mut out = self.write(frames);
         self.drain(&mut out);
+        self.collect_hits();
         out.into_bytes()
+    }
+
+    fn collect_hits(&mut self) {
+        let Some(f) = self.filter.as_mut() else {
+            return;
+        };
+        let found = f.take_hits();
+        if found.is_empty() {
+            return;
+        }
+        if let Ok(mut hits) = self.hits.lock() {
+            crate::content_filter::merge_answer_hits(&mut hits, found);
+        }
     }
 
     fn write(&mut self, frames: Vec<Frame>) -> String {
@@ -168,6 +217,11 @@ impl StreamShaper {
         }
         if let Some(r) = self.restorer.as_mut() {
             for s in r.frame(&mut v).before {
+                self.filtered(s, out);
+            }
+        }
+        if let Some(f) = self.filter.as_mut() {
+            for s in f.frame(&mut v).before {
                 self.synth(s, out);
             }
         }
@@ -178,13 +232,30 @@ impl StreamShaper {
         });
     }
 
+    /// Every tail still held back, restored values first, then the
+    /// answer's text — both written before whatever ends the stream.
     fn drain(&mut self, out: &mut String) {
-        let Some(r) = self.restorer.as_mut() else {
-            return;
-        };
-        for s in r.drain() {
-            self.synth(s, out);
+        if let Some(r) = self.restorer.as_mut() {
+            for s in r.drain() {
+                self.filtered(s, out);
+            }
         }
+        if let Some(f) = self.filter.as_mut() {
+            for s in f.drain() {
+                self.synth(s, out);
+            }
+        }
+    }
+
+    /// A frame the restorer wrote, through the answer filter like any
+    /// frame of the stream.
+    fn filtered(&mut self, mut s: Synth, out: &mut String) {
+        if let Some(f) = self.filter.as_mut() {
+            for before in f.frame(&mut s.data).before {
+                self.synth(before, out);
+            }
+        }
+        self.synth(s, out);
     }
 
     fn synth(&self, mut s: Synth, out: &mut String) {
@@ -561,5 +632,186 @@ mod tests {
         let mut s = StreamShaper::new("m".into(), &ctx(None), Dialect::Chat);
         let out = s.process(b"data: [DONE]\n\n");
         assert_eq!(out, b"data: [DONE]\n\n");
+    }
+
+    /// A content filter whose one rule checks answers for `pattern`.
+    fn answer_filter(
+        mode: tw_guard::policy::Mode,
+        pattern: &str,
+        action: tw_guard::policy::ContentAction,
+        client: Dialect,
+    ) -> Option<FrameFilter> {
+        crate::content_filter::ContentFilter::new(&tw_guard::policy::ContentPolicy {
+            mode,
+            custom: vec![tw_guard::policy::CustomContentRule {
+                name: "Codename".into(),
+                pattern: pattern.into(),
+                scope: vec![tw_guard::policy::ContentScope::Response],
+                matching: tw_guard::policy::ContentMatch::Contains,
+                case_sensitive: false,
+                action,
+                replacement: "***".into(),
+                disabled: false,
+            }],
+            ..Default::default()
+        })
+        .stream(client)
+    }
+
+    fn chat_text(out: &[u8]) -> String {
+        frames(out)
+            .iter()
+            .filter_map(|f| {
+                f["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_match_split_across_frames_never_reaches_the_client() {
+        use tw_guard::policy::{ContentAction, Mode};
+        let mut s =
+            StreamShaper::new("m".into(), &ctx(None), Dialect::Chat).filtering(answer_filter(
+                Mode::Enforce,
+                "Polaris",
+                ContentAction::Replace,
+                Dialect::Chat,
+            ));
+        let hits = s.answer_hits();
+        let mut out = Vec::new();
+        for piece in ["The Pol", "aris release ", "is near; POLA", "RIS"] {
+            let bytes = s.process(chat_chunk(piece).as_bytes());
+            // No frame that went out carries a piece of the codename.
+            let sent = chat_text(&bytes).to_lowercase();
+            assert!(!sent.contains("pol") || sent.contains("***"), "{sent}");
+            out.extend(bytes);
+        }
+        out.extend(s.process(b"data: [DONE]\n\n"));
+        out.extend(s.finish());
+        assert_eq!(chat_text(&out), "The *** release is near; ***");
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .ends_with("data: [DONE]\n\n"),
+            "the held tail goes out before the terminator"
+        );
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].count, 2);
+        assert_eq!(hits[0].outcome, tw_guard::content::Outcome::Replaced);
+    }
+
+    #[test]
+    fn only_the_tail_that_could_still_match_is_held_back() {
+        use tw_guard::policy::{ContentAction, Mode};
+        let mut s =
+            StreamShaper::new("m".into(), &ctx(None), Dialect::Chat).filtering(answer_filter(
+                Mode::Enforce,
+                "Polaris",
+                ContentAction::Strip,
+                Dialect::Chat,
+            ));
+        // Seven characters to find: at most six are held.
+        let out = s.process(chat_chunk("a long answer that goes on").as_bytes());
+        let sent = chat_text(&out);
+        assert!(
+            sent.len() >= "a long answer that goes on".len() - 6,
+            "{sent}"
+        );
+        let mut rest = s.finish();
+        rest.splice(0..0, out);
+        assert_eq!(chat_text(&rest), "a long answer that goes on");
+    }
+
+    #[test]
+    fn a_rule_sees_the_restored_value_and_the_whole_text_frames_agree() {
+        use tw_guard::policy::{ContentAction, Mode};
+        // The caller's address was a placeholder upstream; the rule matches
+        // what the client would read.
+        let mut s = StreamShaper::new("m".into(), &ctx(Some("a@x.com")), Dialect::Responses)
+            .filtering(answer_filter(
+                Mode::Enforce,
+                "a@x.com",
+                ContentAction::Replace,
+                Dialect::Responses,
+            ));
+        let ev = |name: &str, d: Value| format!("event: {name}\ndata: {d}\n\n");
+        let mut out = s.process(
+            ev(
+                "response.output_text.delta",
+                serde_json::json!({"type": "response.output_text.delta", "item_id": "m1",
+                    "output_index": 0, "content_index": 0, "delta": "mail <<TW_EMAIL_1>> today"}),
+            )
+            .as_bytes(),
+        );
+        out.extend(
+            s.process(
+                ev(
+                    "response.output_text.done",
+                    serde_json::json!({"type": "response.output_text.done", "item_id": "m1",
+                        "output_index": 0, "content_index": 0, "text": "mail <<TW_EMAIL_1>> today"}),
+                )
+                .as_bytes(),
+            ),
+        );
+        out.extend(s.finish());
+        let fs = frames(&out);
+        let deltas: String = fs
+            .iter()
+            .filter(|f| f["type"] == "response.output_text.delta")
+            .filter_map(|f| f["delta"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(deltas, "mail *** today");
+        let done = fs
+            .iter()
+            .find(|f| f["type"] == "response.output_text.done")
+            .unwrap();
+        assert_eq!(
+            done["text"], "mail *** today",
+            "the repeat agrees with what was sent"
+        );
+    }
+
+    #[test]
+    fn monitoring_passes_the_answer_on_unchanged_and_still_finds() {
+        use tw_guard::policy::{ContentAction, Mode};
+        let mut s =
+            StreamShaper::new("m".into(), &ctx(None), Dialect::Anthropic).filtering(answer_filter(
+                Mode::Observe,
+                "Polaris",
+                ContentAction::Strip,
+                Dialect::Anthropic,
+            ));
+        let hits = s.answer_hits();
+        let ev = |t: &str| {
+            format!(
+                "event: content_block_delta\ndata: {}\n\n",
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":t}})
+            )
+        };
+        let first = s.process(ev("Pola").as_bytes());
+        // Nothing is held back when nothing would be changed.
+        assert_eq!(frames(&first)[0]["delta"]["text"], "Pola");
+        let mut out = first;
+        out.extend(s.process(ev("ris").as_bytes()));
+        out.extend(
+            s.process(
+                format!(
+                    "event: content_block_stop\ndata: {}\n\n",
+                    serde_json::json!({"type":"content_block_stop","index":0})
+                )
+                .as_bytes(),
+            ),
+        );
+        out.extend(s.finish());
+        let text: String = frames(&out)
+            .iter()
+            .filter_map(|f| f["delta"]["text"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(text, "Polaris");
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits[0].outcome, tw_guard::content::Outcome::Recorded);
     }
 }

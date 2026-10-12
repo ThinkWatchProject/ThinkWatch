@@ -218,6 +218,13 @@ pub(crate) fn build_chat_pump(
         provider.to_string(),
     );
 
+    // What the content rules find in the answer is recorded by the tail,
+    // whether the stream ran to its end or the client left.
+    let answer_hits = shaper.answer_hits();
+    let content = guards.content.clone();
+    let caller =
+        crate::guards::Caller::of(&request.identity, &request.trace_id, &request.mapped_model);
+
     let mut last_frame = LastFrame::new(client, client_sse);
     let provider_for_tail = provider.to_string();
     let provider = provider.to_string();
@@ -378,6 +385,16 @@ pub(crate) fn build_chat_pump(
         )
         .increment(1);
 
+        if let Ok(hits) = answer_hits.lock() {
+            crate::content_filter::record_answer(
+                &deps_state.audit,
+                &caller,
+                &provider_for_tail,
+                content.mode,
+                &hits,
+            );
+        }
+
         // The sniffer exists once the upstream answered. Without an
         // answer there is nothing to bill.
         let (answered, reported, assembled) = match readers_for_tail.lock() {
@@ -415,8 +432,11 @@ pub(crate) fn build_chat_pump(
             usage_estimated,
             cost_usd,
             // A cache hit hands this back to a caller, so it carries the
-            // caller's model name like everything else they receive.
-            assembled: assembled.map(|b| rewrite_model(&b, &mapped_model)),
+            // caller's model name like everything else they receive, and
+            // the answer's text as the content rules left it: what is
+            // stored is what the client was shown. (The hits were recorded
+            // above, from the stream itself.)
+            assembled: assembled.map(|b| content.whole(client, rewrite_model(&b, &mapped_model)).0),
         };
         Invoked {
             client_ip: identity.ip_address.clone(),

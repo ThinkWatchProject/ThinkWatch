@@ -37,10 +37,10 @@ const zhPath = join(webRoot, 'src/i18n/zh.json');
 // server's English.
 const GUARD_IDS = ['redact', 'inspect_tools', 'content'];
 const GUARD_COPY = [
-  'name', 'enforce', 'lead', 'nowObserve', 'nowEnforce', 'effect', 'risk',
-  'testTitle', 'createTitle', 'editTitle', 'nameHint', 'namePlaceholder',
-  'samplePlaceholder',
+  'name', 'lead', 'nowEnforce', 'testTitle', 'createTitle', 'editTitle',
+  'nameHint', 'namePlaceholder', 'samplePlaceholder',
 ];
+const RULE_ACTIONS = ['placeholder', 'cut', 'block', 'strip', 'replace', 'record'];
 const REDACT_RULE_IDS = [
   'anthropic-api-key', 'openai-project-key', 'openai-api-key',
   'github-personal-token', 'github-oauth-token', 'github-server-token',
@@ -79,7 +79,13 @@ const DYNAMIC_ENUMS = {
     'api-keys', 'private-keys', 'jwt', 'conn-strings', 'personal', 'internal',
     'command', 'injection', 'persona', 'chinese', 'invisible', 'custom',
   ],
-  'contentSecurity.ruleAction.${_}': ['cut', 'block', 'strip', 'record'],
+  'contentSecurity.ruleAction.${_}': RULE_ACTIONS,
+  'contentSecurity.mode.${_}': ['enforce', 'observe', 'off'],
+  'contentSecurity.now.${_}': ['observe', 'off'],
+  'contentSecurity.scope.${_}': ['request', 'response'],
+  'contentSecurity.scopeChoice.${_}': ['request', 'response', 'both'],
+  'contentSecurity.dialog.testAsSide.${_}': ['request', 'response'],
+  'contentSecurity.dialog.modeNote.${_}': ['observe', 'off'],
   'contentSecurity.redactRule.${_}': REDACT_RULE_IDS,
   'contentSecurity.toolRule.${_}.name': TOOL_RULE_IDS,
   'contentSecurity.toolRule.${_}.why': TOOL_RULE_IDS,
@@ -90,8 +96,7 @@ const DYNAMIC_ENUMS = {
   'contentSecurity.check.${_}': ['credential-to-network', 'file-to-network', 'thinkwatch-data'],
   'contentSecurity.dialog.match.${_}': ['contains', 'regex', 'codepoints'],
   'contentSecurity.dialog.regexHint.${_}': GUARD_IDS,
-  'contentSecurity.dialog.actionWhat.${_}': ['cut', 'block', 'strip'],
-  'contentSecurity.dialog.recordWhat.${_}': ['inspect_tools', 'content'],
+  'contentSecurity.dialog.actionWhat.${_}': RULE_ACTIONS,
   'limits.surfaceShort_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
   'limits.surface_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
   'limits.period_${_}': ['daily', 'weekly', 'monthly'],

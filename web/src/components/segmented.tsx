@@ -4,6 +4,8 @@ import { cn } from '@/lib/utils';
 export interface SegmentedOption<T extends string> {
   value: T;
   label: ReactNode;
+  /** Shown but not choosable; the arrow keys skip it. */
+  disabled?: boolean;
 }
 
 /**
@@ -38,7 +40,12 @@ export function Segmented<T extends string>({
     const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
     if (step === 0 || disabled || options.length === 0) return;
     e.preventDefault();
-    const next = (Math.max(at, 0) + step + options.length) % options.length;
+    let next = Math.max(at, 0);
+    for (let tried = 0; tried < options.length; tried++) {
+      next = (next + step + options.length) % options.length;
+      if (!options[next].disabled) break;
+    }
+    if (options[next].disabled || next === at) return;
     refs.current[next]?.focus();
     onChange(options[next].value);
   };
@@ -67,7 +74,7 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={checked}
             tabIndex={checked || (at < 0 && i === 0) ? 0 : -1}
-            disabled={disabled}
+            disabled={disabled || o.disabled}
             onClick={() => !checked && onChange(o.value)}
             className={cn(
               'rounded px-2.5 font-medium whitespace-nowrap transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',

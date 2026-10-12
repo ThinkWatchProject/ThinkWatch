@@ -314,3 +314,46 @@ async fn a_turn_ends_at_its_last_event_while_the_upstream_stream_stays_open() {
     }
     assert_eq!(rows, vec![(23, 5, 200), (23, 5, 200)], "gateway_logs rows");
 }
+
+/// A content rule that checks answers works on the socket as on the HTTP
+/// stream: the text frames, the whole-text repeats and the conversation
+/// the connection keeps all carry the answer as the client received it.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_answer_rule_filters_each_turn_across_frames() {
+    let app = TestApp::spawn().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce", "custom": [
+            {"name": "Greeting", "pattern": "there", "scope": ["response"],
+             "action": "replace", "replacement": "[x]"}
+        ]}),
+    )
+    .await;
+    let upstream = MockProvider::openai_chat_stream_ok("ws-filtered").await;
+    let (_, key) = seed(&app, &upstream.uri(), "ws-filtered").await;
+
+    let mut socket = connect(&app, &key).await;
+    for _ in 0..2 {
+        socket.send(create("ws-filtered", "hi")).await.unwrap();
+        let events = turn(&mut socket).await;
+        assert_eq!(text_of(&events), "hi [x]", "{events:?}");
+        for e in &events {
+            assert!(!e.to_string().contains("there"), "{e}");
+        }
+        let done = events
+            .iter()
+            .find(|e| e["type"] == "response.output_text.done")
+            .expect("output_text.done");
+        assert_eq!(done["text"], "hi [x]", "{done}");
+        let completed = events.last().unwrap();
+        assert_eq!(completed["type"], "response.completed", "{events:?}");
+        assert!(
+            completed["response"]["output"]
+                .to_string()
+                .contains("hi [x]"),
+            "{completed}"
+        );
+    }
+    socket.close(None).await.unwrap();
+}
