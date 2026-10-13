@@ -4189,7 +4189,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-auth"
-version = "3.8.0"
+version = "3.8.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4219,7 +4219,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-common"
-version = "3.8.0"
+version = "3.8.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4262,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-gateway"
-version = "3.8.0"
+version = "3.8.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-mcp-gateway"
-version = "3.8.0"
+version = "3.8.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4330,7 +4330,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-server"
-version = "3.8.0"
+version = "3.8.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4381,7 +4381,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-test-support"
-version = "3.8.0"
+version = "3.8.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4837,8 +4837,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.73.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.73.0#befc76ed2929e49906f76559040a027e49d657d8"
+version = "0.74.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.74.0#21e560cdfa0cb197d1688b329b18123547ce1d8f"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4852,16 +4852,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.73.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.73.0#befc76ed2929e49906f76559040a027e49d657d8"
+version = "0.74.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.74.0#21e560cdfa0cb197d1688b329b18123547ce1d8f"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.73.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.73.0#befc76ed2929e49906f76559040a027e49d657d8"
+version = "0.74.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.74.0#21e560cdfa0cb197d1688b329b18123547ce1d8f"
 dependencies = [
  "memchr",
  "serde",
@@ -4870,8 +4870,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.73.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.73.0#befc76ed2929e49906f76559040a027e49d657d8"
+version = "0.74.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.74.0#21e560cdfa0cb197d1688b329b18123547ce1d8f"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",

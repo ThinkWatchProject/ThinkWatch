@@ -11,6 +11,56 @@ target.
 
 ## [Unreleased]
 
+## [3.8.1] — 2026-10-13
+
+Outbound redaction searches only the text written in a request, located
+by the structure of the request's format, and no longer changes ids or
+other values the protocol needs as they are. The thinkwatch-core crates
+move from v0.73.0 to v0.74.0.
+
+### Read before upgrading
+
+- **Only the written text of a request is searched.** Fields outside it,
+  such as `metadata`, `user`, tool parameter schemas, response format
+  schemas and stop sequences, and blocks or fields the gateway does not
+  recognise, are no longer searched: a value there goes upstream as
+  written and is not reported. Hits inside ids and other protocol values
+  are no longer reported either, so fewer redaction events
+  (`gateway.redaction_replaced`, `gateway.redaction_flagged`) may be
+  written than before.
+- **Stored bodies are masked as before.** With `audit.body_redact_pii` on,
+  stored request and response bodies are still searched over their whole
+  text, fields outside the written text included, and so is the answer a
+  log row stores under a content rule that checks answers.
+
+### Fixed
+
+- **Redaction no longer changes ids or protocol values.** Before a request
+  left, the built-in rules searched the whole body, ids included, and
+  custom rules skipped only some identifiers, by key name. With outbound
+  redaction On and the Chinese mainland mobile number rule
+  (`cn-mobile-phone`, off by default) enabled, a Codex reasoning item id
+  (`rs_…`) holding a run of 11 digits was taken for a mobile number and
+  replaced with a placeholder. The upstream refused the request, and since
+  Codex sends its reasoning items back on every turn, every later turn of
+  that conversation was refused as well. Under Monitor the id was reported
+  as a hit.
+
+  The rules now search only the text written in the request: system
+  prompts, the messages of every role (earlier answers and text documents
+  included), reasoning text and summaries, tool-call arguments and inputs,
+  tool results and tool descriptions, as well as Chat Completions'
+  predicted output and the code a Gemini model executed and its output.
+  Ids, types, roles, names, the model, signatures, encrypted content,
+  media and settings are never searched. Each hop is searched in the
+  format it is sent in: the caller's when the request is forwarded, the
+  upstream's when it is converted.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.73.0 → v0.74.0.
+
 ## [3.8.0] — 2026-10-13
 
 The security page is organised by what each guard protects against: Secrets
@@ -2355,7 +2405,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.1...HEAD
+[3.8.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.1
 [3.8.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.0
 [3.7.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.1
 [3.7.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.0
