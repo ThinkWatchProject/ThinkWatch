@@ -1490,7 +1490,10 @@ mod tests {
             {"role": "user", "content": "my email is alice@corp.example.org"}
         ]})
         .to_string();
-        let (_, ledger) = redaction.look(request.as_bytes());
+        let (_, ledger) = redaction.look(
+            request.as_bytes(),
+            crate::redaction::Shape::Generate(Dialect::Chat),
+        );
         let content = crate::content_filter::ContentFilter::new(&ContentPolicy {
             mode: Mode::Enforce,
             custom: vec![CustomContentRule {

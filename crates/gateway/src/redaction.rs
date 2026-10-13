@@ -6,11 +6,18 @@
 //! The rules and the engine are thinkwatch-core's (`tw_guard::redact`),
 //! shared with the desktop gateway, and so is the flow:
 //!
-//! - **The whole request body is searched**, not only the caller's
-//!   messages: a key pasted into a system prompt, echoed in an earlier
+//! - **Only the text written in the request is searched**, located by the
+//!   structure of the request's format ([`Shape`]): system prompts, every
+//!   role's messages, reasoning text and summaries, tool-call arguments and
+//!   inputs, tool results and tool descriptions. Not only the caller's
+//!   messages — a key pasted into a system prompt, echoed in an earlier
 //!   answer or sitting in a tool call's arguments leaves just the same.
-//!   Base64 payloads (images, files, reasoning signatures) are not
-//!   searched, and neither are the gateway's own placeholders.
+//!   The protocol's own values — ids, types, roles, names, the model,
+//!   signatures, encrypted content, media, settings — are never searched:
+//!   change one character of a reasoning item's id and the upstream
+//!   refuses the whole request, and nobody wrote them. Fields and blocks
+//!   the list does not know are not searched either. Within the text,
+//!   base64 payloads and the gateway's own placeholders are left alone.
 //! - **[`Redaction::look`] numbers the values once**, in the order they
 //!   appear in what the caller sent, and every hop goes out through
 //!   [`Redaction::replace`] with that same ledger — so a value has one
@@ -31,6 +38,8 @@ use tw_guard::policy::{Mode, RedactPolicy};
 use tw_guard::redact::replace::Ledger;
 use tw_guard::redact::rules::{Finding, Rule, RuleSet};
 
+pub use tw_guard::redact::flow::Shape;
+
 use crate::guards::Caller;
 
 /// Outbound redaction as configured: a mode and the rules.
@@ -48,27 +57,50 @@ impl Redaction {
         }
     }
 
-    /// Look at what the caller sent: what was found (masked), and in
-    /// enforce mode the ledger every hop is replaced with. Nothing when
-    /// off.
-    pub fn look(&self, body: &[u8]) -> (Vec<Finding>, Ledger) {
-        tw_guard::redact::flow::look(self.mode, &self.rules, body)
+    /// Look at what the caller sent, a request of `shape`: what was found
+    /// in its written text (masked), and in enforce mode the ledger every
+    /// hop is replaced with. Nothing when off.
+    pub fn look(&self, body: &[u8], shape: Shape) -> (Vec<Finding>, Ledger) {
+        tw_guard::redact::flow::look(self.mode, &self.rules, body, shape)
     }
 
-    /// The bytes one hop sends, with the values `ledger` numbered swapped
-    /// for their placeholders — and any value only this hop carries (a
-    /// conversion can join two pieces of text) numbered after them. The
-    /// returned ledger restores this hop's answer. Byte for byte what came
-    /// in, and the same ledger, unless in enforce mode and something is
-    /// found.
-    pub fn replace(&self, body: Vec<u8>, ledger: &Ledger) -> (Vec<u8>, Ledger) {
+    /// The bytes one hop sends, a request of `shape` — the format it goes
+    /// out in — with the values `ledger` numbered swapped for their
+    /// placeholders, and any value only this hop carries (a conversion can
+    /// join two pieces of text) numbered after them. Only the hop's written
+    /// text is searched. The returned ledger restores this hop's answer.
+    /// Byte for byte what came in, and the same ledger, unless in enforce
+    /// mode and something is found.
+    pub fn replace(&self, body: Vec<u8>, ledger: &Ledger, shape: Shape) -> (Vec<u8>, Ledger) {
         let (out, ledger) = tw_guard::redact::flow::replace(
             self.mode,
             &self.rules,
             bytes::Bytes::from(body),
             ledger,
+            shape,
         );
         (Vec::from(out), ledger)
+    }
+
+    /// [`Self::replace`] over the whole text rather than a request's
+    /// written text: what is stored is an answer (or a stream of them), not
+    /// a request, and it is never sent anywhere. Every value a rule finds
+    /// anywhere but in a key or a base64 payload is replaced, in enforce
+    /// mode, unless its rule only records.
+    fn replace_whole(&self, body: Vec<u8>, ledger: &Ledger) -> (Vec<u8>, Ledger) {
+        if !self.mode.acts() || self.rules.is_empty() {
+            return (body, ledger.clone());
+        }
+        let Ok(text) = std::str::from_utf8(&body) else {
+            return (body, ledger.clone());
+        };
+        let found = tw_guard::redact::flow::hits(text, &self.rules);
+        let hits = self.rules.to_replace(&found);
+        if hits.is_empty() {
+            return (body, ledger.clone());
+        }
+        let r = tw_guard::redact::replace::apply(text, &hits, ledger.clone());
+        (r.text.into_bytes(), r.ledger)
     }
 
     /// Restored text masked again for storage — a log row, never what is
@@ -80,7 +112,7 @@ impl Redaction {
     /// written as `OPENAI_API_KEY=…` — when the model repeats it on its
     /// own; the ledger knows the value itself.
     pub fn mask_for_storage(&self, body: Vec<u8>, ledger: &Ledger) -> Vec<u8> {
-        let (body, ledger) = self.replace(body, ledger);
+        let (body, ledger) = self.replace_whole(body, ledger);
         match std::str::from_utf8(&body) {
             Ok(text) => match tw_guard::redact::replace::hide_values(
                 text,
@@ -275,7 +307,13 @@ pub fn record(audit: &AuditLogger, caller: &Caller, redaction: &Redaction, findi
 mod tests {
     use super::*;
 
+    use tw_dialect::ir::Dialect;
+
     const KEY: &str = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    const ANTHROPIC: Shape = Shape::Generate(Dialect::Anthropic);
+    const CHAT: Shape = Shape::Generate(Dialect::Chat);
+    const RESPONSES: Shape = Shape::Generate(Dialect::Responses);
 
     fn redaction(mode: Mode) -> Redaction {
         Redaction::new(&RedactPolicy {
@@ -285,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_request_is_searched_system_prompt_and_answers_included() {
+    fn every_written_text_is_searched_system_prompt_and_answers_included() {
         let r = redaction(Mode::Enforce);
         let body = serde_json::json!({
             "system": format!("deploy with {KEY}"),
@@ -295,10 +333,10 @@ mod tests {
             ]
         })
         .to_string();
-        let (found, ledger) = r.look(body.as_bytes());
+        let (found, ledger) = r.look(body.as_bytes(), ANTHROPIC);
         assert_eq!(found.len(), 1, "one value, found twice");
         assert_eq!(found[0].count, 2);
-        let (sent, _) = r.replace(body.into_bytes(), &ledger);
+        let (sent, _) = r.replace(body.into_bytes(), &ledger, ANTHROPIC);
         let sent = String::from_utf8(sent).unwrap();
         assert!(!sent.contains(KEY), "{sent}");
         assert_eq!(sent.matches("<<TW_SECRET_1>>").count(), 2, "{sent}");
@@ -308,12 +346,12 @@ mod tests {
     fn observe_finds_the_same_and_replaces_nothing() {
         let r = redaction(Mode::Observe);
         let body = format!(r#"{{"messages":[{{"role":"user","content":"{KEY}"}}]}}"#);
-        let (found, ledger) = r.look(body.as_bytes());
+        let (found, ledger) = r.look(body.as_bytes(), CHAT);
         assert_eq!(found.len(), 1);
         assert!(ledger.is_empty());
-        let (sent, _) = r.replace(body.clone().into_bytes(), &ledger);
-        assert_eq!(sent, body.into_bytes());
-        let (found, _) = redaction(Mode::Off).look(format!("\"{KEY}\"").as_bytes());
+        let (sent, _) = r.replace(body.clone().into_bytes(), &ledger, CHAT);
+        assert_eq!(sent, body.clone().into_bytes());
+        let (found, _) = redaction(Mode::Off).look(body.as_bytes(), CHAT);
         assert!(found.is_empty(), "off looks at nothing");
     }
 
@@ -321,14 +359,21 @@ mod tests {
     fn a_hop_gets_the_placeholder_the_caller_s_request_was_numbered_with() {
         let r = redaction(Mode::Enforce);
         let other = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-        let body = format!(r#"{{"a":"{KEY}","b":"{other}"}}"#);
-        let (_, ledger) = r.look(body.as_bytes());
-        // A converted hop that writes them the other way round.
-        let hop = format!(r#"{{"b":"{other}","a":"{KEY}"}}"#);
-        let (sent, after) = r.replace(hop.into_bytes(), &ledger);
+        // Written out: `json!` would sort `messages` before `system`.
+        let body =
+            format!(r#"{{"system":"{KEY}","messages":[{{"role":"user","content":"{other}"}}]}}"#);
+        let (_, ledger) = r.look(body.as_bytes(), ANTHROPIC);
+        // A converted hop, in another format, that writes them the other
+        // way round.
+        let hop = serde_json::json!({"messages": [
+            {"role": "user", "content": other},
+            {"role": "system", "content": KEY}
+        ]})
+        .to_string();
+        let (sent, after) = r.replace(hop.into_bytes(), &ledger, CHAT);
         let sent: serde_json::Value = serde_json::from_slice(&sent).unwrap();
-        assert_eq!(sent["a"], "<<TW_SECRET_1>>");
-        assert_eq!(sent["b"], "<<TW_SECRET_2>>");
+        assert_eq!(sent["messages"][1]["content"], "<<TW_SECRET_1>>");
+        assert_eq!(sent["messages"][0]["content"], "<<TW_SECRET_2>>");
         assert_eq!(after.len(), 2);
     }
 
@@ -336,7 +381,7 @@ mod tests {
     fn a_whole_answer_gets_the_values_back() {
         let r = redaction(Mode::Enforce);
         let body = format!(r#"{{"messages":[{{"role":"user","content":"{KEY}"}}]}}"#);
-        let (_, ledger) = r.look(body.as_bytes());
+        let (_, ledger) = r.look(body.as_bytes(), CHAT);
         let answer = br#"{"content":[{"type":"text","text":"you sent <<TW_SECRET_1>>"}]}"#;
         let back = restore_body(&ledger, answer);
         let v: serde_json::Value = serde_json::from_slice(&back).unwrap();
@@ -354,7 +399,7 @@ mod tests {
         .to_string();
         // In the JSON the key's line breaks are written `\n`.
         assert!(body.contains("KEY-----\\nMIIB"), "{body}");
-        let (_, ledger) = r.look(body.as_bytes());
+        let (_, ledger) = r.look(body.as_bytes(), CHAT);
         assert_eq!(ledger.len(), 1);
         (body, ledger)
     }
@@ -362,7 +407,7 @@ mod tests {
     #[test]
     fn a_value_with_line_breaks_comes_back_whole_in_text_and_in_tool_arguments() {
         let (body, ledger) = pem_request();
-        let (sent, _) = redaction(Mode::Enforce).replace(body.into_bytes(), &ledger);
+        let (sent, _) = redaction(Mode::Enforce).replace(body.into_bytes(), &ledger, CHAT);
         let sent = String::from_utf8(sent).unwrap();
         assert!(
             sent.contains("<<TW_SECRET_1>>") && !sent.contains("MIIB"),
@@ -443,7 +488,7 @@ mod tests {
             "{KEY} {other} {KEY} 123-45-6789 987-65-4321 123-45-6789 111-22-3333"
         )}]})
         .to_string();
-        let (found, _) = r.look(body.as_bytes());
+        let (found, _) = r.look(body.as_bytes(), CHAT);
         let rules = per_rule(&found);
         assert_eq!(rules.len(), 2, "{rules:?}");
         // The rule with the most occurrences first.
@@ -475,7 +520,7 @@ mod tests {
             .collect();
         let body = serde_json::json!({"messages": [{"role": "user", "content": keys.join(" ")}]})
             .to_string();
-        let (found, _) = r.look(body.as_bytes());
+        let (found, _) = r.look(body.as_bytes(), CHAT);
         let rules = per_rule(&found);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].values, 12);
@@ -512,7 +557,7 @@ mod tests {
         let body =
             serde_json::json!({"messages": [{"role": "user", "content": format!("{KEY} PRJ-7")}]})
                 .to_string();
-        let (found, ledger) = r.look(body.as_bytes());
+        let (found, ledger) = r.look(body.as_bytes(), CHAT);
         let rules = per_rule(&found);
         assert_eq!(rules.len(), 2, "both are found and reported");
         let key = rules
@@ -522,7 +567,7 @@ mod tests {
         let project = rules.iter().find(|x| x.rule.id() == "project").unwrap();
         assert!(!replaced(&r, &key.rule), "the key is only recorded");
         assert!(replaced(&r, &project.rule));
-        let (sent, _) = r.replace(body.into_bytes(), &ledger);
+        let (sent, _) = r.replace(body.into_bytes(), &ledger, CHAT);
         let sent = String::from_utf8(sent).unwrap();
         assert!(sent.contains(KEY), "{sent}");
         assert!(
@@ -544,14 +589,14 @@ mod tests {
         let body = serde_json::json!({"messages": [{"role": "user",
             "content": "connect with postgres://app:hunter2@db.internal:5432/orders"}]})
         .to_string();
-        let (_, ledger) = r.look(body.as_bytes());
+        let (_, ledger) = r.look(body.as_bytes(), CHAT);
         assert_eq!(ledger.len(), 1, "the password is numbered");
         // The model repeats the password alone: no rule recognises it there.
         let answer =
             br#"{"content":[{"type":"text","text":"The password <<TW_SECRET_1>> is wrong."}]}"#;
         let restored = restore_body(&ledger, answer);
         assert!(String::from_utf8_lossy(&restored).contains("hunter2"));
-        let (rescanned, _) = r.replace(restored.clone(), &ledger);
+        let (rescanned, _) = r.replace_whole(restored.clone(), &ledger);
         assert!(
             String::from_utf8_lossy(&rescanned).contains("hunter2"),
             "rules alone miss it"
@@ -562,5 +607,139 @@ mod tests {
             stored.contains("The password <<TW_SECRET_1>> is wrong."),
             "{stored}"
         );
+    }
+
+    /// Codex sends back its reasoning items by id. One whose id held an
+    /// 11-digit run read as a phone number had it replaced, and the
+    /// upstream refused the whole request.
+    #[test]
+    fn a_reasoning_item_id_is_sent_as_it_is_and_the_same_number_in_text_is_not() {
+        let r = Redaction::new(&RedactPolicy {
+            mode: Mode::Enforce,
+            enable: vec!["cn-mobile-phone".into()],
+            ..Default::default()
+        });
+        let id = "rs_0d1f5e8a13800138000b6f2c9e4a7d3c1b0e9f8a7d6c5b4a3";
+        assert!(
+            !tw_guard::redact::flow::hits(&format!("\"{id}\""), &r.rules).is_empty(),
+            "the rule reads a phone number in the id on its own"
+        );
+        let body = serde_json::json!({
+            "model": "gpt-5-codex",
+            "input": [
+                {"type": "reasoning", "id": id, "summary": [],
+                 "encrypted_content": "gAAAAABo-opaque"},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "call me on 13800138000"}]}
+            ]
+        })
+        .to_string();
+        let (found, ledger) = r.look(body.as_bytes(), RESPONSES);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].count, 1, "only the text");
+        let (sent, _) = r.replace(body.into_bytes(), &ledger, RESPONSES);
+        let sent: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+        assert_eq!(sent["input"][0]["id"], id);
+        let text = sent["input"][1]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("13800138000"), "{text}");
+        assert!(text.contains("<<TW_"), "{text}");
+    }
+
+    /// With every rule on, the protocol's own values — the model, ids,
+    /// types, roles, names, encrypted content — go out as they came, while
+    /// the text written in the request, reasoning and tool calls included,
+    /// is replaced.
+    #[test]
+    fn protocol_values_are_never_replaced_written_text_always_is() {
+        let r = Redaction::new(&RedactPolicy {
+            mode: Mode::Enforce,
+            enable: tw_guard::redact::rules::BUILTINS
+                .iter()
+                .map(|b| b.id.to_string())
+                .collect(),
+            custom: vec![tw_guard::policy::CustomRedactRule {
+                name: "tool".into(),
+                pattern: "notify".into(),
+                matching: tw_guard::policy::ContentMatch::Contains,
+                case_sensitive: false,
+                label: None,
+                action: Default::default(),
+                disabled: false,
+            }],
+            ..Default::default()
+        });
+        const PHONE: &str = "13800138000";
+        const EMAIL: &str = "alice@corp.example.org";
+        let body = serde_json::json!({
+            "model": "gpt-5-codex",
+            "instructions": format!("Deploy with {KEY}"),
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": format!("notify {EMAIL} at {PHONE}")}
+                ]},
+                {"type": "reasoning", "id": format!("rs_0a1b{PHONE}c2d3e4f5"),
+                 "summary": [{"type": "summary_text", "text": format!("The number is {PHONE}.")}],
+                 "encrypted_content": "gAAAAABo-opaque"},
+                {"type": "function_call", "id": format!("fc_{PHONE}"),
+                 "call_id": format!("call_{PHONE}"), "name": "notify",
+                 "arguments": serde_json::json!({"to": EMAIL}).to_string()},
+                {"type": "function_call_output", "call_id": format!("call_{PHONE}"),
+                 "output": format!("sent to {PHONE}")}
+            ],
+            "tools": [{"type": "function", "name": "notify",
+                       "description": format!("Escalations go to {EMAIL}."),
+                       "parameters": {"type": "object"}}]
+        })
+        .to_string();
+        let (_, ledger) = r.look(body.as_bytes(), RESPONSES);
+        let (sent, _) = r.replace(body.clone().into_bytes(), &ledger, RESPONSES);
+        let sent: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+        let came: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        // Protocol values, byte for byte.
+        assert_eq!(sent["model"], came["model"]);
+        for (i, keys) in [
+            (0, &["type", "role"][..]),
+            (1, &["type", "id", "encrypted_content"][..]),
+            (2, &["type", "id", "call_id", "name"][..]),
+            (3, &["type", "call_id"][..]),
+        ] {
+            for k in keys {
+                assert_eq!(sent["input"][i][k], came["input"][i][k], "input[{i}].{k}");
+            }
+        }
+        assert_eq!(sent["input"][1]["summary"][0]["type"], "summary_text");
+        assert_eq!(sent["tools"][0]["name"], "notify");
+        assert_eq!(sent["tools"][0]["type"], "function");
+
+        // Written text, replaced.
+        let written = [
+            sent["instructions"].as_str().unwrap(),
+            sent["input"][0]["content"][0]["text"].as_str().unwrap(),
+            sent["input"][1]["summary"][0]["text"].as_str().unwrap(),
+            sent["input"][2]["arguments"].as_str().unwrap(),
+            sent["input"][3]["output"].as_str().unwrap(),
+            sent["tools"][0]["description"].as_str().unwrap(),
+        ];
+        for text in written {
+            assert!(text.contains("<<TW_"), "{text}");
+            for value in [KEY, PHONE, EMAIL, "notify"] {
+                assert!(!text.contains(value), "{value} in {text}");
+            }
+        }
+        let args: serde_json::Value =
+            serde_json::from_str(sent["input"][2]["arguments"].as_str().unwrap())
+                .expect("the arguments still parse");
+        assert!(args["to"].as_str().unwrap().starts_with("<<TW_"));
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_has_no_written_text() {
+        let r = redaction(Mode::Enforce);
+        let body = format!("user: {KEY}");
+        let (found, ledger) = r.look(body.as_bytes(), CHAT);
+        assert!(found.is_empty() && ledger.is_empty());
+        let (sent, _) = r.replace(body.clone().into_bytes(), &ledger, CHAT);
+        assert_eq!(sent, body.into_bytes());
     }
 }

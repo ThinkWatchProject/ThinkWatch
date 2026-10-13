@@ -326,6 +326,9 @@ fn raw(f: &Frame) -> String {
 mod tests {
     use super::*;
 
+    /// The test requests are written as chat completions.
+    const CHAT: crate::redaction::Shape = crate::redaction::Shape::Generate(Dialect::Chat);
+
     /// A ledger that issued `<<TW_EMAIL_1>>` for `a@x.com`, or nothing.
     fn ctx(email: Option<&str>) -> Ledger {
         let r = crate::redaction::Redaction::new(&tw_guard::policy::RedactPolicy {
@@ -333,8 +336,11 @@ mod tests {
             enable: vec!["email".into()],
             ..Default::default()
         });
-        let body = serde_json::json!({"text": email.unwrap_or("")}).to_string();
-        let ledger = r.look(body.as_bytes()).1;
+        let body = serde_json::json!({"messages": [
+            {"role": "user", "content": email.unwrap_or("")}
+        ]})
+        .to_string();
+        let ledger = r.look(body.as_bytes(), CHAT).1;
         assert_eq!(ledger.len(), usize::from(email.is_some()));
         ledger
     }
@@ -551,8 +557,8 @@ mod tests {
             mode: tw_guard::policy::Mode::Enforce,
             ..Default::default()
         });
-        let body = serde_json::json!({"text": PEM}).to_string();
-        let ledger = r.look(body.as_bytes()).1;
+        let body = serde_json::json!({"messages": [{"role": "user", "content": PEM}]}).to_string();
+        let ledger = r.look(body.as_bytes(), CHAT).1;
         assert_eq!(ledger.len(), 1);
         ledger
     }

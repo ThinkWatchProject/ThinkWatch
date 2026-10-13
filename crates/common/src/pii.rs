@@ -24,12 +24,15 @@ use tw_guard::redact::rules::RuleSet;
 /// built-in rule's id or the custom rule's name. Nothing is kept to restore
 /// them: the result is write-only audit data.
 ///
-/// Found the way a request body is searched (`tw_guard::redact::flow::hits`):
-/// JSON escapes are read, a custom rule's match stays inside one JSON
-/// string so the result is still JSON, base64 payloads are left alone,
-/// and so are the gateway's own placeholders (a captured answer still
-/// carries them). The one base64 payload that is read is a compaction
-/// summary a conversion carries (see [`redact_carried_summaries`]).
+/// Found over the whole text (`tw_guard::redact::flow::hits`), not only
+/// the text written in a request the way a request on the wire is
+/// searched: what is stored is never sent, and a captured body may be an
+/// answer, a stream or a tool result. JSON escapes are read, a custom
+/// rule's match stays inside one JSON string so the result is still JSON,
+/// object keys and base64 payloads are left alone, and so are the
+/// gateway's own placeholders (a captured answer still carries them).
+/// The one base64 payload that is read is a compaction summary a
+/// conversion carries (see [`redact_carried_summaries`]).
 pub fn redact_blob(rules: &RuleSet, input: &str) -> String {
     if rules.is_empty() {
         return input.to_string();
