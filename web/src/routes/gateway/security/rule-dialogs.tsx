@@ -4,7 +4,6 @@ import { AlertCircle, Copy, Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -15,6 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import {
   Table,
   TableBody,
@@ -26,38 +26,39 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { Segmented } from '@/components/segmented';
 import { cn } from '@/lib/utils';
-import type {
-  ContentMatch,
-  Guard,
-  RuleAction,
-  SecurityRuleView,
-  SecurityTestHit,
-  SecurityTestRequest,
+import {
+  DEFAULT_REPLACEMENT,
+  type ContentMatch,
+  type Guard,
+  type GuardMode,
+  type RuleAction,
+  type RuleScope,
+  type SecurityRuleView,
+  type SecurityTestHit,
+  type SecurityTestRequest,
 } from '@/lib/security-types';
 import { Highlight, type Mark } from './highlight';
 import { Code, MatcherText } from './matcher-text';
-import {
-  actionName,
-  actionTone,
-  kindName,
-  modeName,
-  ruleName,
-  ruleWhy,
-  viewName,
-} from './names';
+import { actionName, actionTone, kindName, ruleName, ruleWhy, scopeName, viewName } from './names';
 import {
   ACTIONS,
   DEFAULT_LABEL,
   MATCHES,
   MAX_CODEPOINT_ITEMS,
   NEW_RULE_ACTION,
+  SCOPE_CHOICES,
+  actionAllowed,
   checkCodepoints,
-  hasAction,
+  checksAnswers,
+  choiceOfScope,
   isLabel,
+  matchAllowed,
   patternOf,
   placeholder,
-  type ActionGuard,
+  ruleScope,
+  scopeOfChoice,
   type CustomRuleInput,
+  type ScopeChoice,
 } from './policy';
 import { useTrial, type Trial } from './use-trial';
 
@@ -90,49 +91,65 @@ function Field({
     <div className="min-w-0 space-y-1.5">
       <Label htmlFor={htmlFor}>{label}</Label>
       {children}
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {hint && <div className="space-y-0.5 text-xs text-muted-foreground">{hint}</div>}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }
 
 /**
- * What a rule does in the third mode. Built-in and custom rules choose the
- * same way: a built-in rule supplies the pattern, the operator decides what
- * a hit does. A changed built-in rule says what the factory setting was.
+ * What a rule does when its guard is on. Built-in and custom rules choose
+ * the same way: a built-in rule supplies the pattern, the operator decides
+ * what a hit does. An action a content rule cannot take on what it checks
+ * stays visible, unavailable, with the reason under it. A changed built-in
+ * rule says what the factory setting was.
  */
 function ActionField({
   guard,
   value,
   onChange,
+  scope,
   factory,
+  notice,
   disabled,
 }: {
-  guard: ActionGuard;
+  guard: Guard;
   value: RuleAction;
   onChange: (a: RuleAction) => void;
+  /** Content rules: what the rule checks. */
+  scope?: RuleScope[];
   factory?: RuleAction | null;
+  /** Said once the action was changed for the operator. */
+  notice?: string | null;
   disabled: boolean;
 }) {
   const { t } = useTranslation();
-  const what =
-    value === 'record'
-      ? t(`contentSecurity.dialog.recordWhat.${guard}`)
-      : t(`contentSecurity.dialog.actionWhat.${value}`, { mode: modeName(t, guard, 'enforce') });
+  const what = t(`contentSecurity.dialog.actionWhat.${value}`);
+  const unavailable = ACTIONS[guard].some((a) => scope && !actionAllowed(a, scope));
   return (
     <Field
       label={t('contentSecurity.dialog.action')}
       hint={
-        factory && factory !== value
-          ? t('contentSecurity.dialog.withFactory', { what, action: actionName(t, factory) })
-          : what
+        <>
+          <p>
+            {factory && factory !== value
+              ? t('contentSecurity.dialog.withFactory', { what, action: actionName(t, factory) })
+              : what}
+          </p>
+          {unavailable && <p>{t('contentSecurity.dialog.blockReason')}</p>}
+          {notice && <p className="text-amber-600 dark:text-amber-400">{notice}</p>}
+        </>
       }
     >
       <div>
         <Segmented
           label={t('contentSecurity.dialog.action')}
           value={value}
-          options={ACTIONS[guard].map((a) => ({ value: a, label: actionName(t, a) }))}
+          options={ACTIONS[guard].map((a) => ({
+            value: a,
+            label: actionName(t, a),
+            disabled: scope ? !actionAllowed(a, scope) : false,
+          }))}
           onChange={onChange}
           disabled={disabled}
         />
@@ -147,21 +164,15 @@ function toneOf(action: RuleAction | null | undefined): Mark['tone'] {
 }
 
 /**
- * What the server found: how many, marked in the sample; for redaction and
- * deletion, the text as the third mode would send it; for the content
- * filter, whether that mode would refuse the request.
+ * What the server found: how many, marked in the sample; the text as it
+ * would be sent or received with the guard on; for the content filter,
+ * whether the request would be refused.
  *
  * Every hit carries the action it takes there. A single rule is tried with
- * the action chosen in its dialog, so the colours, the text sent and the
- * refusal all follow that choice.
+ * the action chosen in its dialog, so the colours, the processed text and
+ * the refusal all follow that choice.
  */
-function TrialBox({
-  guard,
-  trial,
-}: {
-  guard: Guard;
-  trial: Trial;
-}) {
+function TrialBox({ trial }: { trial: Trial }) {
   const { t } = useTranslation();
   if (trial.state === 'idle') return null;
   if (trial.state === 'failed') {
@@ -171,7 +182,7 @@ function TrialBox({
   const hits = result?.hits ?? [];
   const tone = (h: SecurityTestHit) => toneOf(h.action);
   const bad = hits.some((h) => tone(h) === 'bad');
-  // Tool-call inspection sends nothing and refuses nothing; the server
+  // Dangerous commands send nothing and refuse nothing; the server
   // answers null and false there.
   const refused = result?.refused === true;
   return (
@@ -198,16 +209,10 @@ function TrialBox({
           marks={hits.map((h) => ({ start: h.start, end: h.end, tone: tone(h) }))}
         />
       )}
-      {refused && (
-        <p className="text-xs text-destructive">
-          {t('contentSecurity.dialog.refused', { mode: modeName(t, guard, 'enforce') })}
-        </p>
-      )}
+      {refused && <p className="text-xs text-destructive">{t('contentSecurity.dialog.refused')}</p>}
       {!refused && result && result.output !== null && (
         <div className="space-y-1 border-t pt-2">
-          <p className="text-xs text-muted-foreground">
-            {t('contentSecurity.dialog.sent', { mode: modeName(t, guard, 'enforce') })}
-          </p>
+          <p className="text-xs text-muted-foreground">{t('contentSecurity.dialog.output')}</p>
           <pre className="font-mono text-xs break-words whitespace-pre-wrap">{result.output}</pre>
         </div>
       )}
@@ -215,17 +220,57 @@ function TrialBox({
   );
 }
 
+/** Which side a content sample is tried as: a request or an answer. */
+function TestSide({
+  value,
+  onChange,
+  scope,
+}: {
+  value: RuleScope;
+  onChange: (s: RuleScope) => void;
+  /** The sides the rule checks; the other is unavailable. Left out: both. */
+  scope?: RuleScope[];
+}) {
+  const { t } = useTranslation();
+  return (
+    <Segmented
+      size="sm"
+      label={t('contentSecurity.dialog.testAs')}
+      value={value}
+      options={(['request', 'response'] as const).map((s) => ({
+        value: s,
+        label: t(`contentSecurity.dialog.testAsSide.${s}`),
+        disabled: scope ? !scope.includes(s) : false,
+      }))}
+      onChange={onChange}
+    />
+  );
+}
+
+/** What the guard's state means for the rule being edited, said by the buttons. */
+function ModeNote({ mode }: { mode: GuardMode }) {
+  const { t } = useTranslation();
+  if (mode === 'enforce') return null;
+  return <span className="mr-auto text-xs text-muted-foreground">{t(`contentSecurity.dialog.modeNote.${mode}`)}</span>;
+}
+
 /**
  * Create or edit a custom rule.
  *
- * Content rules match by text, regex or code points; redaction rules match
- * by text or regex, case-sensitive or not, and name the placeholder a hit
- * becomes; tool and content rules choose what a hit does. Code points and
- * the placeholder name are checked as they are typed; a regex is checked by
+ * Content rules say what they check — requests, answers or both — match by
+ * text, regex or code points (requests only), case-sensitive or not, and
+ * refuse (requests only), delete, replace with a text of their own, or
+ * record. Redaction rules match by text or regex, case-sensitive or not,
+ * name the placeholder a hit becomes, and replace or record. Tool rules
+ * are regexes that cut the call off or record it. A choice the scope rules
+ * out stays visible and unavailable; changing the scope so that the current
+ * choice no longer fits switches it and says so. Code points and the
+ * placeholder name are checked as they are typed; a regex is checked by
  * the server, which marks the sample as it changes.
  */
 export function CustomRuleDialog({
   guard,
+  mode,
   editing,
   seed,
   taken,
@@ -234,6 +279,8 @@ export function CustomRuleDialog({
   onSave,
 }: {
   guard: Guard;
+  /** The guard's state, for the note by the buttons. */
+  mode: GuardMode;
   /** The rule being edited; null to create one. */
   editing: SecurityRuleView | null;
   seed?: RuleSeed;
@@ -246,25 +293,54 @@ export function CustomRuleDialog({
   const { t } = useTranslation();
   const content = guard === 'content';
   const redact = guard === 'redact';
-  const acts = hasAction(guard) ? guard : null;
   const was = editing ? patternOf(editing) : null;
 
   const [name, setName] = useState(editing?.id ?? seed?.name ?? '');
+  const [scopeChoice, setScopeChoice] = useState<ScopeChoice>(
+    content && editing ? choiceOfScope(ruleScope(editing)) : 'request',
+  );
+  const scope = scopeOfChoice(scopeChoice);
   // Content and redaction rules choose; tool rules are regexes.
   const matches = MATCHES[guard];
   const [match, setMatch] = useState<ContentMatch>(() => {
     const written = was?.match ?? seed?.match;
     return written && matches.includes(written) ? written : matches[0];
   });
-  const [caseSensitive, setCaseSensitive] = useState(redact && (was?.caseSensitive ?? false));
+  const choosesCase = redact || content;
+  const [caseSensitive, setCaseSensitive] = useState(choosesCase && (was?.caseSensitive ?? false));
   const [pattern, setPattern] = useState(was?.pattern ?? seed?.pattern ?? '');
   const [label, setLabel] = useState(editing?.label || DEFAULT_LABEL);
-  const [action, setAction] = useState<RuleAction>(
-    editing?.action ?? seed?.action ?? (acts ? NEW_RULE_ACTION[acts] : 'record'),
-  );
+  const [action, setAction] = useState<RuleAction>(() => {
+    const a = editing?.action ?? seed?.action;
+    return a && ACTIONS[guard].includes(a) ? a : NEW_RULE_ACTION[guard];
+  });
+  const [replacement, setReplacement] = useState(editing?.replacement || DEFAULT_REPLACEMENT);
+  const [matchNotice, setMatchNotice] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [testSide, setTestSide] = useState<RuleScope>(scope[0]);
   const [sample, setSample] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /** A scope that checks answers takes neither code points nor a refusal: those switch, with a notice. */
+  function chooseScope(next: ScopeChoice) {
+    setError(null);
+    setScopeChoice(next);
+    const s = scopeOfChoice(next);
+    if (!s.includes(testSide)) setTestSide(s[0]);
+    if (!matchAllowed(match, s)) {
+      setMatch('contains');
+      setMatchNotice(t('contentSecurity.dialog.matchSwitched'));
+    } else {
+      setMatchNotice(null);
+    }
+    if (!actionAllowed(action, s)) {
+      setAction('strip');
+      setActionNotice(t('contentSecurity.dialog.actionSwitched'));
+    } else {
+      setActionNotice(null);
+    }
+  }
 
   const trimmed = name.trim();
   const clash = taken.includes(trimmed);
@@ -276,6 +352,7 @@ export function CustomRuleDialog({
         ? t('contentSecurity.dialog.tooManyCodepoints', { max: MAX_CODEPOINT_ITEMS })
         : null;
   const labelError = redact && !isLabel(label) ? t('contentSecurity.dialog.badLabel') : null;
+  const replaces = content && action === 'replace';
   const empty = match === 'contains' ? pattern.length === 0 : pattern.trim().length === 0;
   // What is still missing, said next to the buttons; a wrong value is
   // already said under its field.
@@ -283,8 +360,11 @@ export function CustomRuleDialog({
     ? t('contentSecurity.dialog.nameRequired')
     : empty
       ? t('contentSecurity.dialog.patternRequired')
-      : null;
+      : replaces && replacement.length === 0
+        ? t('contentSecurity.dialog.replacementRequired')
+        : null;
   const blocked = missing !== null || clash || codepointError !== null || labelError !== null;
+  const exact = choosesCase && match !== 'codepoints' && caseSensitive;
 
   const request: SecurityTestRequest | null =
     !empty && !codepointError && !labelError
@@ -292,10 +372,11 @@ export function CustomRuleDialog({
           sample,
           pattern,
           match: matches.length > 1 ? match : undefined,
-          case_sensitive: redact ? caseSensitive : undefined,
+          case_sensitive: choosesCase && match !== 'codepoints' ? caseSensitive : undefined,
           label: redact ? label : undefined,
-          // Redaction rules have no action; the server refuses one there.
-          action: acts ? action : undefined,
+          action,
+          ...(content ? { scope: testSide } : {}),
+          ...(replaces ? { replacement } : {}),
         }
       : null;
   const trial = useTrial(guard, request);
@@ -306,13 +387,14 @@ export function CustomRuleDialog({
       : match === 'regex'
         ? t('contentSecurity.dialog.patternRegex')
         : t('contentSecurity.dialog.patternCodepoints');
-  const patternHint =
+  const caseHint = exact ? t('contentSecurity.dialog.caseHintOn') : t('contentSecurity.dialog.caseHintOff');
+  const matchHint =
     match === 'contains'
-      ? redact
-        ? t('contentSecurity.dialog.redactContainsHint')
-        : t('contentSecurity.dialog.containsHint')
+      ? `${t('contentSecurity.dialog.containsHint')}${caseHint}`
       : match === 'regex'
-        ? t(`contentSecurity.dialog.regexHint.${guard}`)
+        ? guard === 'inspect_tools'
+          ? t('contentSecurity.dialog.regexHint.inspect_tools')
+          : `${t(`contentSecurity.dialog.regexHint.${guard}`)}${caseHint}`
         : t('contentSecurity.dialog.codepointsHint');
 
   async function save() {
@@ -323,9 +405,10 @@ export function CustomRuleDialog({
         name: trimmed,
         pattern,
         match,
-        caseSensitive: redact && caseSensitive,
-        action: acts ? action : null,
+        caseSensitive: exact,
+        action,
         label: redact ? label : null,
+        ...(content ? { scope, replacement: replaces ? replacement : null } : {}),
         enabled: editing?.enabled ?? true,
       });
     } catch (err) {
@@ -346,7 +429,7 @@ export function CustomRuleDialog({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1">
           <Field
             label={t('contentSecurity.dialog.name')}
             htmlFor="rule-name"
@@ -366,8 +449,37 @@ export function CustomRuleDialog({
             />
           </Field>
 
+          {content && (
+            <Field label={t('contentSecurity.dialog.scope')} hint={t('contentSecurity.dialog.scopeHint')}>
+              <div>
+                <Segmented
+                  label={t('contentSecurity.dialog.scope')}
+                  value={scopeChoice}
+                  options={SCOPE_CHOICES.map((c) => ({
+                    value: c,
+                    label: t(`contentSecurity.scopeChoice.${c}`),
+                  }))}
+                  onChange={chooseScope}
+                  disabled={readOnly}
+                />
+              </div>
+            </Field>
+          )}
+
           {matches.length > 1 && (
-            <Field label={t('contentSecurity.dialog.matchKind')}>
+            <Field
+              label={t('contentSecurity.dialog.matchKind')}
+              hint={
+                <>
+                  <p>{matchHint}</p>
+                  {content && checksAnswers(scope) && match === 'regex' && (
+                    <p>{t('contentSecurity.dialog.regexAnswerHint')}</p>
+                  )}
+                  {content && checksAnswers(scope) && <p>{t('contentSecurity.dialog.codepointsReason')}</p>}
+                  {matchNotice && <p className="text-amber-600 dark:text-amber-400">{matchNotice}</p>}
+                </>
+              }
+            >
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <Segmented
                   label={t('contentSecurity.dialog.matchKind')}
@@ -375,22 +487,25 @@ export function CustomRuleDialog({
                   options={matches.map((m) => ({
                     value: m,
                     label: t(`contentSecurity.dialog.match.${m}`),
+                    disabled: content ? !matchAllowed(m, scope) : false,
                   }))}
                   onChange={(m) => {
                     setError(null);
+                    setMatchNotice(null);
                     setMatch(m);
                   }}
                   disabled={readOnly}
                 />
-                {redact && (
-                  <label className="flex cursor-pointer items-center gap-2 text-sm">
-                    <Checkbox
-                      checked={caseSensitive}
+                {choosesCase && (
+                  <label className="flex items-center gap-2 text-sm">
+                    <Switch
+                      size="sm"
+                      checked={match !== 'codepoints' && caseSensitive}
                       onCheckedChange={(v) => {
                         setError(null);
-                        setCaseSensitive(v === true);
+                        setCaseSensitive(v);
                       }}
-                      disabled={readOnly}
+                      disabled={readOnly || match === 'codepoints'}
                     />
                     {t('contentSecurity.dialog.caseSensitive')}
                   </label>
@@ -399,7 +514,12 @@ export function CustomRuleDialog({
             </Field>
           )}
 
-          <Field label={patternLabel} htmlFor="rule-pattern" hint={patternHint} error={codepointError}>
+          <Field
+            label={patternLabel}
+            htmlFor="rule-pattern"
+            hint={matches.length > 1 ? undefined : matchHint}
+            error={codepointError}
+          >
             <Input
               id="rule-pattern"
               className="font-mono"
@@ -416,6 +536,38 @@ export function CustomRuleDialog({
               disabled={readOnly}
             />
           </Field>
+
+          <ActionField
+            guard={guard}
+            value={action}
+            onChange={(a) => {
+              setActionNotice(null);
+              setAction(a);
+            }}
+            scope={content ? scope : undefined}
+            notice={actionNotice}
+            disabled={readOnly}
+          />
+
+          {replaces && (
+            <Field
+              label={t('contentSecurity.dialog.replacement')}
+              htmlFor="rule-replacement"
+              hint={t('contentSecurity.dialog.replacementHint')}
+            >
+              <Input
+                id="rule-replacement"
+                className="w-56 font-mono"
+                value={replacement}
+                spellCheck={false}
+                onChange={(e) => {
+                  setError(null);
+                  setReplacement(e.target.value);
+                }}
+                disabled={readOnly}
+              />
+            </Field>
+          )}
 
           {redact && (
             <Field
@@ -448,11 +600,8 @@ export function CustomRuleDialog({
             </Field>
           )}
 
-          {acts && (
-            <ActionField guard={acts} value={action} onChange={setAction} disabled={readOnly} />
-          )}
-
           <Field label={t('contentSecurity.dialog.sample')} htmlFor="rule-sample">
+            {content && <TestSide value={testSide} onChange={setTestSide} scope={scope} />}
             <Textarea
               id="rule-sample"
               className="min-h-16 font-mono text-xs"
@@ -461,7 +610,7 @@ export function CustomRuleDialog({
               placeholder={t(`contentSecurity.guard.${guard}.samplePlaceholder`)}
               onChange={(e) => setSample(e.target.value)}
             />
-            <TrialBox guard={guard} trial={trial} />
+            <TrialBox trial={trial} />
           </Field>
         </div>
 
@@ -475,8 +624,10 @@ export function CustomRuleDialog({
         )}
 
         <DialogFooter className="items-center">
-          {missing && canWrite && (
+          {missing && canWrite ? (
             <span className="mr-auto text-xs text-muted-foreground">{missing}</span>
+          ) : (
+            <ModeNote mode={mode} />
           )}
           <Button variant="outline" onClick={onClose} disabled={saving}>
             {canWrite ? t('common.cancel') : t('common.close')}
@@ -493,13 +644,14 @@ export function CustomRuleDialog({
 }
 
 /**
- * A built-in rule: what it matches, why it is there, a sample to try it on
- * (also while it is off — the rules that ship off are the ones to try
- * first). Tool and content rules also take an action here, and can be
- * copied as a custom rule to change what they match.
+ * A built-in rule: what it matches, why it is there, its action, and a
+ * sample to try it on (also while it is off — the rules that ship off are
+ * the ones to try first). A built-in rule with a pattern can be copied as
+ * a custom rule to change what it matches.
  */
 export function BuiltinRuleDialog({
   guard,
+  mode,
   rule,
   canWrite,
   onClose,
@@ -507,22 +659,23 @@ export function BuiltinRuleDialog({
   onSaveAction,
 }: {
   guard: Guard;
+  mode: GuardMode;
   rule: SecurityRuleView;
   canWrite: boolean;
   onClose: () => void;
-  /** Absent where no equivalent custom rule can be written: redaction, and checks implemented in code. */
+  /** Absent where no equivalent custom rule can be written: checks implemented in code. */
   onCopy?: () => void;
   onSaveAction: (action: RuleAction) => Promise<void>;
 }) {
   const { t } = useTranslation();
-  const acts = hasAction(guard) ? guard : null;
-  const [action, setAction] = useState<RuleAction>(rule.action ?? 'record');
+  const initial = rule.action ?? 'record';
+  const [action, setAction] = useState<RuleAction>(initial);
   const [sample, setSample] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const trial = useTrial(guard, { sample, rule: rule.id, action: acts ? action : undefined });
+  const trial = useTrial(guard, { sample, rule: rule.id, action });
   const why = ruleWhy(t, guard, rule);
-  const changed = acts !== null && action !== (rule.action ?? 'record');
+  const changed = action !== initial;
 
   async function save() {
     setSaving(true);
@@ -555,23 +708,34 @@ export function BuiltinRuleDialog({
             </div>
           </Field>
 
+          {guard === 'content' && (
+            <Field label={t('contentSecurity.dialog.scope')} hint={t('contentSecurity.dialog.builtinScope')}>
+              <div className="flex gap-1">
+                {ruleScope(rule).map((s) => (
+                  <Badge key={s} variant="outline" className="font-normal">
+                    {scopeName(t, s)}
+                  </Badge>
+                ))}
+              </div>
+            </Field>
+          )}
+
           {guard === 'redact' && (
-            <Field label={t('contentSecurity.col.replaceWith')}>
+            <Field label={t('contentSecurity.dialog.placeholderField')}>
               <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
                 <Code>{placeholder(rule.label)}</Code>
               </div>
             </Field>
           )}
 
-          {acts && (
-            <ActionField
-              guard={acts}
-              value={action}
-              onChange={setAction}
-              factory={rule.default_action}
-              disabled={!canWrite}
-            />
-          )}
+          <ActionField
+            guard={guard}
+            value={action}
+            onChange={setAction}
+            scope={guard === 'content' ? ruleScope(rule) : undefined}
+            factory={rule.default_action}
+            disabled={!canWrite}
+          />
 
           <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-y-1 text-sm">
             <dt className="text-muted-foreground">{t('contentSecurity.dialog.state')}</dt>
@@ -587,7 +751,7 @@ export function BuiltinRuleDialog({
               placeholder={t(`contentSecurity.guard.${guard}.samplePlaceholder`)}
               onChange={(e) => setSample(e.target.value)}
             />
-            <TrialBox guard={guard} trial={trial} />
+            <TrialBox trial={trial} />
           </Field>
         </div>
 
@@ -607,9 +771,9 @@ export function BuiltinRuleDialog({
               {t('contentSecurity.menu.copyAsCustom')}
             </Button>
           ) : (
-            <span />
+            <ModeNote mode={mode} />
           )}
-          {acts && canWrite ? (
+          {canWrite ? (
             <div className="flex gap-2">
               <Button variant="outline" onClick={onClose} disabled={saving}>
                 {t('common.cancel')}
@@ -629,17 +793,18 @@ export function BuiltinRuleDialog({
 
 /**
  * Tries a sample against every rule that is on, through the server — no
- * request is sent anywhere. Shows each rule that matched, the text the
- * third mode would send, and for the content filter whether that mode
- * would refuse the request.
+ * request is sent anywhere. Shows each rule that matched, the text after
+ * processing, and for the content filter whether the request would be
+ * refused. A content sample is tried as a request or as an answer.
  */
 export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => void }) {
   const { t } = useTranslation();
   const [sample, setSample] = useState('');
-  const trial = useTrial(guard, { sample });
+  const [side, setSide] = useState<RuleScope>('request');
+  const content = guard === 'content';
+  const trial = useTrial(guard, content ? { sample, scope: side } : { sample });
   const result = trial.state === 'done' ? trial.result : trial.state === 'running' ? trial.last : undefined;
   const hits = result?.hits ?? [];
-  const acts = hasAction(guard);
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -651,6 +816,7 @@ export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => vo
 
         <div className="space-y-4">
           <Field label={t('contentSecurity.dialog.sample')} htmlFor="test-sample">
+            {content && <TestSide value={side} onChange={setSide} />}
             <Textarea
               id="test-sample"
               className="min-h-24 font-mono text-xs"
@@ -663,19 +829,19 @@ export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => vo
 
           {trial.state !== 'idle' && (
             <div className="space-y-2">
-              <TrialBox guard={guard} trial={trial} />
+              <TrialBox trial={trial} />
               {hits.length > 0 && (
                 <Table className="table-fixed">
                   <colgroup>
                     <col className="w-[40%]" />
                     <col />
-                    {acts && <col className="w-24" />}
+                    <col className="w-32" />
                   </colgroup>
                   <TableHeader>
                     <TableRow>
                       <TableHead>{t('contentSecurity.col.rule')}</TableHead>
                       <TableHead>{t('contentSecurity.dialog.content')}</TableHead>
-                      {acts && <TableHead>{t('contentSecurity.col.action')}</TableHead>}
+                      <TableHead>{t('contentSecurity.col.action')}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -692,11 +858,9 @@ export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => vo
                         <TableCell className="truncate font-mono text-xs text-muted-foreground">
                           {h.excerpt}
                         </TableCell>
-                        {acts && (
-                          <TableCell className={actionTone(h.action)}>
-                            {actionName(t, h.action ?? 'record')}
-                          </TableCell>
-                        )}
+                        <TableCell className={actionTone(h.action)}>
+                          {actionName(t, h.action ?? 'record')}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

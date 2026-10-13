@@ -1,5 +1,5 @@
 import type { TFunction } from 'i18next';
-import type { Guard, GuardMode, RuleAction, SecurityRuleView } from '@/lib/security-types';
+import type { Guard, GuardMode, RuleAction, RuleScope, SecurityRuleView } from '@/lib/security-types';
 
 // Names on the security page. Built-in rules are looked up by id; a rule
 // the server ships before the console has a name for it falls back to the
@@ -9,14 +9,14 @@ export function guardName(t: TFunction, guard: Guard): string {
   return t(`contentSecurity.guard.${guard}.name`);
 }
 
-/**
- * A mode's name on one guard. The third mode is named for what it does
- * there: Replace (redaction), Cut off (tool calls), Enforce (content).
- */
-export function modeName(t: TFunction, guard: Guard, mode: GuardMode): string {
-  if (mode === 'off') return t('contentSecurity.modeOff');
-  if (mode === 'observe') return t('contentSecurity.modeObserve');
-  return t(`contentSecurity.guard.${guard}.enforce`);
+/** A mode's name, the same on every guard: On, Monitor, Off. */
+export function modeName(t: TFunction, mode: GuardMode): string {
+  return t(`contentSecurity.mode.${mode}`);
+}
+
+/** What a content rule checks, as a tag: Request, Answer. */
+export function scopeName(t: TFunction, scope: RuleScope): string {
+  return t(`contentSecurity.scope.${scope}`);
 }
 
 export function ruleName(
@@ -64,13 +64,18 @@ export function actionName(t: TFunction, action: RuleAction): string {
   return t(`contentSecurity.ruleAction.${action}`);
 }
 
-/** Text colour for an action: the ones that change a request's outcome stand out. */
+/**
+ * Text colour for an action: stopping a request or a call is red, changing
+ * text is amber, recording is muted.
+ */
 export function actionTone(action: RuleAction | null | undefined): string {
   switch (action) {
     case 'block':
     case 'cut':
       return 'text-destructive';
     case 'strip':
+    case 'replace':
+    case 'placeholder':
       return 'text-amber-600 dark:text-amber-400';
     default:
       return 'text-muted-foreground';

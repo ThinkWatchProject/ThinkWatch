@@ -228,6 +228,7 @@ mod tests {
                 matching: tw_guard::policy::ContentMatch::Regex,
                 case_sensitive: true,
                 label: None,
+                action: Default::default(),
                 disabled: false,
             }],
             ..Default::default()

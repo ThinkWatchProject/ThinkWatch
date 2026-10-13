@@ -26,12 +26,12 @@ forces a future cleanup.
 | Rate limit       | 限流        | Sliding-window limits in `rate_limit_rules`. |
 | Webhook outbox   | Webhook 出箱 | Durable retry queue. |
 | Forwarder        | 转发器      | Audit log forwarder (syslog / Kafka / webhook). |
-| Outbound redaction | 出站脱敏  | Request guard: credentials and personal information become placeholders. Permission resource stays `pii_redactor`. |
-| Tool-call inspection | 工具调用审查 | Request guard on the tool calls an upstream returns. |
-| Content filter   | 内容过滤    | Request guard on user messages and tool results. |
-| Off / Observe    | 关闭 / 观察 | The first two guard modes. Observe only records hits. |
-| Replace / Cut off / Enforce | 替换 / 切断 / 处置 | Third guard mode, named for what it does: redaction, tool-call inspection, content filter. Not 拦截. |
-| Refuse / Delete / Record only | 拒绝 / 删除 / 仅记录 | What a content rule does in Enforce. Tool rules: Cut off / Record only. |
+| Secrets & privacy | 密钥与隐私 | Guard (config key `security.redact`, formerly "outbound redaction"): credentials and personal information in requests. Permission resource stays `pii_redactor`. |
+| Dangerous commands | 危险命令 | Guard (`security.inspect_tools`, formerly "tool-call inspection") on the tool calls an upstream returns. |
+| Content filter   | 内容过滤    | Guard (`security.content`) on user messages, tool results and, per rule, the text of answers. |
+| On / Monitor / Off | 开启 / 监控 / 关闭 | A guard's three states (`enforce` / `observe` / `off`), the same on every guard. Monitor only records hits. |
+| Replace with placeholder / Cut off / Refuse / Delete / Replace / Record only | 替换为占位符 / 切断 / 拒绝 / 删除 / 替换 / 仅记录 | Rule actions. Redaction: placeholder or record; dangerous commands: cut off or record; content: refuse (requests only), delete, replace or record. Not 拦截. |
+| Checks: Request / Answer | 检查对象：请求 / 回答 | What a content rule checks. Answer = the model's text, not its tool calls or thinking. |
 | Placeholder      | 占位符      | What redaction puts in place of a value: `<<TW_LABEL_n>>`. |
 
 ## Style

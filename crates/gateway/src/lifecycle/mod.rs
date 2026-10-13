@@ -49,10 +49,16 @@ pub(crate) struct ChatCompletionSurface;
 
 /// A whole answer, in the caller's format.
 pub struct Completed {
-    /// As the caller will receive it, except that redaction placeholders
-    /// are still in place — this is also the form the cache stores, so a
-    /// later caller can paint in their own values.
+    /// As the upstream answered, in the caller's format, with redaction
+    /// placeholders still in place and the answer's text not yet through
+    /// the content rules — the form the cache stores, so a later caller
+    /// can paint in their own values and have the rules in force then run
+    /// on them.
     pub body: Vec<u8>,
+    /// What the request's log row stores: the answer as the client
+    /// received it (values restored, text through the content rules), with
+    /// the values masked again (see [`for_the_log`]). `None`: `body`.
+    pub logged: Option<Vec<u8>>,
     /// Read off the upstream's bytes, whatever format they were in, or
     /// estimated when they carried none.
     pub usage: tw_dialect::usage::Usage,
@@ -75,10 +81,13 @@ pub struct ChatStreamCaptured {
     /// `usage` is at least partly an estimate.
     pub usage_estimated: bool,
     pub cost_usd: Decimal,
-    /// The stream assembled into a whole answer, for the cache and the
-    /// audit row. `None` when it produced nothing or could not be
-    /// assembled.
+    /// The stream assembled into a whole answer, in the form the cache
+    /// keeps (placeholders in place, text not through the content rules).
+    /// `None` when it produced nothing or could not be assembled.
     pub assembled: Option<Vec<u8>>,
+    /// The same answer as the client received it, masked again for the
+    /// log row (see [`for_the_log`]).
+    pub logged: Option<Vec<u8>>,
 }
 
 /// The in-flight request, captured once at the handler and read by every
@@ -218,6 +227,14 @@ pub(crate) fn build_chat_pump(
         provider.to_string(),
     );
 
+    // What the content rules find in the answer is recorded by the tail,
+    // whether the stream ran to its end or the client left.
+    let answer_hits = shaper.answer_hits();
+    let content = guards.content.clone();
+    let redaction = guards.redaction.clone();
+    let caller =
+        crate::guards::Caller::of(&request.identity, &request.trace_id, &request.mapped_model);
+
     let mut last_frame = LastFrame::new(client, client_sse);
     let provider_for_tail = provider.to_string();
     let provider = provider.to_string();
@@ -245,6 +262,7 @@ pub(crate) fn build_chat_pump(
             r.sniffer = Some(tw_dialect::usage::Sniffer::new());
             r.collector = Some(wire.collect.collector());
             r.errors = Some(ErrorWatch::new(wire.dialect));
+            r.ledger = Some(wire.ledger.clone());
         }
         // The hop that answered can have numbered a value of its own.
         shaper.restore_with(&wire.ledger);
@@ -378,18 +396,29 @@ pub(crate) fn build_chat_pump(
         )
         .increment(1);
 
+        if let Ok(hits) = answer_hits.lock() {
+            crate::content_filter::record_answer(
+                &deps_state.audit,
+                &caller,
+                &provider_for_tail,
+                content.mode,
+                &hits,
+            );
+        }
+
         // The sniffer exists once the upstream answered. Without an
         // answer there is nothing to bill.
-        let (answered, reported, assembled) = match readers_for_tail.lock() {
+        let (answered, reported, assembled, ledger) = match readers_for_tail.lock() {
             Ok(mut r) => {
                 let sniffer = r.sniffer.take();
                 (
                     sniffer.is_some(),
                     sniffer.and_then(|s| s.finish()),
                     r.collector.take().and_then(|c| c.finish().ok()),
+                    r.ledger.take(),
                 )
             }
-            Err(_) => (false, None, None),
+            Err(_) => (false, None, None, None),
         };
         // A stream that did not run to its end lost the upstream's final
         // count with it: the caller left, or the upstream broke off.
@@ -410,13 +439,23 @@ pub(crate) fn build_chat_pump(
             .cost_tracker
             .calculate_cost(&mapped_model, &priced(&usage))
             .await;
+        // A cache hit hands this back to a caller, so it carries the
+        // caller's model name like everything else they receive. It stays
+        // in placeholder form, unfiltered: the content rules run on the
+        // restored text of each hit.
+        let assembled = assembled.map(|b| rewrite_model(&b, &mapped_model));
+        // The log row gets what the client was shown. (The hits were
+        // recorded above, from the stream itself.)
+        let logged = match (&assembled, &ledger) {
+            (Some(b), Some(l)) => Some(for_the_log(&content, &redaction, l, client, b)),
+            _ => None,
+        };
         let captured = ChatStreamCaptured {
             usage,
             usage_estimated,
             cost_usd,
-            // A cache hit hands this back to a caller, so it carries the
-            // caller's model name like everything else they receive.
-            assembled: assembled.map(|b| rewrite_model(&b, &mapped_model)),
+            assembled,
+            logged,
         };
         Invoked {
             client_ip: identity.ip_address.clone(),
@@ -433,6 +472,29 @@ pub(crate) fn build_chat_pump(
     (response, tail)
 }
 
+/// The answer as the client received it, for the request's log row:
+/// `body` (placeholder form) with the caller's values restored and the
+/// text through the content rules — **the rules always run on restored
+/// text**, so a rule never cuts into a placeholder — and then the values
+/// masked again with the same placeholders, by the rules and by the ledger
+/// ([`crate::redaction::Redaction::mask_for_storage`]), so the row holds no
+/// more of the caller's values than it did before answers were filtered. Nothing
+/// is recorded here: the hits were recorded on the way to the client.
+pub(crate) fn for_the_log(
+    content: &crate::content_filter::ContentFilter,
+    redaction: &crate::redaction::Redaction,
+    ledger: &tw_guard::redact::replace::Ledger,
+    client: Dialect,
+    body: &[u8],
+) -> Vec<u8> {
+    if content.answer.is_none() {
+        return body.to_vec();
+    }
+    let restored = crate::redaction::restore_body(ledger, body);
+    let (filtered, _) = content.whole(client, restored);
+    redaction.mask_for_storage(filtered, ledger)
+}
+
 /// What the pump reads off the upstream's bytes as they pass, for the
 /// tail. Each reader exists once the upstream answered.
 #[derive(Default)]
@@ -441,6 +503,8 @@ struct Readers {
     collector: Option<tw_dialect::convert::Collector>,
     /// `None` once it found an error.
     errors: Option<ErrorWatch>,
+    /// The ledger the answering hop restores with, for the log row.
+    ledger: Option<tw_guard::redact::replace::Ledger>,
     /// The first error the upstream reported in its stream.
     said: Option<Said>,
 }
@@ -950,7 +1014,7 @@ impl Surface for ChatCompletionSurface {
                     d.insert("client_status".into(), 200.into());
                 }
                 (
-                    captured.assembled.as_deref(),
+                    captured.logged.as_deref().or(captured.assembled.as_deref()),
                     captured.cost_usd,
                     status,
                     detail,
@@ -962,7 +1026,12 @@ impl Surface for ChatCompletionSurface {
                     .cost_tracker
                     .calculate_cost(&deps.request.mapped_model, &priced(&usage))
                     .await;
-                (Some(c.body.as_slice()), cost, 200_i64, None)
+                (
+                    Some(c.logged.as_deref().unwrap_or(c.body.as_slice())),
+                    cost,
+                    200_i64,
+                    None,
+                )
             }
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(e)) => (
                 None,
@@ -1402,5 +1471,54 @@ mod tests {
         for sse in [true, false] {
             assert!(!LastFrame::new(Dialect::Gemini, sse).is_in(last));
         }
+    }
+
+    /// An answer rule whose text is also in a placeholder's label: run on
+    /// the placeholder form it would cut `<<TW_EMAIL_1>>` apart.
+    #[test]
+    fn the_log_gets_the_restored_answer_filtered_and_masked_again() {
+        use tw_guard::policy::{
+            ContentAction, ContentMatch, ContentPolicy, ContentScope, CustomContentRule, Mode,
+            RedactPolicy,
+        };
+        let redaction = crate::redaction::Redaction::new(&RedactPolicy {
+            mode: Mode::Enforce,
+            enable: vec!["email".into()],
+            ..Default::default()
+        });
+        let request = serde_json::json!({"messages": [
+            {"role": "user", "content": "my email is alice@corp.example.org"}
+        ]})
+        .to_string();
+        let (_, ledger) = redaction.look(request.as_bytes());
+        let content = crate::content_filter::ContentFilter::new(&ContentPolicy {
+            mode: Mode::Enforce,
+            custom: vec![CustomContentRule {
+                name: "Word".into(),
+                pattern: "email".into(),
+                scope: vec![ContentScope::Response],
+                matching: ContentMatch::Contains,
+                case_sensitive: false,
+                action: ContentAction::Strip,
+                replacement: "***".into(),
+                disabled: false,
+            }],
+            ..Default::default()
+        });
+        let upstream = serde_json::json!({"choices": [{"index": 0, "message": {
+            "role": "assistant", "content": "my email is <<TW_EMAIL_1>>"}}]})
+        .to_string();
+        let logged = for_the_log(
+            &content,
+            &redaction,
+            &ledger,
+            Dialect::Chat,
+            upstream.as_bytes(),
+        );
+        let v: serde_json::Value = serde_json::from_slice(&logged).unwrap();
+        assert_eq!(
+            v["choices"][0]["message"]["content"], "my  is <<TW_EMAIL_1>>",
+            "the rule ran on the address, the log keeps its placeholder"
+        );
     }
 }

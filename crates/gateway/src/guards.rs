@@ -1,20 +1,27 @@
-//! The request guards in force: outbound redaction, the content filter and
-//! tool-call inspection, compiled from their policies (`security.redact`,
-//! `security.content`, `security.inspect_tools`; see
+//! The request guards in force — secrets and privacy (outbound redaction),
+//! the content filter (requests and answer text) and dangerous commands
+//! (tool-call inspection) — compiled from their policies
+//! (`security.redact`, `security.content`, `security.inspect_tools`; see
 //! `think_watch_common::guard_policy`).
 //!
 //! One snapshot, swapped whole when a policy changes. A request takes it
 //! once and runs every guard from it, so a change that lands mid-request
 //! cannot redact one hop with the old rules and restore with the new.
 //!
-//! Every hit is written to the audit log, one event per hit:
+//! Every hit is written to the audit log, one event per rule and request
+//! (and, for the content filter, per side), so the log forwarders send it
+//! on. A hit that is only recorded — the guard monitoring (`mode:
+//! observe`), or the rule's action being to record — has an event of its
+//! own:
 //!
 //! | guard | events |
 //! |---|---|
-//! | content filter | `gateway.content_flagged` (recorded), `gateway.content_stripped`, `gateway.content_blocked` |
-//! | outbound redaction | `gateway.redaction_flagged` (observe), `gateway.redaction_replaced` (enforce) |
-//! | tool-call inspection | `gateway.tool_call_flagged` (recorded), `gateway.tool_call_blocked` (cut) |
+//! | content filter | `gateway.content_flagged` (recorded), `gateway.content_stripped`, `gateway.content_replaced`, `gateway.content_blocked` (requests only); `direction` is `request` or `response` |
+//! | secrets and privacy | `gateway.redaction_flagged` (recorded), `gateway.redaction_replaced` (replaced with placeholders) |
+//! | dangerous commands | `gateway.tool_call_flagged` (recorded), `gateway.tool_call_blocked` (cut) |
 //!
+//! Each event's detail carries the rule, its action, the outcome and the
+//! guard's `mode`.
 //! **The audit log gets no text of the request.** It is forwarded and read
 //! far more widely than the request it came from (`logs:read_all`, against
 //! `logs:read_bodies` for bodies). A content event names the rule and

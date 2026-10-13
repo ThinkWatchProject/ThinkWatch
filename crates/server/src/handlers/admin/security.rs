@@ -1,5 +1,7 @@
-//! The request guards in the console: every rule of each guard, and a
-//! sample tried against them.
+//! The request guards in the console — secrets and privacy (outbound
+//! redaction), dangerous commands (tool-call inspection) and the content
+//! filter, which checks requests and the text of answers: every rule of
+//! each guard, and a sample tried against them.
 //!
 //! Both answers are thinkwatch-core's (`tw_guard::view`, `tw_guard::trial`),
 //! the same JSON the desktop app's control API returns for the same
@@ -41,9 +43,11 @@ fn read_permission(guard: Guard) -> &'static str {
     }
 }
 
-/// GET /api/admin/security — the three guards: mode and every rule
-/// (built-in and custom) with whether it is on, what it does in the third
-/// mode and what it does out of the box.
+/// GET /api/admin/security — the three guards: mode (on, monitor, off) and
+/// every rule (built-in and custom) with whether it is on, what it does
+/// while the guard is on and what it does out of the box; a content rule
+/// also says what it checks (requests, answers) and what a hit is replaced
+/// with.
 #[utoipa::path(
     get,
     path = "/api/admin/security",
@@ -67,8 +71,10 @@ pub async fn get_security(
 
 /// POST /api/admin/security/{guard}/test — try a sample against one
 /// guard: its enabled rules, one built-in rule (`rule`, switched off or
-/// not), or a rule still being written (`pattern`). Answers every hit, and
-/// what the third mode would send (`output`) or whether it would refuse.
+/// not), or a rule still being written (`pattern`). A content sample is
+/// tried as a request or as an answer (`scope`). Answers every hit, and
+/// what the guard would send or pass on while on (`output`), or whether it
+/// would refuse.
 #[utoipa::path(
     post,
     path = "/api/admin/security/{guard}/test",
@@ -78,7 +84,7 @@ pub async fn get_security(
     ),
     request_body(
         content = inline(serde_json::Value),
-        description = "sample: string; pattern?, match?, case_sensitive?, rule?, label?, action? (thinkwatch-core's SecurityTestRequest)",
+        description = "sample: string; pattern?, match?, case_sensitive?, rule?, label?, action?, scope? (`request` or `response`), replacement? (thinkwatch-core's SecurityTestRequest)",
     ),
     responses(
         (status = 200, description = "Hits, output and refusal (thinkwatch-core's SecurityTestResult)", body = serde_json::Value),

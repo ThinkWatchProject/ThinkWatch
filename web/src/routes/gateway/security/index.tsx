@@ -21,15 +21,16 @@ import {
   type SecurityRuleView,
 } from '@/lib/security-types';
 import { GuardPanel, type RuleActions } from './guard-panel';
-import { guardName, modeDot, modeName, viewName } from './names';
+import { LogPanel } from './log-panel';
+import { actionName, guardName, modeDot, modeName, viewName } from './names';
 import {
   customRuleView,
-  hasAction,
   patternOf,
   policyOf,
   withAction,
   withCustom,
   withEnabled,
+  withEnabledMany,
   withMode,
   withoutCustom,
   type CustomRuleInput,
@@ -53,6 +54,11 @@ const READ_PERMISSION: Record<Guard, string> = {
 /** A policy is saved through the settings endpoint: that takes `settings:write` as well as the guard's own. */
 const mayWrite = (g: Guard) => hasPermission('settings:write') && hasPermission(WRITE_PERMISSION[g]);
 
+/** The log is read from the audit log, which takes `logs:read_all`. */
+const mayReadLog = () => hasPermission('logs:read_all');
+
+type Tab = 'log' | Guard;
+
 type DialogState =
   | null
   | { kind: 'custom'; guard: Guard; editing: SecurityRuleView | null; seed?: RuleSeed }
@@ -65,13 +71,17 @@ function message(err: unknown, fallback: string): string {
 }
 
 /**
- * Request guards: outbound redaction, tool-call inspection and the content
- * filter, one tab each. All three apply to every request through the AI
+ * The security page: a log of what the guards found, then one tab per
+ * guard — secrets and privacy (outbound redaction), dangerous commands
+ * (tool-call inspection) and the content filter, which checks requests and
+ * the text of answers. All three apply to every request through the AI
  * gateway, whatever the key, model or provider.
  *
- * Each guard has a mode — off, observe, and a third mode named for what it
- * does there — and a rule table: built-in rules that can be switched (tool
- * and content rules can also take another action) and custom rules.
+ * Each guard is On, Monitor or Off, and has a rule table: built-in rules,
+ * grouped, that can be switched one by one or a group at a time, and
+ * custom rules; every rule has an action of its own, which applies while
+ * the guard is on. A monitoring guard only records, whatever the actions
+ * say. Every hit is an audit event, so the log forwarders send it on.
  *
  * **Every change is written at once, as the guard's whole policy object**
  * under its `security.*` settings key, built from the view on screen.
@@ -82,7 +92,7 @@ function message(err: unknown, fallback: string): string {
 export function GatewaySecurityPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<Guard>('redact');
+  const [tab, setTab] = useState<Tab>(() => (mayReadLog() ? 'log' : 'redact'));
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -134,7 +144,7 @@ export function GatewaySecurityPage() {
     write(guard, withMode(d, mode), true).then(
       () =>
         toast.success(
-          t('contentSecurity.toast.modeSet', { guard: guardName(t, guard), mode: modeName(t, guard, mode) }),
+          t('contentSecurity.toast.modeSet', { guard: guardName(t, guard), mode: modeName(t, mode) }),
           undoable
             ? { action: { label: t('contentSecurity.toast.undo'), onClick: () => setMode(guard, before, false) } }
             : undefined,
@@ -159,6 +169,49 @@ export function GatewaySecurityPage() {
     );
   }
 
+  /** A group's checkbox: every rule shown in it, in one write. */
+  function toggleMany(guard: Guard, rules: SecurityRuleView[], enabled: boolean, group: string, undoable = true) {
+    const d = current(guard);
+    if (!d || rules.length === 0) return;
+    const before = rules.filter((r) => r.enabled !== enabled);
+    write(guard, withEnabledMany(d, rules, enabled), true).then(
+      () =>
+        toast.success(
+          enabled
+            ? t('contentSecurity.toast.groupOn', { name: group, count: rules.length })
+            : t('contentSecurity.toast.groupOff', { name: group, count: rules.length }),
+          undoable && before.length > 0
+            ? {
+                action: {
+                  label: t('contentSecurity.toast.undo'),
+                  onClick: () => toggleMany(guard, before, !enabled, group, false),
+                },
+              }
+            : undefined,
+        ),
+      failed,
+    );
+  }
+
+  /** A rule's action, chosen in its row. */
+  function act(guard: Guard, rule: SecurityRuleView, action: RuleAction, undoable = true) {
+    const d = current(guard);
+    if (!d) return;
+    const before = d.rules.find((r) => r.custom === rule.custom && r.id === rule.id)?.action ?? 'record';
+    if (before === action) return;
+    const name = viewName(t, guard, rule);
+    write(guard, withAction(d, rule, action), true).then(
+      () =>
+        toast.success(
+          t('contentSecurity.toast.actionSet', { name, action: actionName(t, action) }),
+          undoable
+            ? { action: { label: t('contentSecurity.toast.undo'), onClick: () => act(guard, rule, before, false) } }
+            : undefined,
+        ),
+      failed,
+    );
+  }
+
   /** Custom rule dialog: a refusal stays in the dialog, with the server's reason. */
   async function saveCustom(guard: Guard, editing: SecurityRuleView | null, input: CustomRuleInput) {
     const d = current(guard);
@@ -175,7 +228,7 @@ export function GatewaySecurityPage() {
   async function saveAction(guard: Guard, rule: SecurityRuleView, action: RuleAction) {
     const d = current(guard);
     if (!d) return;
-    await write(guard, withAction(d, rule.id, action), false);
+    await write(guard, withAction(d, rule, action), false);
     setDialog(null);
     toast.success(t('contentSecurity.toast.ruleSaved', { name: viewName(t, guard, rule) }));
   }
@@ -215,6 +268,8 @@ export function GatewaySecurityPage() {
   const actions = (guard: Guard): RuleActions => ({
     mode: (mode) => setMode(guard, mode),
     toggle: (r, enabled) => toggle(guard, r, enabled),
+    toggleMany: (rules, enabled, group) => toggleMany(guard, rules, enabled, group),
+    act: (r, action) => act(guard, r, action),
     open: (r) =>
       setDialog(r.custom ? { kind: 'custom', guard, editing: r } : { kind: 'builtin', guard, rule: r }),
     copy: (r) => copyAsCustom(guard, r),
@@ -270,16 +325,26 @@ export function GatewaySecurityPage() {
           </Alert>
         )
       ) : (
-        <Tabs value={tab} onValueChange={(v) => setTab(v as Guard)}>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)}>
           <TabsList>
+            {mayReadLog() && (
+              <TabsTrigger value="log" className="px-3">
+                {t('contentSecurity.log.tab')}
+              </TabsTrigger>
+            )}
             {GUARDS.map((g) => (
               <TabsTrigger key={g} value={g} className="gap-2 px-3">
-                {guardName(t, g)}
                 <span aria-hidden className={cn('size-1.5 rounded-full', modeDot(detail[g].mode))} />
-                <span className="sr-only">{modeName(t, g, detail[g].mode)}</span>
+                {guardName(t, g)}
+                <span className="sr-only">{modeName(t, detail[g].mode)}</span>
               </TabsTrigger>
             ))}
           </TabsList>
+          {mayReadLog() && (
+            <TabsContent value="log" className="pt-2">
+              <LogPanel />
+            </TabsContent>
+          )}
           {GUARDS.map((g) => (
             <TabsContent key={g} value={g} className="pt-2">
               <GuardPanel
@@ -297,6 +362,7 @@ export function GatewaySecurityPage() {
       {dialog?.kind === 'custom' && (
         <CustomRuleDialog
           guard={dialog.guard}
+          mode={detail?.[dialog.guard].mode ?? 'observe'}
           editing={dialog.editing}
           seed={dialog.seed}
           taken={(detail?.[dialog.guard].rules ?? [])
@@ -310,11 +376,12 @@ export function GatewaySecurityPage() {
       {dialog?.kind === 'builtin' && (
         <BuiltinRuleDialog
           guard={dialog.guard}
+          mode={detail?.[dialog.guard].mode ?? 'observe'}
           rule={dialog.rule}
           canWrite={mayWrite(dialog.guard)}
           onClose={() => setDialog(null)}
           onCopy={
-            hasAction(dialog.guard) && patternOf(dialog.rule)
+            patternOf(dialog.rule)
               ? () => copyAsCustom(dialog.guard, dialog.rule)
               : undefined
           }

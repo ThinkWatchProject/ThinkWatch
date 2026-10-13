@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -9,6 +10,10 @@ vi.mock('@/lib/api', () => ({
   api: vi.fn(),
   apiPatch: vi.fn(),
   hasPermission: vi.fn(() => true),
+}))
+
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#trace">{children}</a>,
 }))
 
 import { api, apiPatch, hasPermission } from '@/lib/api'
@@ -25,6 +30,8 @@ const detail = (): SecurityDetail => ({
         matcher: { kind: 'prefix', prefix: 'sk-ant-', min_tail: 20 },
         enabled: true,
         on_by_default: true,
+        action: 'placeholder',
+        default_action: 'placeholder',
         label: 'SECRET',
       },
       {
@@ -35,6 +42,8 @@ const detail = (): SecurityDetail => ({
         matcher: { kind: 'email' },
         enabled: false,
         on_by_default: false,
+        action: 'placeholder',
+        default_action: 'placeholder',
         label: 'EMAIL',
       },
     ],
@@ -82,16 +91,47 @@ const detail = (): SecurityDetail => ({
         on_by_default: true,
         action: 'strip',
         default_action: 'strip',
+        scope: ['request'],
       },
     ],
   },
 })
+
+const events = {
+  total: 2,
+  items: [
+    {
+      id: 'e1',
+      action: 'gateway.content_replaced',
+      user_email: 'dev@example.com',
+      created_at: '2026-10-12T08:00:00Z',
+      detail: {
+        trace_id: 't1',
+        model: 'gpt-5',
+        rule: 'Codename',
+        custom: true,
+        outcome: 'replaced',
+        mode: 'enforce',
+        direction: 'response',
+        count: 2,
+      },
+    },
+    {
+      id: 'e2',
+      action: 'gateway.redaction_flagged',
+      api_key_id: 'k1',
+      created_at: '2026-10-12T07:00:00Z',
+      detail: { trace_id: 't2', rule: 'anthropic-api-key', custom: false, outcome: 'recorded', mode: 'observe' },
+    },
+  ],
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(hasPermission).mockReturnValue(true)
   vi.mocked(api).mockImplementation(async (url: string) => {
     if (url === '/api/admin/security') return detail()
+    if (url.startsWith('/api/audit/logs?')) return events
     if (url.endsWith('/test')) return { hits: [], output: null, refused: false }
     throw new Error(`unexpected request: ${url}`)
   })
@@ -100,20 +140,71 @@ beforeEach(() => {
 
 describe('GatewaySecurityPage', () => {
   it('lists the rules of each guard by group', async () => {
+    const user = userEvent.setup()
     renderWithQueryClient(<GatewaySecurityPage />)
 
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
     expect(await screen.findByText('Anthropic API key')).toBeInTheDocument()
     expect(screen.getByText('API keys')).toBeInTheDocument()
     expect(screen.getByText('Personal information')).toBeInTheDocument()
     expect(screen.getByText('<<TW_EMAIL_1>>')).toBeInTheDocument()
-    // The third mode of redaction is named for what it does.
-    expect(screen.getByRole('radio', { name: 'Replace' })).toBeInTheDocument()
+    // The same three states on every guard.
+    const modes = screen.getByRole('radiogroup', { name: 'Secrets & privacy mode' })
+    expect(within(modes).getAllByRole('radio').map((r) => r.textContent)).toEqual(['On', 'Monitor', 'Off'])
+    expect(within(modes).getByRole('radio', { name: 'Monitor' })).toBeChecked()
+    expect(screen.getByText('1 of 2 rules on.')).toBeInTheDocument()
+    // Monitoring: the action stays as set, and says that only recording happens.
+    expect(screen.getAllByText('Monitoring')).toHaveLength(1)
+  })
+
+  it('opens on the log, which reads the guard events from the audit log', async () => {
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    expect(await screen.findByText('Answer · text')).toBeInTheDocument()
+    expect(screen.getByText('Replaced in 2 places')).toBeInTheDocument()
+    expect(screen.getByText('Codename')).toBeInTheDocument()
+    // A built-in rule is named; a monitor-mode hit says so.
+    expect(screen.getByText('Anthropic API key')).toBeInTheDocument()
+    expect(screen.getByText('Monitoring')).toBeInTheDocument()
+    const call = vi.mocked(api).mock.calls.find(([url]) => String(url).startsWith('/api/audit/logs?'))
+    const params = new URLSearchParams(String(call?.[0]).split('?')[1])
+    expect(params.get('action')?.split(',')).toContain('gateway.content_replaced')
+    expect(params.get('action')?.split(',')).toContain('gateway.tool_call_blocked')
+  })
+
+  it('leaves the log out without the permission to read the audit log', async () => {
+    vi.mocked(hasPermission).mockImplementation((perm: string) => perm !== 'logs:read_all')
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    expect(await screen.findByText('Anthropic API key')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Log' })).not.toBeInTheDocument()
+  })
+
+  it('switches a whole group at once and filters by a search', async () => {
+    const user = userEvent.setup()
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
+    await user.click(await screen.findByRole('checkbox', { name: 'Turn every rule in "Personal information" on or off' }))
+    await waitFor(() =>
+      expect(apiPatch).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { 'security.redact': { mode: 'observe', enable: ['email'] } },
+      }),
+    )
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search rules' }), 'anthropic')
+    expect(screen.getByText('Anthropic API key')).toBeInTheDocument()
+    expect(screen.queryByText('Email address')).not.toBeInTheDocument()
+    await user.clear(screen.getByRole('searchbox', { name: 'Search rules' }))
+    await user.type(screen.getByRole('searchbox', { name: 'Search rules' }), 'nothing like it')
+    expect(screen.getByText('No rule matches the search.')).toBeInTheDocument()
   })
 
   it('writes the whole policy when a built-in rule is switched on', async () => {
     const user = userEvent.setup()
     renderWithQueryClient(<GatewaySecurityPage />)
 
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
     await user.click(await screen.findByRole('switch', { name: 'Turn on "Email address"' }))
 
     await waitFor(() =>
@@ -123,13 +214,13 @@ describe('GatewaySecurityPage', () => {
     )
   })
 
-  it('switches a guard to its third mode', async () => {
+  it('switches a guard on', async () => {
     const user = userEvent.setup()
     renderWithQueryClient(<GatewaySecurityPage />)
 
     await user.click(await screen.findByRole('tab', { name: /Content filter/ }))
     const modes = await screen.findByRole('radiogroup', { name: 'Content filter mode' })
-    await user.click(within(modes).getByRole('radio', { name: 'Enforce' }))
+    await user.click(within(modes).getByRole('radio', { name: 'On' }))
 
     await waitFor(() =>
       expect(apiPatch).toHaveBeenCalledWith('/api/admin/settings', {
@@ -163,7 +254,7 @@ describe('GatewaySecurityPage', () => {
         '/api/admin/security/content/test',
         expect.objectContaining({
           method: 'POST',
-          body: { sample: 'a b', pattern: 'U+200B-U+200D', match: 'codepoints', action: 'strip' },
+          body: { sample: 'a b', pattern: 'U+200B-U+200D', match: 'codepoints', action: 'strip', scope: 'request' },
         }),
       ),
     )
@@ -181,11 +272,83 @@ describe('GatewaySecurityPage', () => {
     )
   })
 
+  it('checks answers with a rule that replaces, and rules out what answers cannot take', async () => {
+    const user = userEvent.setup()
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    await user.click(await screen.findByRole('tab', { name: /Content filter/ }))
+    await user.click(await screen.findByRole('button', { name: 'New rule' }))
+    const dialog = await screen.findByRole('dialog')
+    // A new content rule records until told otherwise, and checks requests.
+    expect(within(dialog).getByRole('radio', { name: 'Record only' })).toBeChecked()
+    expect(within(dialog).getByRole('radio', { name: 'Requests' })).toBeChecked()
+    await user.type(within(dialog).getByLabelText('Name'), 'Codename')
+    await user.click(within(dialog).getByRole('radio', { name: 'Code points' }))
+    await user.click(within(dialog).getByRole('radio', { name: 'Refuse' }))
+
+    // Answers take neither: both switch, and the dialog says so.
+    await user.click(within(dialog).getByRole('radio', { name: 'Requests and answers' }))
+    expect(within(dialog).getByRole('radio', { name: 'Contains' })).toBeChecked()
+    expect(within(dialog).getByRole('radio', { name: 'Code points' })).toBeDisabled()
+    expect(within(dialog).getByRole('radio', { name: 'Delete' })).toBeChecked()
+    expect(within(dialog).getByRole('radio', { name: 'Refuse' })).toBeDisabled()
+    expect(within(dialog).getByText('The rule checks answers, so its action changed to "Delete".')).toBeInTheDocument()
+    expect(within(dialog).getByText('The rule checks answers, so matching changed to "Contains".')).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole('radio', { name: 'Replace' }))
+    expect(within(dialog).getByLabelText('Replacement text')).toHaveValue('***')
+    await user.click(within(dialog).getByRole('switch', { name: 'Case-sensitive' }))
+    await user.type(within(dialog).getByLabelText('Text to find'), 'Polaris')
+    await user.click(within(dialog).getByRole('radio', { name: 'Test as an answer' }))
+    await user.type(within(dialog).getByLabelText('Test text'), 'Polaris ships')
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith(
+        '/api/admin/security/content/test',
+        expect.objectContaining({
+          body: {
+            sample: 'Polaris ships',
+            pattern: 'Polaris',
+            match: 'contains',
+            case_sensitive: true,
+            action: 'replace',
+            scope: 'response',
+            replacement: '***',
+          },
+        }),
+      ),
+    )
+    // The guard monitors: the dialog says what that means for the rule.
+    expect(
+      within(dialog).queryByText('This section is monitoring: rules only record hits and change nothing.'),
+    ).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }))
+
+    await waitFor(() =>
+      expect(apiPatch).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: {
+          'security.content': {
+            mode: 'observe',
+            custom: [
+              {
+                name: 'Codename',
+                pattern: 'Polaris',
+                scope: ['request', 'response'],
+                match: 'contains',
+                case_sensitive: true,
+                action: 'replace',
+              },
+            ],
+          },
+        },
+      }),
+    )
+  })
+
   it('describes a tool-call check implemented in code and offers no copy of it', async () => {
     const user = userEvent.setup()
     renderWithQueryClient(<GatewaySecurityPage />)
 
-    await user.click(await screen.findByRole('tab', { name: /Tool-call inspection/ }))
+    await user.click(await screen.findByRole('tab', { name: /Dangerous commands/ }))
     const check = "A credential sent to a host other than this machine and the credential's own provider"
     expect(await screen.findByText(check)).toBeInTheDocument()
 
@@ -201,29 +364,38 @@ describe('GatewaySecurityPage', () => {
     ).toBeInTheDocument()
   })
 
-  it('tries a redaction pattern under its placeholder name, without an action', async () => {
+  it('tries a redaction pattern under its placeholder name and saves one that only records', async () => {
     const user = userEvent.setup()
     renderWithQueryClient(<GatewaySecurityPage />)
 
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
     await user.click(await screen.findByRole('button', { name: 'New rule' }))
     const dialog = await screen.findByRole('dialog')
     // Text as written, ignoring case, unless the rule says otherwise.
     expect(within(dialog).getByRole('radio', { name: 'Contains' })).toBeChecked()
     expect(within(dialog).queryByRole('radio', { name: 'Code points' })).not.toBeInTheDocument()
-    expect(within(dialog).getByRole('checkbox', { name: 'Case-sensitive' })).not.toBeChecked()
+    expect(within(dialog).getByRole('switch', { name: 'Case-sensitive' })).not.toBeChecked()
+    expect(within(dialog).getByRole('radio', { name: 'Replace with placeholder' })).toBeChecked()
     await user.type(within(dialog).getByLabelText('Text to find'), 'PRJ-')
     await user.type(within(dialog).getByLabelText('Test text'), 'see prj-12')
     await waitFor(() =>
       expect(api).toHaveBeenCalledWith(
         '/api/admin/security/redact/test',
         expect.objectContaining({
-          body: { sample: 'see prj-12', pattern: 'PRJ-', match: 'contains', case_sensitive: false, label: 'SECRET' },
+          body: {
+            sample: 'see prj-12',
+            pattern: 'PRJ-',
+            match: 'contains',
+            case_sensitive: false,
+            label: 'SECRET',
+            action: 'placeholder',
+          },
         }),
       ),
     )
 
     await user.click(within(dialog).getByRole('radio', { name: 'Regex' }))
-    await user.click(within(dialog).getByRole('checkbox', { name: 'Case-sensitive' }))
+    await user.click(within(dialog).getByRole('switch', { name: 'Case-sensitive' }))
     await user.type(within(dialog).getByLabelText('Regular expression'), '\\d+')
     await user.clear(within(dialog).getByLabelText('Placeholder name'))
     await user.type(within(dialog).getByLabelText('Placeholder name'), 'PROJECT')
@@ -232,9 +404,39 @@ describe('GatewaySecurityPage', () => {
       expect(api).toHaveBeenCalledWith(
         '/api/admin/security/redact/test',
         expect.objectContaining({
-          body: { sample: 'see prj-12', pattern: 'PRJ-\\d+', match: 'regex', case_sensitive: true, label: 'PROJECT' },
+          body: {
+            sample: 'see prj-12',
+            pattern: 'PRJ-\\d+',
+            match: 'regex',
+            case_sensitive: true,
+            label: 'PROJECT',
+            action: 'placeholder',
+          },
         }),
       ),
+    )
+
+    await user.type(within(dialog).getByLabelText('Name'), 'Project')
+    await user.click(within(dialog).getByRole('radio', { name: 'Record only' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }))
+    await waitFor(() =>
+      expect(apiPatch).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: {
+          'security.redact': {
+            mode: 'observe',
+            custom: [
+              {
+                name: 'Project',
+                pattern: 'PRJ-\\d+',
+                match: 'regex',
+                case_sensitive: true,
+                label: 'PROJECT',
+                action: 'record',
+              },
+            ],
+          },
+        },
+      }),
     )
   })
 
@@ -243,6 +445,7 @@ describe('GatewaySecurityPage', () => {
     vi.mocked(apiPatch).mockRejectedValueOnce(new Error('regex parse error: unclosed group'))
     renderWithQueryClient(<GatewaySecurityPage />)
 
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
     await user.click(await screen.findByRole('button', { name: 'New rule' }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByLabelText('Name'), 'Broken')
@@ -263,11 +466,16 @@ describe('GatewaySecurityPage', () => {
 
   it('offers no writes without the write permission', async () => {
     vi.mocked(hasPermission).mockImplementation((perm: string) => !perm.endsWith(':write'))
+    const user = userEvent.setup()
     renderWithQueryClient(<GatewaySecurityPage />)
 
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
     expect(await screen.findByRole('switch', { name: 'Turn on "Email address"' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'New rule' })).toBeDisabled()
-    expect(screen.getByRole('radio', { name: 'Replace' })).toBeDisabled()
+    expect(screen.getByRole('radio', { name: 'On' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Turn every rule in "API keys" on or off' })).toBeDisabled()
+    // The action is said, not offered.
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Test…' })).toBeEnabled()
   })
 })

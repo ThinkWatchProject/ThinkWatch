@@ -692,6 +692,28 @@ async fn saving_a_policy_the_gateway_cannot_run_is_refused() {
             json!({"disable": ["no-such-rule"]}),
             "no-such-rule",
         ),
+        (
+            "security.content",
+            json!({"custom": [{"name": "a", "pattern": "x", "scope": ["response"], "action": "block"}]}),
+            "checks answers and blocks",
+        ),
+        (
+            "security.content",
+            json!({"custom": [{"name": "a", "pattern": "U+200B", "match": "codepoints",
+                                "scope": ["request", "response"]}]}),
+            "checks answers",
+        ),
+        (
+            "security.content",
+            json!({"custom": [{"name": "a", "pattern": "x", "action": "replace",
+                                "replacement": "r".repeat(201)}]}),
+            "replacement text",
+        ),
+        (
+            "security.redact",
+            json!({"actions": {"email": "strip"}}),
+            "security.redact",
+        ),
     ] {
         let r = con
             .patch("/api/admin/settings", json!({"settings": {key: value}}))
@@ -873,4 +895,541 @@ async fn a_policy_past_the_limits_is_refused() {
         .unwrap();
     assert_eq!(r.status.as_u16(), 400, "{}", r.text());
     assert!(r.text().contains("built-in rule"), "{}", r.text());
+}
+
+// ---------------------------------------------------------------- answers
+
+/// A content rule that checks answers, in enforce mode.
+fn answer_rule(pattern: &str, action: &str) -> Value {
+    json!({"mode": "enforce", "custom": [
+        {"name": "Codename", "pattern": pattern, "scope": ["response"], "action": action}
+    ]})
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_answer_rule_replaces_the_text_on_every_surface_streamed_or_whole() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("security.content", answer_rule("Polaris", "replace"))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-answer").await;
+
+    for stream in [false, true] {
+        for (path, body) in every_surface("cf-answer", "Polaris ships, polaris lands", stream) {
+            let (status, text) = post_as(&app, &key, &path, &body).await;
+            assert_eq!(status, 200, "{path} stream={stream}: {text}");
+            // The echo answers with the caller's words; the client reads
+            // them with the codename replaced.
+            assert!(
+                !text.to_lowercase().contains("polaris"),
+                "{path} stream={stream}: {text}"
+            );
+            // A stream may carry it over several frames (and Responses
+            // repeats it whole at the end); a whole answer in one piece.
+            assert!(text.contains("***"), "{path} stream={stream}: {text}");
+            if !stream {
+                assert!(text.contains("*** ships, *** lands"), "{path}: {text}");
+            }
+        }
+    }
+    // The request is not the rule's: it went out as written.
+    for r in upstream.received_requests().await {
+        assert!(String::from_utf8_lossy(&r.body).contains("Polaris ships"));
+    }
+    let events = audited(&app, &user_id, "gateway.content_replaced").await;
+    let e = &events[0];
+    assert_eq!(e["rule"], "Codename", "{e}");
+    assert_eq!(e["direction"], "response", "{e}");
+    assert_eq!(e["part"], "response_text", "{e}");
+    assert_eq!(e["outcome"], "replaced");
+    assert_eq!(e["mode"], "enforce");
+    assert_eq!(e["count"], 2, "{e}");
+    assert!(
+        !e.to_string().contains("ships"),
+        "no text of the answer: {e}"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_stored_answer_is_the_one_the_client_received() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("security.content", answer_rule("Polaris", "strip"))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-stored").await;
+    for stream in [false, true] {
+        let (status, text) = post_as(
+            &app,
+            &key,
+            "/v1/chat/completions",
+            &json!({"model": "cf-stored", "stream": stream, "temperature": 0.5,
+                    "messages": [{"role": "user", "content": "the Polaris plan"}]}),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        assert!(!text.contains("Polaris"), "{text}");
+    }
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        bodies = ch
+            .query("SELECT ifNull(response_body, '') FROM gateway_logs WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if bodies.len() >= 2 && bodies.iter().all(|b| !b.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    for b in bodies {
+        assert!(!b.contains("Polaris"), "{b}");
+        assert!(b.contains("the  plan"), "{b}");
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn monitoring_an_answer_rule_records_and_changes_nothing() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "observe", "custom": [
+            {"name": "Codename", "pattern": "Polaris", "scope": ["request", "response"], "action": "replace"}
+        ]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-answer-observe").await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "cf-answer-observe", "stream": true,
+                "messages": [{"role": "user", "content": "Polaris ships"}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains("Polaris ships"), "{text}");
+    let events = audited(&app, &user_id, "gateway.content_flagged").await;
+    let mut directions: Vec<&str> = events
+        .iter()
+        .map(|e| e["direction"].as_str().unwrap_or(""))
+        .collect();
+    // The events land in batches: wait for both sides.
+    if directions.len() < 2 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let events = audited(&app, &user_id, "gateway.content_flagged").await;
+    directions = events
+        .iter()
+        .map(|e| e["direction"].as_str().unwrap_or(""))
+        .collect();
+    directions.sort_unstable();
+    assert_eq!(directions, ["request", "response"], "{events:?}");
+    assert!(
+        events
+            .iter()
+            .all(|e| e["mode"] == "observe" && e["outcome"] == "recorded")
+    );
+    assert!(
+        events.iter().all(|e| e["action"] == "replace"),
+        "what On would do"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_replacing_rule_on_requests_writes_its_text_before_the_request_goes_out() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.content",
+        json!({"mode": "enforce", "custom": [
+            {"name": "Codename", "pattern": "Polaris", "case_sensitive": true,
+             "action": "replace", "replacement": "[codename]"}
+        ]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-request-replace").await;
+    for stream in [false, true] {
+        for (path, body) in every_surface("cf-request-replace", "Polaris and polaris", stream) {
+            let (status, text) = post_as(&app, &key, &path, &body).await;
+            assert_eq!(status, 200, "{path} stream={stream}: {text}");
+        }
+    }
+    for r in upstream.received_requests().await {
+        let body = String::from_utf8_lossy(&r.body);
+        // Case-sensitive: only the capitalised one.
+        assert!(body.contains("[codename] and polaris"), "{body}");
+    }
+    let events = audited(&app, &user_id, "gateway.content_replaced").await;
+    assert_eq!(events[0]["direction"], "request", "{events:?}");
+    assert_eq!(
+        events[0]["replacement"],
+        Value::Null,
+        "the request side names the rule only"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_redaction_rule_that_records_sends_the_value_and_records_it() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.redact",
+        json!({"mode": "enforce", "actions": {"anthropic-api-key": "record"}, "custom": [
+            {"name": "ssn", "pattern": "\\d{3}-\\d{2}-\\d{4}", "match": "regex", "label": "SSN"}
+        ]}),
+    )
+    .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "redact-record").await;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "redact-record", "messages": [
+            {"role": "user", "content": format!("{KEY} and 123-45-6789")}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let body = String::from_utf8_lossy(&upstream.received_requests().await[0].body).into_owned();
+    assert!(body.contains(KEY), "the key only recorded: {body}");
+    assert!(
+        body.contains("<<TW_SSN_1>>") && !body.contains("123-45-6789"),
+        "{body}"
+    );
+
+    let flagged = audited(&app, &user_id, "gateway.redaction_flagged").await;
+    assert_eq!(flagged[0]["rule"], "anthropic-api-key", "{flagged:?}");
+    assert_eq!(flagged[0]["action"], "record");
+    assert_eq!(flagged[0]["mode"], "enforce");
+    let replaced = audited(&app, &user_id, "gateway.redaction_replaced").await;
+    assert_eq!(replaced[0]["rule"], "ssn", "{replaced:?}");
+    assert_eq!(replaced[0]["action"], "placeholder");
+
+    // The console's log reads both back in one query.
+    let con = admin_session(&app).await;
+    let mut found = Vec::new();
+    for _ in 0..100 {
+        let r: Value = con
+            .get(&format!(
+                "/api/audit/logs?user_id={user_id}&action=gateway.redaction_flagged,gateway.redaction_replaced"
+            ))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        found = r["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["action"].as_str().unwrap().to_string())
+            .collect();
+        if found.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    found.sort();
+    assert_eq!(
+        found,
+        ["gateway.redaction_flagged", "gateway.redaction_replaced"]
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_view_and_the_trial_know_what_a_content_rule_checks() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+    con.patch(
+        "/api/admin/settings",
+        json!({"settings": {"security.content": {"mode": "enforce", "custom": [
+            {"name": "Codename", "pattern": "Polaris", "scope": ["request", "response"],
+             "action": "replace", "replacement": "[x]"}
+        ]}}}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    let view: Value = con
+        .get("/api/admin/security")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let rules = view["content"]["rules"].as_array().unwrap();
+    let mine = rules.iter().find(|r| r["id"] == "Codename").unwrap();
+    assert_eq!(mine["scope"], json!(["request", "response"]), "{mine}");
+    assert_eq!(mine["replacement"], "[x]", "{mine}");
+    assert_eq!(mine["action"], "replace");
+    let tags = rules.iter().find(|r| r["id"] == "unicode-tags").unwrap();
+    assert_eq!(
+        tags["scope"],
+        json!(["request"]),
+        "built-in rules check requests: {tags}"
+    );
+    let email = view["redact"]["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "email")
+        .unwrap();
+    assert_eq!(email["default_action"], "placeholder", "{email}");
+
+    let r: Value = con
+        .post(
+            "/api/admin/security/content/test",
+            json!({"sample": "the Polaris plan", "pattern": "polaris", "action": "replace",
+                   "replacement": "[y]", "scope": "response"}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(r["output"], "the [y] plan", "{r}");
+}
+
+/// An answer rule whose text is also part of a placeholder's label
+/// (`email` in `<<TW_EMAIL_1>>`) runs on the restored answer every time:
+/// the first answer, every cache hit, and the copy in the log row. The
+/// cache keeps the placeholder form, unfiltered; the log row keeps what the
+/// client was shown, with the caller's value masked again.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_answer_rule_runs_on_restored_text_on_a_miss_a_cache_hit_and_in_the_log() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting(
+        "security.redact",
+        json!({"mode": "enforce", "enable": ["email"]}),
+    )
+    .await;
+    app.set_setting("security.content", answer_rule("email", "strip"))
+        .await;
+    let upstream = echo_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-cache").await;
+    // A request each, different once redacted: the cache does not tell a
+    // streamed request from a whole one, and each is to start with a miss.
+    let address = |stream: bool| format!("alice{}@corp.example.org", u8::from(stream));
+    let said = |stream: bool| if stream { "streamed" } else { "whole" };
+
+    for stream in [false, true] {
+        let shown_expected = format!("my  is {} ({})", address(stream), said(stream));
+        let body = json!({"model": "cf-cache", "stream": stream, "messages": [{"role": "user",
+                          "content": format!("my email is {} ({})", address(stream), said(stream))}]});
+        let mut seen = Vec::new();
+        // The first call is a miss; the cache is written once the answer
+        // is done, so a few calls may pass before the first hit.
+        for _ in 0..20 {
+            let resp = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", app.gateway_url))
+                .bearer_auth(&key)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let cache = resp
+                .headers()
+                .get("x-cache")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let text = resp.text().await.unwrap();
+            let shown: String = if stream {
+                // A miss streams chunks; a hit replays the whole answer.
+                text.lines()
+                    .filter_map(|l| l.strip_prefix("data: "))
+                    .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+                    .map(|v| {
+                        let c = &v["choices"][0];
+                        c["delta"]["content"]
+                            .as_str()
+                            .or(c["message"]["content"].as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .collect()
+            } else {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                v["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            };
+            assert_eq!(
+                shown, shown_expected,
+                "stream={stream} cache={cache}: {text}"
+            );
+            assert!(
+                !text.contains("<<TW_"),
+                "stream={stream} cache={cache}: {text}"
+            );
+            seen.push(cache.clone());
+            if cache == "HIT" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // A streamed miss carries no `X-Cache` header.
+        assert_ne!(
+            seen.first().map(String::as_str),
+            Some("HIT"),
+            "stream={stream}"
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("HIT"),
+            "stream={stream}: {seen:?}"
+        );
+    }
+
+    // Every log row, misses and hits: what the client was shown, the
+    // address masked with its intact placeholder.
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        bodies = ch
+            .query("SELECT ifNull(response_body, '') FROM gateway_logs WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if bodies.len() >= 4 && bodies.iter().all(|b| !b.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(bodies.len() >= 4, "{bodies:?}");
+    for b in &bodies {
+        assert!(b.contains("my  is <<TW_EMAIL_1>>"), "{b}");
+        assert!(!b.contains("<<TW__"), "{b}");
+        assert!(
+            !b.contains(&address(false)) && !b.contains(&address(true)),
+            "{b}"
+        );
+    }
+}
+
+/// An upstream that answers with the first placeholder of the request
+/// alone: `The password <<TW_SECRET_1>> is wrong.`
+async fn repeating_upstream() -> MockProvider {
+    let upstream = MockProvider {
+        server: wiremock::MockServer::start().await,
+    };
+    upstream
+        .mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(|req: &Request| {
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                    let text = String::from_utf8_lossy(&req.body).into_owned();
+                    let placeholder = text
+                        .find("<<TW_")
+                        .and_then(|at| {
+                            text[at..]
+                                .find(">>")
+                                .map(|end| text[at..at + end + 2].to_string())
+                        })
+                        .unwrap_or_default();
+                    let said = format!("The password {placeholder} is wrong.");
+                    let mut fake = Value::Null;
+                    fake["messages"] = json!([{"role": "user", "content": said}]);
+                    fake["stream"] = body["stream"].clone();
+                    let fake_req = Request {
+                        body: fake.to_string().into_bytes(),
+                        ..req.clone()
+                    };
+                    answer(&fake_req)
+                }),
+        )
+        .await;
+    upstream
+}
+
+/// A value its rule recognises only in context — a connection string's
+/// password — repeated alone by the model is masked in the log row with
+/// its placeholder, on a miss (whole and streamed) and on a cache hit,
+/// while the client reads it restored.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_value_repeated_without_its_context_is_masked_in_the_log_row() {
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("security.redact", json!({"mode": "enforce"}))
+        .await;
+    // Any rule that checks answers: the log row is then the client's copy.
+    app.set_setting("security.content", answer_rule("unrelated-word", "strip"))
+        .await;
+    let upstream = repeating_upstream().await;
+    let (key, user_id) = seed_route(&app, &upstream.uri(), "cf-context").await;
+
+    let mut calls = 0;
+    for stream in [false, true] {
+        let body = json!({"model": "cf-context", "stream": stream, "messages": [{"role": "user",
+            "content": format!("connect with postgres://app:hunter2@db.internal:5432/orders ({stream})")}]});
+        let mut hit = false;
+        for _ in 0..20 {
+            let resp = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", app.gateway_url))
+                .bearer_auth(&key)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            hit = resp.headers().get("x-cache").and_then(|v| v.to_str().ok()) == Some("HIT");
+            let text = resp.text().await.unwrap();
+            calls += 1;
+            // What the client reads: the deltas of a streamed miss, the
+            // message of a whole answer or of a replayed hit.
+            let shown: String = text
+                .lines()
+                .map(|l| l.strip_prefix("data: ").unwrap_or(l))
+                .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+                .map(|v| {
+                    let c = &v["choices"][0];
+                    c["delta"]["content"]
+                        .as_str()
+                        .or(c["message"]["content"].as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(
+                shown, "The password hunter2 is wrong.",
+                "stream={stream} hit={hit}: {text}"
+            );
+            assert!(!text.contains("<<TW_"), "stream={stream} hit={hit}: {text}");
+            if hit {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(hit, "stream={stream}: no cache hit");
+    }
+
+    let ch = app.state.clickhouse.as_ref().expect("ClickHouse wired up");
+    let mut bodies: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        bodies = ch
+            .query("SELECT ifNull(response_body, '') FROM gateway_logs WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all()
+            .await
+            .expect("CH query");
+        if bodies.len() >= calls && bodies.iter().all(|b| !b.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(bodies.len(), calls, "{bodies:?}");
+    for b in &bodies {
+        assert!(!b.contains("hunter2"), "{b}");
+        assert!(b.contains("<<TW_SECRET_1>>"), "{b}");
+    }
 }

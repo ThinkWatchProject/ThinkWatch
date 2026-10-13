@@ -17,7 +17,10 @@
 //!
 //! An untouched policy is `{}`: every field left out is the factory value,
 //! and the factory mode is observe — every hit is recorded, nothing on the
-//! wire changes.
+//! wire changes. A policy saved before rules had an action of their own
+//! (redaction), a scope, a case rule or a replacement (content) reads as
+//! it always did: redaction rules replace with placeholders, content rules
+//! check requests only and ignore case.
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -41,6 +44,10 @@ pub fn key(guard: Guard) -> &'static str {
 pub fn guard_of(key: &str) -> Option<Guard> {
     Guard::ALL.iter().copied().find(|g| self::key(*g) == key)
 }
+
+/// The longest replacement text a content rule may write, in characters.
+/// It goes into every request or answer the rule matches.
+pub const REPLACEMENT_CHARS: usize = 200;
 
 /// How many custom rules a policy may hold, and how long one's pattern
 /// may be, in characters. Every rule runs on every request: a policy past
@@ -104,6 +111,19 @@ pub fn validate(guard: Guard, value: &Value) -> Result<(), String> {
         Guard::Content => {
             let p = parse::<ContentPolicy>(guard, value)?;
             within_limits(guard, p.custom.iter().map(|c| (&c.name, &c.pattern)))?;
+            if let Some(c) = p
+                .custom
+                .iter()
+                .find(|c| c.replacement.chars().count() > REPLACEMENT_CHARS)
+            {
+                return Err(format!(
+                    "{}: the replacement text of custom rule `{}` is {} characters long; at \
+                     most {REPLACEMENT_CHARS} are allowed",
+                    key(guard),
+                    c.name,
+                    c.replacement.chars().count()
+                ));
+            }
             p.check()
         }
     };
@@ -343,6 +363,112 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("name of a built-in rule"), "{e}");
+    }
+
+    #[test]
+    fn a_policy_saved_before_the_new_fields_reads_as_it_always_did() {
+        // As an earlier console wrote them: no actions for redaction, no
+        // scope, case rule or replacement for content.
+        let content = json!({"mode": "enforce", "custom": [
+            {"name": "Code", "pattern": "project-x", "action": "strip"}
+        ]});
+        assert_eq!(validate(Guard::Content, &content), Ok(()));
+        let p: ContentPolicy = serde_json::from_value(content.clone()).unwrap();
+        let c = &p.custom[0];
+        assert!(c.checks_requests() && !c.checks_answers());
+        assert!(!c.case_sensitive);
+        assert_eq!(c.replacement, tw_guard::policy::DEFAULT_REPLACEMENT);
+        // Written back, the defaults stay out: the stored value is unchanged.
+        assert_eq!(serde_json::to_value(&p).unwrap(), content);
+        let rules = content_rules(&p);
+        let r = rules.rules.iter().find(|r| r.id == "Code").unwrap();
+        assert!(r.sides.request && !r.sides.response);
+        assert!(!r.case_sensitive);
+
+        let redact = json!({"mode": "enforce", "custom": [
+            {"name": "Project", "pattern": "PRJ-\\d+", "match": "regex", "label": "PROJECT"}
+        ]});
+        assert_eq!(validate(Guard::Redact, &redact), Ok(()));
+        let p: RedactPolicy = serde_json::from_value(redact.clone()).unwrap();
+        assert_eq!(
+            p.custom[0].action,
+            tw_guard::policy::RedactAction::Placeholder
+        );
+        assert!(p.actions.is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), redact);
+        let hits = tw_guard::redact::rules::scan_plain("PRJ-12", &redact_rules(&p));
+        assert!(
+            !redact_rules(&p).records(&hits[0].rule),
+            "replaced, as before"
+        );
+    }
+
+    #[test]
+    fn the_new_fields_are_read_and_checked() {
+        let content = json!({"mode": "enforce", "custom": [{
+            "name": "Codename", "pattern": "Polaris", "scope": ["request", "response"],
+            "case_sensitive": true, "action": "replace", "replacement": "[hidden]"
+        }]});
+        assert_eq!(validate(Guard::Content, &content), Ok(()));
+        let p: ContentPolicy = serde_json::from_value(content).unwrap();
+        let r = &content_rules(&p).rules;
+        let r = r.iter().find(|r| r.id == "Codename").unwrap();
+        assert!(r.sides.request && r.sides.response && r.case_sensitive);
+        assert_eq!(r.replacement, "[hidden]");
+
+        // An answer cannot be refused, nor matched by code points.
+        let e = validate(
+            Guard::Content,
+            &json!({"custom": [{"name": "a", "pattern": "x", "scope": ["response"], "action": "block"}]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("checks answers and blocks"), "{e}");
+        let e = validate(
+            Guard::Content,
+            &json!({"custom": [{"name": "a", "pattern": "U+200B", "match": "codepoints",
+                                 "scope": ["request", "response"]}]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("code points") || e.contains("codepoints"), "{e}");
+        let e = validate(
+            Guard::Content,
+            &json!({"custom": [{"name": "a", "pattern": "x", "scope": ["answer"]}]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("answer"), "{e}");
+        let e = validate(
+            Guard::Content,
+            &json!({"custom": [{"name": "a", "pattern": "x", "action": "replace",
+                                 "replacement": "r".repeat(REPLACEMENT_CHARS + 1)}]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("replacement text"), "{e}");
+        assert_eq!(
+            validate(
+                Guard::Content,
+                &json!({"custom": [{"name": "a", "pattern": "x", "action": "replace",
+                                     "replacement": "字".repeat(REPLACEMENT_CHARS)}]}),
+            ),
+            Ok(())
+        );
+
+        // Redaction: built-in actions by id, and a custom rule that records.
+        let redact = json!({"mode": "enforce", "actions": {"email": "record"}, "custom": [
+            {"name": "Project", "pattern": "PRJ-", "action": "record"}
+        ]});
+        assert_eq!(validate(Guard::Redact, &redact), Ok(()));
+        let p: RedactPolicy = serde_json::from_value(redact).unwrap();
+        let rules = redact_rules(&p);
+        let hits = tw_guard::redact::rules::scan_plain("PRJ-1", &rules);
+        assert!(rules.records(&hits[0].rule));
+        let e = validate(
+            Guard::Redact,
+            &json!({"actions": {"no-such-rule": "record"}}),
+        )
+        .unwrap_err();
+        assert!(e.contains("no-such-rule"), "{e}");
+        let e = validate(Guard::Redact, &json!({"actions": {"email": "replace"}})).unwrap_err();
+        assert!(e.starts_with("security.redact: "), "{e}");
     }
 
     #[test]
