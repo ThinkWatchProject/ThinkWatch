@@ -11,29 +11,122 @@ target.
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-10-13
+
 The security page is organised by what each guard protects against: Secrets
 & privacy (outbound redaction), Dangerous commands (tool-call inspection)
 and Content filter, after a Log of what they found. Each guard is On,
 Monitor or Off, and every rule has an action of its own. Content rules can
 now check the text of answers as well as requests, and can replace what
-they match with a text of their own.
+they match with a text of their own. The thinkwatch-core crates move from
+v0.72.0 to v0.73.0.
 
 ### Read before upgrading
 
-- **Policies saved before this release keep working as they did.** Every
-  new key is optional, and a policy without it behaves as before: redaction
-  rules replace with placeholders, content rules check requests only and
-  ignore case, and nothing is replaced in answers.
-- **Upgrade every replica before editing a guard from the new console, and
-  do not roll back afterwards.** An earlier version refuses a policy with
-  keys it does not know: an instance that reads a `security.redact` policy
-  with `actions` or a custom rule's `action`, or a `security.content`
-  policy with a custom rule's `scope`, `case_sensitive` or `replacement`,
-  or the action `replace`, logs `Unreadable guard policy` and runs that
-  guard on its factory policy (monitoring, built-in rules as shipped, no
-  custom rules). To roll back after editing, first remove those keys.
-- **The audit events carry two new fields, and there is one new event.**
-  See Changed.
+- **Policies saved before 3.8.0 keep their behaviour.** Every new key is
+  optional, and a policy without it behaves as before: redaction rules
+  replace with placeholders, content rules check requests only and ignore
+  case, and answers are not changed. The console leaves each new key out
+  while it has its default, so a policy saved from the 3.8.0 console
+  without using a new option stays readable by 3.7. Two redaction fixes
+  apply to every policy (see Fixed).
+- **Upgrade every replica before using the new options, and do not roll
+  back afterwards.** 3.7 refuses a policy with keys it does not know. A 3.7
+  instance that reads a `security.redact` policy with `actions` or a custom
+  rule's `action`, or a `security.content` policy with a custom rule's
+  `scope`, `case_sensitive` or `replacement`, or the action `replace`, logs
+  `Unreadable guard policy` and runs that guard on its factory policy:
+  monitoring, built-in rules as shipped, no custom rules. During a rolling
+  upgrade, change a rule's action, what it checks, its case or its
+  replacement only once no 3.7 instance is left; to roll back after doing
+  so, first remove those keys.
+- **New names in the console.** Outbound redaction is now Secrets &
+  privacy, and tool-call inspection is Dangerous commands; the content
+  filter keeps its name. Every guard's modes are On, Monitor and Off; they
+  were Off, Observe and a third named for the guard (Replace, Cut off,
+  Enforce). On the role pages the permission groups `pii_redactor` and
+  `content_filter` are shown as Secrets & privacy and as Content filter &
+  dangerous commands. The settings keys (`security.redact`,
+  `security.inspect_tools`, `security.content`), the mode values
+  (`enforce`, `observe`, `off`), the permissions and the existing audit
+  actions keep their names.
+- **More guard events reach the audit log, and with it the log
+  forwarders.** Hits found while a guard monitors were already audit
+  events and still are. New in 3.8.0:
+  - `gateway.content_replaced`, a new action, for text a content rule
+    replaced.
+  - Rules that check answers write content events too, with `direction:
+    response`, `part: response_text` and the upstream in `resource`
+    (`provider:<name>`); a replacement's event carries the rule's
+    `replacement`. A request's events have `direction: request`.
+  - A redaction rule whose action is to record writes
+    `gateway.redaction_flagged` while the guard is On, where that action
+    used to mean the guard was monitoring. Events are per rule, so one
+    request can have both a `gateway.redaction_replaced` and a
+    `gateway.redaction_flagged` event.
+  - Content, redaction and tool-call events carry the guard's `mode`
+    (`observe` for hits recorded while monitoring), and redaction events
+    the rule's `action` (`placeholder` or `record`).
+  - `gateway_content_matched_total` has a `direction` label.
+
+  Check alerts and SIEM filters that key on these actions.
+- **Filtering answers changes what clients receive, within these limits.**
+  Under Monitor, or when every rule that checks answers only records,
+  nothing is held back or changed. Under On, with a rule that deletes or
+  replaces:
+  - A streamed answer is never held back whole. Each text holds back only
+    the last characters that could still grow into a match: one fewer than
+    the longest keyword, or a regular expression's longest possible match,
+    at most 256 characters, one more for a regular expression that looks at
+    the next character (`\b`, `$`). Of a longer match the beginning may
+    already have been sent. When a rule deletes (`strip`, or `replace` with
+    an empty text), as many characters again are held back; deletions at
+    the very start of a text do not add to that. Text held back is sent
+    when the stream ends, breaks off or carries an error from the upstream.
+  - Deleting is repeated until no match is left: text that comes together
+    where something was deleted is checked again (`sesecretcret` becomes
+    empty, not `secret`). A replacement is never checked again. A whole
+    answer always comes out clean, and a streamed one comes out the same as
+    the whole one wherever it is split, as long as a match is nested no
+    more than one level deep. Of a match nested deeper the beginning may
+    already have been sent; the rest of it is deleted, so the client never
+    receives a whole match, except a regular expression that looks at the
+    next character whose match lies entirely in text already sent. After
+    64 further passes, what is still changing is dropped from the answer.
+  - Regular expressions anchored to the start or end of a text or a line
+    (`^`, `$`, `\A`, `\z`) are checked once, on the model's own text, and
+    rules that only record see the model's own text, not what deletions
+    leave.
+  - The frames that repeat the whole text (`response.output_text.done`,
+    `response.output_item.done`, `response.completed`) say what the client
+    received.
+  - An answer that is not valid UTF-8 is read with replacement characters
+    in place of the invalid bytes, and sent that way where the filter
+    rewrites it; an element of a Gemini JSON-array stream that cannot be
+    parsed is dropped.
+- **Logprobs are removed while an answer rule can change text.** Under On,
+  with a rule that checks answers and deletes or replaces, logprobs are
+  removed from every streamed answer, whether or not the rule matched, and
+  from a whole answer whose text changed, since they repeat the text token
+  by token: Chat Completions' `logprobs` becomes `null`, the Responses
+  API's `logprobs` an empty list, and Gemini's `logprobsResult` is left
+  out.
+- **With a rule that checks answers, the log row stores the answer as the
+  client received it.** Its text has been through the content rules, and
+  the caller's redacted values are masked again: by the redaction rules,
+  and wherever a value the request's placeholders stand for appears as
+  written, so a value its rule recognises only in context (a connection
+  string's password) is masked even when the model repeats it alone. In a
+  body that is valid JSON this masking changes only the contents of strings
+  (also values written escaped inside them, up to six levels deep), never
+  numbers, literals or structure, so the stored body stays valid JSON.
+  Stored text that is not strictly valid JSON (an event stream, a
+  plain-text error) is masked wherever a value appears, numbers included.
+  Where values overlap, the longest one at each place is masked. Without
+  such a rule the row stores the answer as before, with the placeholders
+  the upstream returned. The response cache keeps the answer unfiltered,
+  in placeholder form, either way, and the rules in force run again on
+  every cache hit.
 
 ### Added
 
@@ -43,59 +136,13 @@ they match with a text of their own.
   requests). On an answer the rule reads the text the client is shown and
   the input of freeform tools such as Codex's `apply_patch`, not tool calls
   and not reasoning. It applies to whole answers, streamed answers on every
-  API surface, answers served from the cache and the Responses WebSocket,
-  in the client's format, after redacted values are restored and before
-  tool calls are inspected. A rule that checks answers cannot refuse, and
-  cannot match by code points; such a policy is refused when saved.
-  - **Streamed answers are never held back whole.** Each text holds back
-    only the last characters that could still grow into a match: at most
-    one fewer than the longest keyword, and at most 256 for a regular
-    expression, so of a longer match the beginning may already have been
-    sent; a regular expression that looks at the next character (`\b`,
-    `$`) holds back one more. Under On, when a rule deletes (`strip`, or
-    `replace` with an empty text), as many characters again are held back;
-    deletions at the very start of a text do not add to that.
-  - **Deleting is repeated until no match is left.** Text that comes
-    together where something was deleted is checked again (`sesecretcret`
-    becomes empty, not `secret`); a replacement is never checked again,
-    and only a deletion joins text: a rule that looks at the next
-    character (`\d{4}\b`) does not match again next to a non-empty
-    replacement.
-    A whole answer always comes out clean, and a streamed one comes out the
-    same as the whole one wherever it is split, as long as a match is
-    nested no more than one level deep. A match nested deeper may have its
-    beginning sent already; the rest of it is deleted, so the client never
-    receives a whole match, except a regular expression that looks at the
-    next character whose match lies entirely in text already sent. After
-    64 further passes, what is still changing is dropped from the answer.
-  - **Anchored regular expressions** (`^`, `$`, `\A`, `\z`) are checked
-    once on the model's own text of an answer, and a deletion at the very
-    start or end of a text does not make a new match, so whole and
-    streamed answers agree. Rules that only record see the model's own
-    text, not what deletions leave.
-  - **What the client receives is consistent.** The frames that repeat the
-    whole text (`response.output_text.done`, `response.output_item.done`,
-    `response.completed`) say what the client received. Under On, when a
-    rule that checks answers deletes or replaces, logprobs are removed from
-    streamed answers, and from a whole answer whose text changed, since
-    they repeat the text token by token. Text held back is sent when the
-    stream ends, breaks off or carries an error from the upstream. On the
-    Responses WebSocket each turn is filtered as a stream of its own.
-  - **The rules always run on the answer with the caller's redacted values
-    restored**, so a rule never cuts into a placeholder. The response cache
-    keeps the answer unfiltered, in placeholder form, and the rules in
-    force run again on every cache hit. The request's log row stores the
-    answer as the client received it, with the caller's values masked
-    again: by the redaction rules, and wherever a value the request's
-    placeholders stand for appears as written, so a value its rule
-    recognises only in context (a connection string's password) is masked
-    even when the model repeats it alone. In a body that is valid JSON
-    that masking touches only the contents of strings (also written
-    escaped inside them, up to six levels deep), never numbers, literals or
-    structure, so the stored body stays valid JSON. Stored text that is not
-    strictly valid JSON (an event stream, a plain-text error) is masked
-    wherever a value appears, numbers included. Where values overlap, the
-    longest one at each place is masked.
+  API surface, answers served from the cache and the Responses WebSocket
+  (each turn filtered as a stream of its own), in the client's format,
+  after redacted values are restored, so a rule never cuts into a
+  placeholder, and before tool calls are inspected. A rule that checks
+  answers cannot refuse, and cannot match by code points; such a policy is
+  refused when saved. See Read before upgrading for how streamed answers
+  are held back and what the client and the log receive.
 - **Replace.** A content rule can replace what it matches with a text of
   its own (`action: replace`, `replacement`, `***` when left out, at most
   200 characters), in requests and in answers. A replacement is not put
@@ -108,8 +155,12 @@ they match with a text of their own.
 - **Record-only redaction rules.** A redaction rule's action is to replace
   with a placeholder or to record only: built-in rules through
   `security.redact.actions` (`{"email": "record"}`), custom rules through
-  `action`. A recorded value goes upstream unchanged and is written to the
-  audit log.
+  `action`. A recorded value goes upstream unchanged, and the hit is
+  reported as `gateway.redaction_flagged`; as before, a custom rule's
+  event carries only counts and a built-in rule's event a few masked
+  values. With `audit.body_redact_pii` on, the value is still masked in
+  stored bodies. Where a record-only match overlaps a match that is
+  replaced, the value is replaced.
 - **Console.** The security page has a Log tab (for holders of
   `logs:read_all`) listing the guards' audit events, filtered by guard,
   with the rule, where it matched (request, tool result, answer text, tool
@@ -128,29 +179,27 @@ they match with a text of their own.
   `replacement`). The redaction rule dialog's Case-sensitive is a switch,
   and the dialog sets the rule's action.
 - **`GET /api/audit/logs` takes several actions** in `action`, separated
-  by commas (at most 32).
+  by commas; the first 32 are used.
+
+### Fixed
+
+- **Overlapping redaction matches no longer leave part of a value in
+  clear.** Where two rules matched overlapping text, only the first match
+  was replaced, and the part of the other outside it went upstream as
+  written. Overlapping matches now become one placeholder. Matches that
+  do not count (on the gateway's own placeholders, in base64 payloads, a
+  custom rule's match in a protocol identifier) are set aside before
+  overlaps are resolved; before, a value that overlapped one of them was
+  dropped with it and sent as written.
+- **A custom redaction rule written as a regular expression is matched
+  within one JSON string at a time.** A pattern such as `\S+` could start
+  on the request's structure, replace part of it and leave the request
+  that went upstream invalid JSON, missing the value it was written for.
 
 ### Changed
 
-- **Names.** Outbound redaction is Secrets & privacy, tool-call inspection
-  is Dangerous commands; the modes are On, Monitor and Off on every guard
-  (formerly Replace, Cut off and Enforce for the third). The settings keys
-  (`security.redact`, `security.inspect_tools`, `security.content`), the
-  mode values (`enforce`, `observe`, `off`) and the permissions are
-  unchanged.
-- **Audit events.** `gateway.content_replaced` is new, for text a content
-  rule replaced. Every content event has `direction` (`request` or
-  `response`); an answer's events also have `part: response_text`, name
-  the upstream in `resource`, and a replaced one carries the rule's
-  `replacement`. Content, redaction and tool-call events carry the guard's
-  `mode` (`observe` for hits recorded while monitoring). Redaction events
-  are now per rule: `gateway.redaction_replaced` for values replaced with
-  placeholders and `gateway.redaction_flagged` for values only recorded,
-  whether the guard monitors or the rule's `action` is `record`.
-  `gateway_content_matched_total` has a `direction` label. Like every
-  audit event, these are sent on by the log forwarders.
-- Requires the thinkwatch-core release that adds per-rule actions and
-  answer filtering to tw-guard; the pin moves when it is tagged.
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.72.0 → v0.73.0.
 
 ## [3.7.1] — 2026-10-12
 
@@ -2306,7 +2355,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.7.1...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.0...HEAD
+[3.8.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.0
 [3.7.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.1
 [3.7.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.0
 [3.6.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.6.0
