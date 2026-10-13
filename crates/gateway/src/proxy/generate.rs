@@ -26,10 +26,10 @@
 //! The content filter reads the caller's text where the request's own
 //! format puts it, and a rule that deletes or replaces text does so there:
 //! the request goes on as the changed one, decoded again. Outbound redaction
-//! then searches the whole request, numbers what it finds once, and every
-//! hop — forwarded or converted — goes out through it (see
-//! `crate::redaction`). Both are thinkwatch-core's, shared with the
-//! desktop gateway.
+//! then searches the text written in the request, numbers what it finds
+//! once, and every hop — forwarded or converted — goes out through it,
+//! searched as the format it is sent in (see `crate::redaction`). Both
+//! are thinkwatch-core's, shared with the desktop gateway.
 
 use std::convert::Infallible;
 
@@ -61,7 +61,7 @@ use crate::guards::Caller;
 use crate::lifecycle::Completed;
 use crate::metadata::RequestMetadata;
 use crate::protocol::UpstreamProtocol;
-use crate::redaction::Redaction;
+use crate::redaction::{Redaction, Shape};
 use crate::router::RouteEntry;
 use tw_guard::redact::replace::Ledger;
 
@@ -446,7 +446,11 @@ impl Outbound {
             if let Some(stripped) = tw_dialect::convert::strip_carried(client, &bytes) {
                 bytes = stripped;
             }
-            let (bytes, ledger) = self.redaction.replace(bytes, &self.ledger);
+            // Sent in the caller's own format: its written text is where
+            // the caller's format puts it.
+            let (bytes, ledger) =
+                self.redaction
+                    .replace(bytes, &self.ledger, Shape::Generate(client));
             return Ok(Wire {
                 body: bytes,
                 path,
@@ -479,8 +483,11 @@ impl Outbound {
             body = serde_json::to_vec(&v).unwrap_or(body);
         }
         // The conversion moved the placeholders along with the text; one it
-        // assembled from two pieces is numbered here.
-        let (body, ledger) = self.redaction.replace(body, &self.ledger);
+        // assembled from two pieces is numbered here. The text is searched
+        // where the upstream's format puts it.
+        let (body, ledger) =
+            self.redaction
+                .replace(body, &self.ledger, Shape::Generate(protocol.dialect()));
         // With none of the caller's own, any breakpoints are the ones the
         // conversion added for Claude.
         let auto_cache = decoded.request.cache.is_empty()
@@ -763,21 +770,24 @@ async fn run(
     let decoded =
         tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect));
 
-    // 5. Outbound redaction: the whole request is searched and what is
-    //    found numbered once, in the order the caller wrote it.
+    // 5. Outbound redaction: the text written in the request — located by
+    //    the structure of the caller's format, never its ids, types or
+    //    names — is searched and what is found numbered once, in the order
+    //    the caller wrote it.
     //    Placeholders are stable per value, so two callers sending the same
     //    structure redact to the same bytes and share a cache slot; each
     //    restores their own values on the way out.
     //
     //    The audit row keeps what the caller wrote (their at-rest
     //    redaction setting applies on top).
-    let (findings, ledger) = guards.redaction.look(&body);
+    let shape = Shape::Generate(surface.dialect);
+    let (findings, ledger) = guards.redaction.look(&body, shape);
     crate::redaction::record(&state.audit, &caller, &guards.redaction, &findings);
     let request_for_audit = body.to_vec();
     let outbound_body = if ledger.is_empty() {
         raw
     } else {
-        let (replaced, _) = guards.redaction.replace(body.to_vec(), &ledger);
+        let (replaced, _) = guards.redaction.replace(body.to_vec(), &ledger, shape);
         serde_json::from_slice(&replaced).map_err(|_| {
             ctx.emit(GatewayError::TransformError(
                 "The request could not be read after redaction.".into(),
@@ -1227,7 +1237,7 @@ mod tests {
             mode: tw_guard::policy::Mode::Off,
             ..Default::default()
         });
-        let (_, ledger) = redaction.look(b"{}");
+        let (_, ledger) = redaction.look(b"{}", Shape::Generate(surface.dialect));
         Outbound {
             surface,
             path: path.into(),
