@@ -16,7 +16,9 @@
 //!   [`Redaction::replace`] with that same ledger — so a value has one
 //!   placeholder in every hop, converted or not, and two callers sending
 //!   the same structure redact to the same bytes and share a cache slot.
-//! - Observe mode finds the same values and replaces none.
+//! - Observe mode finds the same values and replaces none, and so does a
+//!   rule whose action is to record only: its values go out as they are,
+//!   and there is nothing of theirs to put back.
 //!
 //! What is restored on the way back: a whole answer in one pass
 //! ([`restore_body`]), a stream frame by frame (`proxy::shaper`), where a
@@ -67,6 +69,29 @@ impl Redaction {
             ledger,
         );
         (Vec::from(out), ledger)
+    }
+
+    /// Restored text masked again for storage — a log row, never what is
+    /// sent: every value the rules find gets its placeholder from `ledger`
+    /// (or a new one), and then **every value `ledger` holds is put back
+    /// as its placeholder wherever it appears as written**, JSON-escaped
+    /// once or twice. The rules alone miss a value that needs its context
+    /// to be recognised — a connection string's password, a custom rule
+    /// written as `OPENAI_API_KEY=…` — when the model repeats it on its
+    /// own; the ledger knows the value itself.
+    pub fn mask_for_storage(&self, body: Vec<u8>, ledger: &Ledger) -> Vec<u8> {
+        let (body, ledger) = self.replace(body, ledger);
+        match std::str::from_utf8(&body) {
+            Ok(text) => match tw_guard::redact::replace::hide_values(
+                text,
+                &ledger,
+                tw_guard::redact::replace::Form::Json,
+            ) {
+                std::borrow::Cow::Borrowed(_) => body,
+                std::borrow::Cow::Owned(hidden) => hidden.into_bytes(),
+            },
+            Err(_) => body,
+        }
     }
 
     /// `text` with every value the rules find masked (`sk-an…7f9c`, `…1234`),
@@ -173,26 +198,30 @@ pub fn per_rule(findings: &[Finding]) -> Vec<RuleHits> {
     out
 }
 
+/// Whether a rule's values were replaced or only recorded: replaced in
+/// enforce mode, unless the rule's action is to record only.
+fn replaced(redaction: &Redaction, rule: &Rule) -> bool {
+    redaction.mode.acts() && !redaction.rules.records(rule)
+}
+
 /// Record what was found in a request: an audit event per rule
-/// (`gateway.redaction_replaced` in enforce mode, `gateway.redaction_flagged`
-/// in observe mode), at most [`RULE_EVENTS_MAX`] of them, and a counter.
-/// A value is never written as it is: a built-in rule's event carries a
-/// few in masked form, a custom rule's only how many there were.
-pub fn record(audit: &AuditLogger, caller: &Caller, mode: Mode, findings: &[Finding]) {
+/// (`gateway.redaction_replaced` for values replaced with placeholders,
+/// `gateway.redaction_flagged` for values only recorded — in observe mode,
+/// or by a rule whose action is to record), at most [`RULE_EVENTS_MAX`] of
+/// them, and a counter. A value is never written as it is: a built-in
+/// rule's event carries a few in masked form, a custom rule's only how
+/// many there were.
+pub fn record(audit: &AuditLogger, caller: &Caller, redaction: &Redaction, findings: &[Finding]) {
     if findings.is_empty() {
         return;
     }
-    let (action, outcome) = if mode.acts() {
-        ("gateway.redaction_replaced", "replaced")
-    } else {
-        ("gateway.redaction_flagged", "recorded")
-    };
+    let mode = redaction.mode;
     let rules = per_rule(findings);
     tracing::info!(
         trace_id = %caller.trace_id,
         rules = rules.len(),
         values = findings.len(),
-        outcome,
+        mode = mode.slug(),
         "outbound redaction found values in the request"
     );
     if rules.len() > RULE_EVENTS_MAX {
@@ -204,6 +233,11 @@ pub fn record(audit: &AuditLogger, caller: &Caller, mode: Mode, findings: &[Find
         );
     }
     for r in &rules {
+        let outcome = if replaced(redaction, &r.rule) {
+            "replaced"
+        } else {
+            "recorded"
+        };
         metrics::counter!(
             "gateway_redaction_found_total",
             "kind" => r.rule.kind().slug(),
@@ -212,6 +246,11 @@ pub fn record(audit: &AuditLogger, caller: &Caller, mode: Mode, findings: &[Find
         .increment(r.values as u64);
     }
     for r in rules.iter().take(RULE_EVENTS_MAX) {
+        let (action, outcome) = if replaced(redaction, &r.rule) {
+            ("gateway.redaction_replaced", "replaced")
+        } else {
+            ("gateway.redaction_flagged", "recorded")
+        };
         let mut detail = serde_json::json!({
             "trace_id": caller.trace_id,
             "model": caller.model,
@@ -220,7 +259,9 @@ pub fn record(audit: &AuditLogger, caller: &Caller, mode: Mode, findings: &[Find
             "kind": r.rule.kind().slug(),
             "values": r.values,
             "count": r.count,
+            "action": if redaction.rules.records(&r.rule) { "record" } else { "placeholder" },
             "outcome": outcome,
+            "mode": mode.slug(),
             "rules_in_request": rules.len(),
         });
         if !r.rule.custom() {
@@ -392,6 +433,7 @@ mod tests {
                 matching: tw_guard::policy::ContentMatch::Regex,
                 case_sensitive: true,
                 label: None,
+                action: Default::default(),
                 disabled: false,
             }],
             ..Default::default()
@@ -445,5 +487,80 @@ mod tests {
         let r = redaction(Mode::Observe);
         let stored = r.redact_blob(&format!(r#"{{"k":"{KEY}"}}"#));
         assert_eq!(stored, r#"{"k":"{{REDACTED_anthropic-api-key}}"}"#);
+    }
+
+    #[test]
+    fn a_rule_that_records_only_is_found_and_reported_but_not_replaced() {
+        let r = Redaction::new(&RedactPolicy {
+            mode: Mode::Enforce,
+            actions: [(
+                "anthropic-api-key".to_string(),
+                tw_guard::policy::RedactAction::Record,
+            )]
+            .into(),
+            custom: vec![tw_guard::policy::CustomRedactRule {
+                name: "project".into(),
+                pattern: "PRJ-7".into(),
+                matching: tw_guard::policy::ContentMatch::Contains,
+                case_sensitive: false,
+                label: Some("PROJECT".into()),
+                action: tw_guard::policy::RedactAction::Placeholder,
+                disabled: false,
+            }],
+            ..Default::default()
+        });
+        let body =
+            serde_json::json!({"messages": [{"role": "user", "content": format!("{KEY} PRJ-7")}]})
+                .to_string();
+        let (found, ledger) = r.look(body.as_bytes());
+        let rules = per_rule(&found);
+        assert_eq!(rules.len(), 2, "both are found and reported");
+        let key = rules
+            .iter()
+            .find(|x| x.rule.id() == "anthropic-api-key")
+            .unwrap();
+        let project = rules.iter().find(|x| x.rule.id() == "project").unwrap();
+        assert!(!replaced(&r, &key.rule), "the key is only recorded");
+        assert!(replaced(&r, &project.rule));
+        let (sent, _) = r.replace(body.into_bytes(), &ledger);
+        let sent = String::from_utf8(sent).unwrap();
+        assert!(sent.contains(KEY), "{sent}");
+        assert!(
+            sent.contains("<<TW_PROJECT_1>>") && !sent.contains("PRJ-7"),
+            "{sent}"
+        );
+
+        // Observe mode records every rule.
+        let observing = Redaction {
+            mode: Mode::Observe,
+            ..r.clone()
+        };
+        assert!(!replaced(&observing, &project.rule));
+    }
+
+    #[test]
+    fn a_value_repeated_without_its_context_is_masked_for_storage() {
+        let r = redaction(Mode::Enforce);
+        let body = serde_json::json!({"messages": [{"role": "user",
+            "content": "connect with postgres://app:hunter2@db.internal:5432/orders"}]})
+        .to_string();
+        let (_, ledger) = r.look(body.as_bytes());
+        assert_eq!(ledger.len(), 1, "the password is numbered");
+        // The model repeats the password alone: no rule recognises it there.
+        let answer =
+            br#"{"content":[{"type":"text","text":"The password <<TW_SECRET_1>> is wrong."}]}"#;
+        let restored = restore_body(&ledger, answer);
+        assert!(String::from_utf8_lossy(&restored).contains("hunter2"));
+        let (rescanned, _) = r.replace(restored.clone(), &ledger);
+        assert!(
+            String::from_utf8_lossy(&rescanned).contains("hunter2"),
+            "rules alone miss it"
+        );
+        let stored = String::from_utf8(r.mask_for_storage(restored, &ledger)).unwrap();
+        assert!(!stored.contains("hunter2"), "{stored}");
+        assert!(
+            stored.contains("The password <<TW_SECRET_1>> is wrong."),
+            "{stored}"
+        );
     }
 }

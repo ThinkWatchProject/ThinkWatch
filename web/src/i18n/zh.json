@@ -118,75 +118,74 @@
     "unknown": "状态未知"
   },
   "contentSecurity": {
-    "subtitle": "出站脱敏、工具调用审查和内容过滤，作用于经过 AI 网关的全部请求。",
+    "subtitle": "防止凭据与个人信息外发、拦截危险命令、过滤指定内容，作用于经过 AI 网关的全部请求与回答。",
     "loadFailed": "安全设置读取失败",
     "summary": {
-      "enforce": "{{count}} 项处置",
-      "observe": "{{count}} 项观察",
+      "enforce": "{{count}} 项开启",
+      "observe": "{{count}} 项监控",
       "off": "{{count}} 项关闭"
     },
-    "modeOff": "关闭",
-    "modeObserve": "观察",
-    "modeFor": "{{guard}}的档位",
-    "nowOff": "当前：不检查，不记录。",
-    "ifEnforced": "切换到「{{mode}}」后：{{effect}}{{risk}}",
+    "mode": {
+      "enforce": "开启",
+      "observe": "监控",
+      "off": "关闭"
+    },
+    "modeFor": "{{guard}}的状态",
+    "now": {
+      "observe": "监控：命中内容记入审计日志，请求与回答不作修改。",
+      "off": "关闭：不检查，不记录。"
+    },
     "guard": {
       "redact": {
-        "name": "出站脱敏",
-        "enforce": "替换",
-        "lead": "请求发出前，按以下规则查找凭据和个人信息。",
-        "nowObserve": "当前：检出的内容记入审计日志，请求原样发出。",
-        "nowEnforce": "当前：检出的内容替换为占位符后发出，响应中的占位符还原为原值。",
-        "effect": "检出的内容替换为占位符后发出，响应中的占位符还原为原值。",
-        "risk": "请求内容改变后，上游缓存可能无法命中。",
-        "testTitle": "测试出站脱敏",
-        "createTitle": "新建脱敏规则",
-        "editTitle": "编辑脱敏规则",
+        "name": "密钥与隐私",
+        "lead": "请求发出前按以下规则查找凭据与个人信息，防止其随请求发送至模型服务商。",
+        "nowEnforce": "开启：命中内容按各条规则的动作处理，替换为占位符后发出，或仅记录；回答中出现的占位符还原为原值。",
+        "testTitle": "测试密钥与隐私规则",
+        "createTitle": "新建密钥与隐私规则",
+        "editTitle": "编辑密钥与隐私规则",
         "nameHint": "记入审计日志时显示此名称。",
         "namePlaceholder": "内部项目号",
-        "samplePlaceholder": "粘贴一段文本，例如一段含有密钥的环境变量"
+        "samplePlaceholder": "粘贴一段文本，例如含有密钥的环境变量"
       },
       "inspect_tools": {
-        "name": "工具调用审查",
-        "enforce": "切断",
-        "lead": "检查上游返回的工具调用参数。",
-        "nowObserve": "当前：命中的调用记入审计日志，照常返回。",
-        "nowEnforce": "当前：命中「切断」规则的调用不会完整到达客户端，因而无法执行；命中「仅记录」规则的调用照常返回。两类都记入审计日志。",
-        "effect": "命中「切断」规则的调用不会完整到达客户端，因而无法执行。",
-        "risk": "误判时，回答会在该调用处中断。",
-        "testTitle": "测试工具调用审查",
-        "createTitle": "新建审查规则",
-        "editTitle": "编辑审查规则",
+        "name": "危险命令",
+        "lead": "检查上游返回的工具调用，防止代理执行高风险命令。",
+        "nowEnforce": "开启：命中「切断」规则的调用不完整送达客户端，客户端无法执行该调用；命中「仅记录」规则的调用照常返回。",
+        "testTitle": "测试危险命令规则",
+        "createTitle": "新建危险命令规则",
+        "editTitle": "编辑危险命令规则",
         "nameHint": "记入审计日志时显示此名称。",
         "namePlaceholder": "删除集群资源",
-        "samplePlaceholder": "粘贴一段工具调用的参数，例如一条要执行的命令"
+        "samplePlaceholder": "粘贴一段工具调用的参数，例如一条待执行的命令"
       },
       "content": {
         "name": "内容过滤",
-        "enforce": "处置",
-        "lead": "按以下规则检查请求中的用户消息和工具结果。",
-        "nowObserve": "当前：命中的内容记入审计日志，请求原样发出。",
-        "nowEnforce": "当前：命中「拒绝」规则的请求不发出，客户端收到拒绝的原因；命中「删除」规则的内容删除后发出；命中「仅记录」规则的请求照常发出。三类都记入审计日志。",
-        "effect": "命中「拒绝」规则的请求不发出，客户端收到拒绝的原因；命中「删除」规则的内容删除后发出；命中「仅记录」规则的请求照常发出。三类都记入审计日志。",
-        "risk": "误判时，正常的请求会被拒绝，或正常的文字被删除。",
-        "testTitle": "测试内容过滤",
+        "lead": "按以下规则检查请求与回答正文，对指定的词语或内容进行拦截、删除或替换。",
+        "nowEnforce": "开启：命中内容按各条规则的动作处理：拒绝、删除、替换或仅记录。",
+        "testTitle": "测试内容过滤规则",
         "createTitle": "新建内容规则",
         "editTitle": "编辑内容规则",
-        "nameHint": "记入审计日志和拒绝原因时显示此名称。",
+        "nameHint": "记入审计日志及拒绝原因时显示此名称。",
         "namePlaceholder": "项目代号",
-        "samplePlaceholder": "粘贴一段用户消息或工具结果"
+        "samplePlaceholder": "粘贴一段用户消息、工具结果或模型回答"
       }
     },
-    "rules": "规则",
-    "ruleCount": "已启用 {{on}} 条，共 {{total}} 条",
+    "ruleCount": "已启用 {{on}} 条，共 {{total}} 条。",
+    "groupCount": "已启用 {{on}} 条，共 {{total}} 条",
+    "groupToggle": "启用或停用「{{name}}」组的全部规则",
+    "search": "检索规则",
+    "noMatch": "没有符合条件的规则。",
+    "monitoring": "监控中",
+    "placeholderIs": "替换为",
+    "replaceWith": "替换为 {{text}}",
     "test": "测试…",
     "newRule": "新建规则",
     "builtinGroup": "内置",
     "col": {
       "rule": "规则",
-      "match": "匹配",
-      "action": "处置",
-      "replaceWith": "替换为",
+      "match": "匹配内容",
+      "scope": "检查对象",
+      "action": "动作",
       "enabled": "启用"
     },
     "kind": {
@@ -203,10 +202,21 @@
       "invisible": "隐藏字符",
       "custom": "自定义"
     },
+    "scope": {
+      "request": "请求",
+      "response": "回答"
+    },
+    "scopeChoice": {
+      "request": "请求",
+      "response": "回答",
+      "both": "请求和回答"
+    },
     "ruleAction": {
+      "placeholder": "替换为占位符",
       "cut": "切断",
       "block": "拒绝",
       "strip": "删除",
+      "replace": "替换",
       "record": "仅记录"
     },
     "menu": {
@@ -216,11 +226,15 @@
       "copyAsCustom": "复制为自定义规则"
     },
     "actionsFor": "「{{name}}」的操作",
+    "actionFor": "「{{name}}」的动作",
     "toggleFor": "启用「{{name}}」",
     "toast": {
-      "modeSet": "{{guard}}已切换到「{{mode}}」",
+      "modeSet": "{{guard}}已切换为「{{mode}}」",
       "ruleOn": "已启用「{{name}}」",
       "ruleOff": "已停用「{{name}}」",
+      "groupOn": "已启用「{{name}}」组的 {{count}} 条规则",
+      "groupOff": "已停用「{{name}}」组的 {{count}} 条规则",
+      "actionSet": "「{{name}}」的动作已改为「{{action}}」",
       "ruleCreated": "已创建规则「{{name}}」",
       "ruleSaved": "已保存规则「{{name}}」",
       "ruleDeleted": "已删除规则「{{name}}」",
@@ -229,6 +243,9 @@
     },
     "dialog": {
       "name": "名称",
+      "scope": "检查对象",
+      "scopeHint": "请求：用户消息与工具结果。回答：模型输出的正文，不含工具调用与思考过程。",
+      "builtinScope": "内置规则只检查请求。",
       "matchKind": "匹配方式",
       "match": {
         "contains": "包含",
@@ -236,51 +253,100 @@
         "codepoints": "码位"
       },
       "caseSensitive": "区分大小写",
+      "caseHintOn": "区分大小写。",
+      "caseHintOff": "不区分大小写。",
       "patternContains": "匹配内容",
       "patternRegex": "正则表达式",
       "patternCodepoints": "码位",
-      "containsHint": "在用户消息和工具结果中查找这段文字，不区分大小写，首尾空格也参与匹配。",
-      "redactContainsHint": "这段文字出现的每一处都替换为占位符。按原样查找：. 和 * 等字符没有特殊含义，首尾空格也参与匹配。",
-      "codepointsHint": "码位或码位范围，多个之间用逗号分隔，如 U+200B, U+E0000–U+E007F",
+      "containsHint": "按原文查找，「.」「*」等字符不作特殊处理，首尾空格也参与匹配；",
+      "codepointsHint": "码位或码位范围，多项之间以逗号分隔，如 U+200B, U+E0000–U+E007F。",
+      "codepointsReason": "码位仅适用于请求。",
+      "regexAnswerHint": "检查回答时，正则规则至多暂缓 256 个字符；长于此的命中，其起始部分可能已送达客户端。",
       "regexHint": {
-        "redact": "匹配到的整段内容替换为占位符。",
-        "inspect_tools": "按工具调用的参数匹配。",
-        "content": "在用户消息和工具结果中匹配，不区分大小写。"
+        "redact": "按正则表达式匹配；",
+        "inspect_tools": "按工具调用的参数匹配，区分大小写。",
+        "content": "按正则表达式匹配；"
       },
+      "matchSwitched": "检查对象含回答，匹配方式已改为「包含」。",
       "label": "占位符名称",
-      "labelHint": "替换为 <<TW_名称_序号>>。只能使用大写字母、数字和下划线。",
+      "labelHint": "命中内容替换为 <<TW_名称_序号>>。仅可使用大写字母、数字和下划线。",
       "becomes": "替换后为",
-      "action": "处置",
+      "placeholderField": "占位符",
+      "action": "动作",
       "actionWhat": {
-        "cut": "在「{{mode}}」档下，命中的调用不会完整到达客户端，因而无法执行。",
-        "block": "在「{{mode}}」档下，命中的请求不发出，客户端收到拒绝的原因。",
-        "strip": "在「{{mode}}」档下，命中的文字从用户消息和工具结果中删除后，请求照常发出。"
+        "placeholder": "命中内容替换为占位符后发出；回答中出现该占位符时还原为原值。",
+        "cut": "命中的调用不完整送达客户端，客户端无法执行该调用。",
+        "block": "请求不发送至上游，客户端收到拒绝原因。",
+        "strip": "删除命中内容，不保留任何标记。",
+        "replace": "命中内容替换为指定的文本，不可还原。",
+        "record": "不修改内容，命中记入审计日志。"
       },
-      "recordWhat": {
-        "inspect_tools": "命中的调用照常返回，只记入审计日志。",
-        "content": "命中的请求照常发出，只记入审计日志。"
-      },
+      "blockReason": "拒绝仅适用于请求：回答以流式输出，已送达的内容无法撤回。",
+      "actionSwitched": "检查对象含回答，动作已改为「删除」。",
+      "replacement": "替换文本",
+      "replacementHint": "命中内容替换为此文本，不可还原。",
+      "replacementRequired": "请填写替换文本",
       "withFactory": "{{what}}出厂设置为「{{action}}」。",
+      "modeNote": {
+        "observe": "当前分项处于监控状态，规则仅记录命中，不修改内容。",
+        "off": "当前分项已关闭，规则不生效。"
+      },
       "state": "状态",
       "on": "已启用",
       "off": "已停用",
       "category": "类别：{{kind}}",
       "sample": "测试文本",
+      "testAs": "测试方式",
+      "testAsSide": {
+        "request": "按请求测试",
+        "response": "按回答测试"
+      },
       "hits": "命中 {{count}} 处",
       "noHit": "未命中",
-      "sent": "「{{mode}}」档下发出的内容",
-      "refused": "在「{{mode}}」档下，这个请求不会发出。",
+      "output": "处理后：",
+      "refused": "该请求不会发送至上游。",
       "testDesc": "按当前启用的规则检查一段文本，不发出任何请求。",
       "content": "内容",
       "nameRequired": "请填写名称",
       "nameTaken": "已有同名规则",
       "patternRequired": "请填写匹配内容",
-      "badCodepoint": "码位写法不对：{{item}}",
-      "tooManyCodepoints": "最多 {{max}} 项",
-      "badLabel": "须以大写字母开头，只含大写字母、数字和下划线，最长 24 个字符。",
+      "badCodepoint": "码位格式有误：{{item}}",
+      "tooManyCodepoints": "至多 {{max}} 项",
+      "badLabel": "须以大写字母开头，仅含大写字母、数字和下划线，至多 24 个字符。",
       "saveFailed": "未能保存",
       "deleteTitle": "删除规则「{{name}}」",
       "deleteDesc": "删除后不再按此规则检查。审计日志中已有的记录保留。"
+    },
+    "log": {
+      "tab": "日志",
+      "lead": "三个分项的命中记录，取自审计日志；日志转发器同时将其输出。记录不含请求与回答的原文。",
+      "filter": "按分项筛选",
+      "all": "全部",
+      "total": "共 {{count}} 条",
+      "refresh": "刷新",
+      "empty": "暂无命中记录。",
+      "loadFailed": "日志读取失败",
+      "page": "第 {{page}} 页，共 {{pages}} 页",
+      "previous": "上一页",
+      "next": "下一页",
+      "openTrace": "查看追踪",
+      "stripped": "删除 {{count}} 处",
+      "replaced": "替换 {{count}} 处",
+      "col": {
+        "time": "时间",
+        "guard": "分项",
+        "part": "位置",
+        "outcome": "处理",
+        "caller": "调用方",
+        "trace": "追踪"
+      },
+      "part": {
+        "request": "请求",
+        "toolResult": "请求 · 工具结果",
+        "answerText": "回答 · 正文",
+        "toolCall": "回答 · 工具调用",
+        "toolCallNamed": "回答 · 工具调用 {{tool}}"
+      }
     },
     "matcher": {
       "prefix": "{{prefix}} 开头，其后至少 {{n}} 个字符",
@@ -1548,8 +1614,8 @@
       "logs": "日志",
       "log_forwarders": "日志转发器",
       "webhooks": "Webhook",
-      "content_filter": "内容过滤",
-      "pii_redactor": "PII 脱敏",
+      "content_filter": "内容过滤与危险命令",
+      "pii_redactor": "密钥与隐私",
       "rate_limits": "速率限制",
       "settings": "设置",
       "system": "系统"

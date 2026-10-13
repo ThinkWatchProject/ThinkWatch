@@ -302,8 +302,12 @@ fn custom_content(r: &UsableContentRule, name: String) -> CustomContentRule {
     CustomContentRule {
         name,
         pattern: r.pattern.clone(),
+        // The old filter read requests only, ignoring case.
+        scope: tw_guard::policy::request_only(),
         matching: r.matching,
+        case_sensitive: false,
         action: r.action,
+        replacement: tw_guard::policy::DEFAULT_REPLACEMENT.to_string(),
         disabled: false,
     }
 }
@@ -498,6 +502,7 @@ pub fn redact(patterns: Option<&Value>) -> RedactPolicy {
                     matching: ContentMatch::Regex,
                     case_sensitive: true,
                     label: label_of(&p.placeholder_prefix),
+                    action: Default::default(),
                     disabled: false,
                 });
             }

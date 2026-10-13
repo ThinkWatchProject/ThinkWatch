@@ -26,13 +26,24 @@ export const SETTING_KEYS: Record<Guard, string> = {
 export type GuardMode = 'off' | 'observe' | 'enforce';
 
 /**
- * What a rule does in the third mode. Tool-call inspection: `cut` /
- * `record`; content filter: `block` / `strip` / `record`. Outbound
- * redaction has no per-rule action — a hit is always replaced.
+ * What a rule does when its guard is on (`enforce`); a guard that monitors
+ * (`observe`) only records, whatever the rule says. Redaction:
+ * `placeholder` / `record`; tool calls: `cut` / `record`; content:
+ * `block` / `strip` / `replace` / `record`.
  */
-export type RuleAction = 'cut' | 'block' | 'strip' | 'record';
+export type RuleAction = 'placeholder' | 'cut' | 'block' | 'strip' | 'replace' | 'record';
+export type RedactAction = 'placeholder' | 'record';
 export type ToolAction = 'cut' | 'record';
-export type ContentAction = 'block' | 'strip' | 'record';
+export type ContentAction = 'block' | 'strip' | 'replace' | 'record';
+
+/**
+ * What a content rule checks: the request (the caller's messages and tool
+ * results) and/or the answer's text (not its tool calls, not its thinking).
+ */
+export type RuleScope = 'request' | 'response';
+
+/** The text a `replace` content rule writes in place of a hit when it names none. */
+export const DEFAULT_REPLACEMENT = '***';
 
 /** How a content rule matches. */
 export type ContentMatch = 'contains' | 'regex' | 'codepoints';
@@ -55,8 +66,8 @@ export interface CardNetwork {
 /**
  * What a rule matches, for display. Built-in rules use the specific kinds;
  * custom rules are `regex`, `contains` or `codepoints`. `case_sensitive`
- * is left out when false: tool-call regexes are case-sensitive, content
- * rules are not, a custom redaction rule is when it says so. A built-in rule's
+ * is left out when false: tool-call regexes are case-sensitive, a custom
+ * redaction or content rule is when it says so. A built-in rule's
  * `codepoints.ranges` is the canonical spelling (`U+200B`,
  * `U+E0000–U+E007F`); a custom rule's is the items as written, so joining
  * them with `, ` gives back what is stored. `builtin` is a check
@@ -99,12 +110,16 @@ export interface SecurityRuleView {
   enabled: boolean;
   /** Whether it is on out of the box. `true` for custom rules. */
   on_by_default: boolean;
-  /** Tool calls and content: what it does in the third mode. */
+  /** What it does when the guard is on. */
   action?: RuleAction | null;
-  /** Built-in tool and content rules: the factory action. */
+  /** Built-in rules: the factory action. */
   default_action?: RuleAction | null;
   /** Redaction: the placeholder label (`SECRET`, `EMAIL` …), built-in and custom. */
   label?: string | null;
+  /** Content rules: what they check. Built-in rules check requests only. */
+  scope?: RuleScope[] | null;
+  /** Content rules whose action is `replace`: the text a hit becomes. */
+  replacement?: string | null;
 }
 
 export interface GuardDetail {
@@ -132,18 +147,20 @@ export interface SecurityTestRequest {
   pattern?: string | null;
   /** Left out: `contains`. Redaction takes `contains` or `regex` only. */
   match?: ContentMatch | null;
-  /** Redaction only. Left out: ignoring case. */
+  /** Redaction and content. Left out: ignoring case. */
   case_sensitive?: boolean | null;
   rule?: string | null;
   label?: string | null;
   /**
-   * What the rule tried (`pattern` or `rule`) does in the third mode;
-   * `output` and `refused` follow it. Tool calls: `cut` / `record`;
-   * content: `block` / `strip` / `record`. Never for redaction — the
-   * server refuses it there. Left out: the saved action (`record` for a
-   * pattern).
+   * What the rule tried (`pattern` or `rule`) does when the guard is on;
+   * `output` and `refused` follow it. Left out: the saved action
+   * (`placeholder` for a redaction pattern, `record` for the others).
    */
   action?: RuleAction | null;
+  /** Content: the side the sample is tried as. Left out: the request. */
+  scope?: RuleScope | null;
+  /** Content, `action: replace`: the text a hit becomes. Left out: `***`. */
+  replacement?: string | null;
 }
 
 export interface SecurityTestHit {
@@ -158,16 +175,17 @@ export interface SecurityTestHit {
    * characters are drawn as `‹U+200B›`, a run as `‹U+E0049 ×12›`.
    */
   excerpt: string;
-  /** Tool calls and content: what the rule does in the third mode. */
+  /** What the rule does when the guard is on. */
   action?: RuleAction | null;
 }
 
 export interface SecurityTestResult {
   hits: SecurityTestHit[];
   /**
-   * The sample as it would be sent in the third mode: redaction replaced,
-   * content stripped. `null` when nothing changes, or when the content
-   * filter would refuse the request.
+   * The sample as it would be sent (or, tried as an answer, received) with
+   * the guard on: redaction replaced, content stripped or replaced. `null`
+   * when nothing changes, or when the content filter would refuse the
+   * request.
    */
   output: string | null;
   /** Content filter: a `block` rule matched, so the request would not be sent. */
@@ -190,6 +208,8 @@ export interface CustomRedactRule {
   case_sensitive?: boolean;
   /** Placeholder label, `^[A-Z][A-Z0-9_]{0,23}$`. Left out: `SECRET`. */
   label?: string;
+  /** Left out: `placeholder`. */
+  action?: RedactAction;
   disabled?: boolean;
 }
 
@@ -199,6 +219,8 @@ export interface RedactPolicy {
   enable?: string[];
   /** Built-in rules turned off that are on out of the box. */
   disable?: string[];
+  /** Built-in rules whose action differs from the factory one. */
+  actions?: Record<string, RedactAction>;
   custom?: CustomRedactRule[];
 }
 
@@ -223,10 +245,16 @@ export interface ToolPolicy {
 export interface CustomContentRule {
   name: string;
   pattern: string;
+  /** Left out: `request`. With `response`, `block` and `codepoints` are refused. */
+  scope?: RuleScope[];
   /** Left out: `contains`. */
   match?: ContentMatch;
+  /** Left out: ignoring case. */
+  case_sensitive?: boolean;
   /** Left out: `record`. */
   action?: ContentAction;
+  /** `action: replace` only. Left out: `***`. */
+  replacement?: string;
   disabled?: boolean;
 }
 

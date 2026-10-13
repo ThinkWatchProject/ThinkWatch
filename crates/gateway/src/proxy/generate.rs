@@ -24,8 +24,8 @@
 //! # The guards, on the bytes the caller sent
 //!
 //! The content filter reads the caller's text where the request's own
-//! format puts it, and a rule that strips text strips it there: the
-//! request goes on as the stripped one, decoded again. Outbound redaction
+//! format puts it, and a rule that deletes or replaces text does so there:
+//! the request goes on as the changed one, decoded again. Outbound redaction
 //! then searches the whole request, numbers what it finds once, and every
 //! hop — forwarded or converted — goes out through it (see
 //! `crate::redaction`). Both are thinkwatch-core's, shared with the
@@ -606,6 +606,7 @@ pub(crate) async fn read_whole(
     };
     Ok(Completed {
         body: rewrite_model(&body, caller_model),
+        logged: None,
         usage,
         usage_estimated,
     })
@@ -729,21 +730,23 @@ async fn run(
 
     // 3. Content filter, on the caller's text where its own format puts
     //    it. Every hit is an audit event (without the text); a refusal is
-    //    the caller's 403, quoting their words (masked).
+    //    the caller's 403, quoting their words (masked). The rules that
+    //    check answers run on the way back (the shaper for a stream, below
+    //    for a whole answer).
     let screening = guards.content.screen(surface.dialect, &body);
-    crate::content_filter::record(&state.audit, &caller, &screening);
+    crate::content_filter::record(&state.audit, &caller, guards.content.mode, &screening);
     if let Some(hit) = screening.refusal() {
         return Err(ctx
             .emit(crate::content_filter::refusal(hit, &guards.redaction))
             .into());
     }
-    // Text was stripped: from here on — decoding, redaction, every hop,
-    // the audit row — the request is the stripped one.
+    // Text was deleted or replaced: from here on — decoding, redaction,
+    // every hop, the audit row — the request is the changed one.
     let (body, raw) = match screening.body {
         Some(stripped) => {
             let raw = serde_json::from_slice(&stripped).map_err(|_| {
                 ctx.emit(GatewayError::TransformError(
-                    "The request could not be read after the content filter removed text from it."
+                    "The request could not be read after the content filter changed text in it."
                         .into(),
                 ))
             })?;
@@ -769,7 +772,7 @@ async fn run(
     //    The audit row keeps what the caller wrote (their at-rest
     //    redaction setting applies on top).
     let (findings, ledger) = guards.redaction.look(&body);
-    crate::redaction::record(&state.audit, &caller, guards.redaction.mode, &findings);
+    crate::redaction::record(&state.audit, &caller, &guards.redaction, &findings);
     let request_for_audit = body.to_vec();
     let outbound_body = if ledger.is_empty() {
         raw
@@ -818,10 +821,18 @@ async fn run(
         && let Some(cached) = state.cache.get(fp).await
     {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
-        // With this caller's values in it: what they would run.
+        // With this caller's values in it: what they would run. A stored
+        // answer passed the content rules and the inspection in force when
+        // it was stored, not necessarily the ones in force now.
         let restored = crate::redaction::restore_body(&ledger, &cached.body);
-        // A stored answer passed the inspection in force when it was
-        // stored, not necessarily the one in force now.
+        let restored = crate::content_filter::whole(
+            &guards.content,
+            &state.audit,
+            &caller,
+            "cache",
+            surface.dialect,
+            restored,
+        );
         if let Some(e) = crate::tool_inspection::check_whole(
             &guards.tools,
             &guards.redaction,
@@ -853,14 +864,20 @@ async fn run(
         .await;
 
         // Same capture pipeline as a fresh request — redaction toggle,
-        // byte cap and offload all apply — with the status marked.
+        // byte cap and offload all apply — with the status marked. The row
+        // gets what this client was shown, its values masked again.
+        let logged = if guards.content.answer.is_some() {
+            guards.redaction.mask_for_storage(restored.clone(), &ledger)
+        } else {
+            cached.body.clone()
+        };
         let mut capture = prepare_body_capture(
             &state.dynamic_config,
             &guards.redaction,
             &state.blob_store,
             &metadata.request_id,
             &request_for_audit,
-            Some(&cached.body),
+            Some(&logged),
         )
         .await;
         capture.status = Some(BodyCaptureStatus::FromCache.as_str());
@@ -1012,7 +1029,8 @@ async fn run(
 
         let deps = snapshot(entry, sel_record);
         let shaper = StreamShaper::new(mapped_model.clone(), &ledger, surface.dialect)
-            .hiding_usage(hide_usage);
+            .hiding_usage(hide_usage)
+            .filtering(guards.content.stream(surface.dialect));
         return Ok(launch_stream_pump(
             deps,
             open,
@@ -1058,8 +1076,17 @@ async fn run(
                 GatewayErrorResponse::from(e)
             })?;
 
-    // The answer as the caller will receive it, their values restored.
+    // The answer as the caller will receive it: their values restored,
+    // then its text through the content rules that check answers.
     let restored = crate::redaction::restore_body(&answer_ledger, &completed.body);
+    let restored = crate::content_filter::whole(
+        &guards.content,
+        &state.audit,
+        &caller,
+        &entry.provider_name,
+        surface.dialect,
+        restored,
+    );
 
     // Tool calls, on the whole answer before any of it has gone out — in
     // the form the caller would run them. A refusal is the gateway's
@@ -1078,7 +1105,17 @@ async fn run(
     }
 
     // Cache fill, audit, breaker and budget debit — the same hooks the
-    // stream runs in its tail. The cache keeps the placeholder form.
+    // stream runs in its tail. The cache keeps the placeholder form,
+    // unfiltered: the content rules run on the restored text of every hit.
+    // The log row gets what the client was shown, its values masked again.
+    let completed = Completed {
+        logged: guards.content.answer.is_some().then(|| {
+            guards
+                .redaction
+                .mask_for_storage(restored.clone(), &answer_ledger)
+        }),
+        ..completed
+    };
     let deps = snapshot(entry, sel_record);
     run_buffered_post_invoke(&deps, completed).await;
 

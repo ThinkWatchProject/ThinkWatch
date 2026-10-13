@@ -118,75 +118,74 @@
     "unknown": "Status unknown"
   },
   "contentSecurity": {
-    "subtitle": "Outbound redaction, tool-call inspection and the content filter, applied to every request through the AI gateway.",
+    "subtitle": "Keeps credentials and personal information from leaving, stops dangerous commands and filters chosen content, for every request and answer through the AI gateway.",
     "loadFailed": "The security settings could not be loaded",
     "summary": {
-      "enforce": "{{count}} enforcing",
-      "observe": "{{count}} observing",
+      "enforce": "{{count}} on",
+      "observe": "{{count}} monitoring",
       "off": "{{count}} off"
     },
-    "modeOff": "Off",
-    "modeObserve": "Observe",
+    "mode": {
+      "enforce": "On",
+      "observe": "Monitor",
+      "off": "Off"
+    },
     "modeFor": "{{guard}} mode",
-    "nowOff": "Currently: nothing is checked or recorded.",
-    "ifEnforced": "After switching to {{mode}}: {{effect}} {{risk}}",
+    "now": {
+      "observe": "Monitor: hits are recorded in the audit log; requests and answers are not changed.",
+      "off": "Off: nothing is checked or recorded."
+    },
     "guard": {
       "redact": {
-        "name": "Outbound redaction",
-        "enforce": "Replace",
-        "lead": "Before a request is sent, it is searched for credentials and personal information using the rules below.",
-        "nowObserve": "Currently: what is found is recorded in the audit log, and the request is sent unchanged.",
-        "nowEnforce": "Currently: what is found is replaced with placeholders before the request is sent, and the placeholders in the response are restored to the original values.",
-        "effect": "what is found is replaced with placeholders before the request is sent, and the placeholders in the response are restored to the original values.",
-        "risk": "Once the request content changes, the upstream cache may no longer be hit.",
-        "testTitle": "Test outbound redaction",
-        "createTitle": "New redaction rule",
-        "editTitle": "Edit redaction rule",
+        "name": "Secrets & privacy",
+        "lead": "Before a request is sent, these rules look for credentials and personal information so that they are not sent to the model provider.",
+        "nowEnforce": "On: each hit is handled as its rule says, replaced with a placeholder before the request is sent or recorded only; placeholders in the answer are restored to the original values.",
+        "testTitle": "Test secrets & privacy rules",
+        "createTitle": "New secrets & privacy rule",
+        "editTitle": "Edit secrets & privacy rule",
         "nameHint": "Shown in the audit log.",
         "namePlaceholder": "Internal project number",
         "samplePlaceholder": "Paste some text, such as environment variables that contain a key"
       },
       "inspect_tools": {
-        "name": "Tool-call inspection",
-        "enforce": "Cut off",
-        "lead": "Tool-call arguments returned by the upstream are checked.",
-        "nowObserve": "Currently: matching calls are recorded in the audit log and returned as usual.",
-        "nowEnforce": "Currently: calls that match a \"Cut off\" rule never fully reach the client, so they cannot run; calls that match a \"Record only\" rule are returned as usual. Both are recorded in the audit log.",
-        "effect": "calls that match a \"Cut off\" rule never fully reach the client, so they cannot run.",
-        "risk": "On a false match, the answer stops at that call.",
-        "testTitle": "Test tool-call inspection",
-        "createTitle": "New inspection rule",
-        "editTitle": "Edit inspection rule",
+        "name": "Dangerous commands",
+        "lead": "The tool calls an upstream returns are checked, so that agents do not run high-risk commands.",
+        "nowEnforce": "On: a call that matches a \"Cut off\" rule never fully reaches the client, so it cannot run; a call that matches a \"Record only\" rule is returned as usual.",
+        "testTitle": "Test dangerous command rules",
+        "createTitle": "New dangerous command rule",
+        "editTitle": "Edit dangerous command rule",
         "nameHint": "Shown in the audit log.",
         "namePlaceholder": "Delete cluster resources",
         "samplePlaceholder": "Paste the arguments of a tool call, such as a command to run"
       },
       "content": {
         "name": "Content filter",
-        "enforce": "Enforce",
-        "lead": "User messages and tool results in each request are checked against the rules below.",
-        "nowObserve": "Currently: matches are recorded in the audit log, and the request is sent unchanged.",
-        "nowEnforce": "Currently: a request that matches a \"Refuse\" rule is not sent, and the client is told why; text that matches a \"Delete\" rule is deleted before the request is sent; a request that matches a \"Record only\" rule is sent as usual. All three are recorded in the audit log.",
-        "effect": "a request that matches a \"Refuse\" rule is not sent, and the client is told why; text that matches a \"Delete\" rule is deleted before the request is sent; a request that matches a \"Record only\" rule is sent as usual. All three are recorded in the audit log.",
-        "risk": "On a false match, an ordinary request is refused, or ordinary text is deleted.",
-        "testTitle": "Test the content filter",
+        "lead": "Requests and the text of answers are checked against these rules, and the words or content they name are refused, deleted or replaced.",
+        "nowEnforce": "On: each hit is handled as its rule says: refused, deleted, replaced or recorded only.",
+        "testTitle": "Test content filter rules",
         "createTitle": "New content rule",
         "editTitle": "Edit content rule",
         "nameHint": "Shown in the audit log and in the reason given for a refusal.",
         "namePlaceholder": "Project codename",
-        "samplePlaceholder": "Paste a user message or a tool result"
+        "samplePlaceholder": "Paste a user message, a tool result or a model answer"
       }
     },
-    "rules": "Rules",
-    "ruleCount": "{{on}} of {{total}} on",
+    "ruleCount": "{{on}} of {{total}} rules on.",
+    "groupCount": "{{on}} of {{total}} on",
+    "groupToggle": "Turn every rule in \"{{name}}\" on or off",
+    "search": "Search rules",
+    "noMatch": "No rule matches the search.",
+    "monitoring": "Monitoring",
+    "placeholderIs": "Becomes",
+    "replaceWith": "Replace with {{text}}",
     "test": "Test…",
     "newRule": "New rule",
     "builtinGroup": "Built-in",
     "col": {
       "rule": "Rule",
       "match": "Match",
+      "scope": "Checks",
       "action": "Action",
-      "replaceWith": "Replaced with",
       "enabled": "On"
     },
     "kind": {
@@ -203,10 +202,21 @@
       "invisible": "Hidden characters",
       "custom": "Custom"
     },
+    "scope": {
+      "request": "Request",
+      "response": "Answer"
+    },
+    "scopeChoice": {
+      "request": "Requests",
+      "response": "Answers",
+      "both": "Requests and answers"
+    },
     "ruleAction": {
+      "placeholder": "Replace with placeholder",
       "cut": "Cut off",
       "block": "Refuse",
       "strip": "Delete",
+      "replace": "Replace",
       "record": "Record only"
     },
     "menu": {
@@ -216,11 +226,15 @@
       "copyAsCustom": "Copy as a custom rule"
     },
     "actionsFor": "Actions for {{name}}",
+    "actionFor": "Action of \"{{name}}\"",
     "toggleFor": "Turn on \"{{name}}\"",
     "toast": {
       "modeSet": "{{guard}} set to {{mode}}",
       "ruleOn": "\"{{name}}\" turned on",
       "ruleOff": "\"{{name}}\" turned off",
+      "groupOn": "{{count}} rules in \"{{name}}\" turned on",
+      "groupOff": "{{count}} rules in \"{{name}}\" turned off",
+      "actionSet": "\"{{name}}\" now does \"{{action}}\"",
       "ruleCreated": "Rule \"{{name}}\" created",
       "ruleSaved": "Rule \"{{name}}\" saved",
       "ruleDeleted": "Rule \"{{name}}\" deleted",
@@ -229,6 +243,9 @@
     },
     "dialog": {
       "name": "Name",
+      "scope": "Checks",
+      "scopeHint": "Requests: user messages and tool results. Answers: the text the model writes, without tool calls or thinking.",
+      "builtinScope": "Built-in rules check requests only.",
       "matchKind": "Match by",
       "match": {
         "contains": "Contains",
@@ -236,40 +253,58 @@
         "codepoints": "Code points"
       },
       "caseSensitive": "Case-sensitive",
+      "caseHintOn": " Case-sensitive.",
+      "caseHintOff": " Case is ignored.",
       "patternContains": "Text to find",
       "patternRegex": "Regular expression",
       "patternCodepoints": "Code points",
-      "containsHint": "Searched for in user messages and tool results, ignoring case. Leading and trailing spaces count.",
-      "redactContainsHint": "Every occurrence of this text is replaced with a placeholder. It is found as written: characters such as . and * have no special meaning, and leading and trailing spaces count.",
-      "codepointsHint": "A code point or a range of them; separate several with commas, as in U+200B, U+E0000–U+E007F",
+      "containsHint": "Found as written: characters such as . and * have no special meaning, and leading and trailing spaces count.",
+      "codepointsHint": "A code point or a range of them; separate several with commas, as in U+200B, U+E0000–U+E007F.",
+      "codepointsReason": "Code points apply to requests only.",
+      "regexAnswerHint": "In answers, a regex rule holds back at most 256 characters; of a longer match, the beginning may already have reached the client.",
       "regexHint": {
-        "redact": "Everything the pattern matches is replaced with a placeholder.",
-        "inspect_tools": "Matched against the arguments of each tool call.",
-        "content": "Matched against user messages and tool results, ignoring case."
+        "redact": "Matched as a regular expression.",
+        "inspect_tools": "Matched against the arguments of each tool call, case-sensitive.",
+        "content": "Matched as a regular expression."
       },
+      "matchSwitched": "The rule checks answers, so matching changed to \"Contains\".",
       "label": "Placeholder name",
-      "labelHint": "Replaced with <<TW_NAME_n>>. Only capital letters, digits and underscores.",
+      "labelHint": "A hit becomes <<TW_NAME_n>>. Only capital letters, digits and underscores.",
       "becomes": "Becomes",
+      "placeholderField": "Placeholder",
       "action": "Action",
       "actionWhat": {
-        "cut": "In {{mode}} mode, a matching call never fully reaches the client, so it cannot run.",
-        "block": "In {{mode}} mode, a matching request is not sent, and the client is told why.",
-        "strip": "In {{mode}} mode, the matching text is deleted from user messages and tool results, and the request is sent."
+        "placeholder": "A hit is replaced with a placeholder before the request is sent; the placeholder is restored to the original value where it appears in the answer.",
+        "cut": "A matching call never fully reaches the client, so it cannot run.",
+        "block": "The request is not sent upstream, and the client is told why.",
+        "strip": "A hit is deleted, leaving no mark.",
+        "replace": "A hit is replaced with the given text, which cannot be undone.",
+        "record": "Nothing is changed; the hit is recorded in the audit log."
       },
-      "recordWhat": {
-        "inspect_tools": "A matching call is returned as usual and recorded in the audit log.",
-        "content": "A matching request is sent as usual and recorded in the audit log."
-      },
+      "blockReason": "Refusing applies to requests only: an answer streams, and what has reached the client cannot be taken back.",
+      "actionSwitched": "The rule checks answers, so its action changed to \"Delete\".",
+      "replacement": "Replacement text",
+      "replacementHint": "A hit is replaced with this text, which cannot be undone.",
+      "replacementRequired": "Enter the replacement text",
       "withFactory": "{{what}} The factory setting is \"{{action}}\".",
+      "modeNote": {
+        "observe": "This section is monitoring: rules only record hits and change nothing.",
+        "off": "This section is off: no rule applies."
+      },
       "state": "State",
       "on": "On",
       "off": "Off",
       "category": "Category: {{kind}}",
       "sample": "Test text",
+      "testAs": "Test as",
+      "testAsSide": {
+        "request": "Test as a request",
+        "response": "Test as an answer"
+      },
       "hits": "Matches: {{count}}",
       "noHit": "No match",
-      "sent": "Sent in {{mode}} mode",
-      "refused": "In {{mode}} mode, this request would not be sent.",
+      "output": "After processing:",
+      "refused": "This request would not be sent upstream.",
       "testDesc": "Checks a piece of text against the rules that are on. No request is sent.",
       "content": "Content",
       "nameRequired": "Enter a name",
@@ -281,6 +316,37 @@
       "saveFailed": "Not saved",
       "deleteTitle": "Delete the rule \"{{name}}\"",
       "deleteDesc": "The rule is no longer checked. Entries already in the audit log are kept."
+    },
+    "log": {
+      "tab": "Log",
+      "lead": "What the three sections found, read from the audit log; the log forwarders send the same events on. Entries do not contain the text of requests or answers.",
+      "filter": "Filter by section",
+      "all": "All",
+      "total": "{{count}} entries",
+      "refresh": "Refresh",
+      "empty": "Nothing has been found yet.",
+      "loadFailed": "The log could not be loaded",
+      "page": "Page {{page}} of {{pages}}",
+      "previous": "Previous page",
+      "next": "Next page",
+      "openTrace": "View trace",
+      "stripped": "Deleted in {{count}} places",
+      "replaced": "Replaced in {{count}} places",
+      "col": {
+        "time": "Time",
+        "guard": "Section",
+        "part": "Where",
+        "outcome": "Handling",
+        "caller": "Caller",
+        "trace": "Trace"
+      },
+      "part": {
+        "request": "Request",
+        "toolResult": "Request · tool result",
+        "answerText": "Answer · text",
+        "toolCall": "Answer · tool call",
+        "toolCallNamed": "Answer · tool call {{tool}}"
+      }
     },
     "matcher": {
       "prefix": "Starts with {{prefix}}, followed by at least {{n}} characters",
@@ -1548,8 +1614,8 @@
       "logs": "Logs",
       "log_forwarders": "Log forwarders",
       "webhooks": "Webhooks",
-      "content_filter": "Content filter",
-      "pii_redactor": "PII redactor",
+      "content_filter": "Content filter & dangerous commands",
+      "pii_redactor": "Secrets & privacy",
       "rate_limits": "Rate limits",
       "settings": "Settings",
       "system": "System"

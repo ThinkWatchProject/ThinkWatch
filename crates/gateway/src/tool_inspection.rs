@@ -119,6 +119,7 @@ impl StreamInspector {
                 &self.provider,
                 &v,
                 blocked,
+                self.inspection.mode,
                 &self.mask,
             );
             if blocked {
@@ -151,7 +152,7 @@ pub fn check_whole(
 ) -> Option<crate::error::GatewayError> {
     for v in inspection.whole(body) {
         let blocked = inspection.blocks(&v);
-        record(audit, caller, provider, &v, blocked, mask);
+        record(audit, caller, provider, &v, blocked, inspection.mode, mask);
         if blocked {
             return Some(refusal(&v));
         }
@@ -173,6 +174,7 @@ pub fn record(
     provider: &str,
     v: &Verdict,
     blocked: bool,
+    mode: Mode,
     mask: &Redaction,
 ) {
     tracing::warn!(
@@ -204,6 +206,7 @@ pub fn record(
                 "why": v.why,
                 "action": if v.cut { "cut" } else { "record" },
                 "outcome": if blocked { "cut" } else { "recorded" },
+                "mode": mode.slug(),
                 "excerpt": mask.mask(&v.excerpt),
             })),
     );

@@ -15,6 +15,9 @@ use super::clickhouse_util::*;
 pub struct AuditLogQuery {
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    /// One action, or several separated by commas (an event matches any
+    /// of them): the console's security log asks for the guards' events
+    /// this way.
     pub action: Option<String>,
     pub resource: Option<String>,
     pub ip_address: Option<String>,
@@ -43,6 +46,25 @@ struct ChAuditRow {
     ip_address: Option<String>,
     user_agent: Option<String>,
     created_at: String,
+}
+
+/// At most this many actions in one `action` filter.
+const ACTIONS_MAX: usize = 32;
+
+/// The actions an `action` filter names: separated by commas, blanks and
+/// repeats left out, at most [`ACTIONS_MAX`]. No action has a comma in its
+/// name, so one action is a list of one.
+fn actions_of(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for a in raw.split(',').map(str::trim).filter(|a| !a.is_empty()) {
+        if out.len() == ACTIONS_MAX {
+            break;
+        }
+        if !out.iter().any(|o| o == a) {
+            out.push(a.to_string());
+        }
+    }
+    out
 }
 
 #[utoipa::path(
@@ -86,8 +108,14 @@ pub async fn list_audit_logs(
         binds.push(v.clone());
     }
     if let Some(ref v) = query.action {
-        conditions.push("action = ?".into());
-        binds.push(v.clone());
+        let actions = actions_of(v);
+        if !actions.is_empty() {
+            conditions.push(format!(
+                "action IN ({})",
+                vec!["?"; actions.len()].join(", ")
+            ));
+            binds.extend(actions);
+        }
     }
     if let Some(ref v) = query.resource {
         conditions.push("resource = ?".into());
@@ -176,4 +204,26 @@ pub async fn list_audit_logs(
         .collect();
 
     Ok(Json(AuditLogResponse { total, items }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_action_filter_names_one_action_or_several() {
+        assert_eq!(actions_of("settings.update"), ["settings.update"]);
+        assert_eq!(
+            actions_of(
+                "gateway.content_flagged, gateway.content_replaced,,gateway.content_flagged"
+            ),
+            ["gateway.content_flagged", "gateway.content_replaced"]
+        );
+        assert!(actions_of(" , ").is_empty());
+        let many = (0..40)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(actions_of(&many).len(), ACTIONS_MAX);
+    }
 }
