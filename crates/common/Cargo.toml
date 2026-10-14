@@ -46,5 +46,5 @@ url = { workspace = true }
 # against any S3-compatible backend including RustFS / MinIO / AWS S3).
 aws-sigv4 = { workspace = true }
 aws-credential-types = { workspace = true }
-http_1x = { package = "http", version = "1" }
-async-trait = "0.1"
+http_1x = { package = "http", version = "1.5.0" }
+async-trait = "0.1.92"
