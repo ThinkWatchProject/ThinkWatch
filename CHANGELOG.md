@@ -11,6 +11,51 @@ target.
 
 ## [Unreleased]
 
+## [3.8.2] — 2026-10-16
+
+Tool-call inspection now checks every choice of an answer, not only the
+first, and redacted values are put back in every choice of a streamed
+answer. The thinkwatch-core crates move from v0.74.0 to v0.75.0, and rustls
+moves to 0.23.46 for four security advisories.
+
+No setting, schema or API route changes.
+
+### Security
+
+- **Tool-call inspection checks every choice of an answer.** An answer can
+  carry several choices (Chat Completions `choices`, with `n` above 1) or
+  candidates (Gemini `candidates`), and a streamed chunk several of them at
+  once. Inspection looked only at the first element of each streamed Chat
+  Completions chunk's `choices`, and only at the first Gemini candidate,
+  streamed or whole. A tool call in any other choice or candidate reached
+  the client uninspected: it was not recorded, and in enforce mode it was
+  neither cut nor refused. Every choice and every candidate is now
+  inspected. The arguments of a streamed Chat Completions call are put
+  together both by the choice's `index` and by the choice's position in
+  each chunk, the two ways clients assemble them, and both are checked.
+  Whole Chat Completions answers already had every choice inspected. This
+  holds whether the route forwards the answer in the caller's format or
+  converts it.
+- rustls 0.23.46, for RUSTSEC-2026-0346 to RUSTSEC-2026-0349.
+
+### Fixed
+
+- **Redacted values are put back in every choice of a streamed answer.**
+  With outbound redaction in enforce mode, a streamed Chat Completions
+  answer with several choices, or a Gemini answer with several candidates,
+  could reach the client with a placeholder still in it, or with the start
+  of a placeholder from one choice in the text of another. Values were put
+  back only in the first choice of each chunk, and the text held back while
+  a placeholder might still be completing was kept for the answer as a
+  whole rather than for each choice, so one choice finishing released what
+  another was holding. Each choice is now restored on its own, and released
+  when it finishes.
+
+### Changed
+
+- thinkwatch-core crates (tw-bedrock, tw-breaker, tw-dialect, tw-guard)
+  v0.74.0 → v0.75.0. Only tw-guard changes.
+
 ## [3.8.1] — 2026-10-13
 
 Outbound redaction searches only the text written in a request, located
@@ -2405,7 +2450,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.1...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.2...HEAD
+[3.8.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.2
 [3.8.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.1
 [3.8.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.0
 [3.7.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.7.1
