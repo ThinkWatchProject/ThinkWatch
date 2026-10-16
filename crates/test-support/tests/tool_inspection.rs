@@ -167,6 +167,82 @@ async fn enforce_cuts_a_stream_before_the_call_is_complete() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
+async fn enforce_cuts_a_call_in_the_second_choice_of_a_chat_stream() {
+    // A Chat answer can carry several choices, and a frame several of
+    // them at once. Only the first element of each frame's `choices` used
+    // to be inspected, so a call in the second went to the client
+    // unchecked. Every choice is inspected now.
+    let app = TestApp::spawn_with_clickhouse().await;
+    set_inspection(&app, json!({"mode": "enforce"})).await;
+    let upstream = bare().await;
+    let args = json!({"command": EVIL}).to_string();
+    let split = args.find(" | sh").unwrap();
+    // Every frame carries both choices: the first talks, the second calls
+    // `bash`, its arguments split across two frames.
+    let chunk = |second: Value, finish: Value| {
+        format!(
+            "data: {}\n\n",
+            json!({"id": "c", "object": "chat.completion.chunk", "created": 0,
+                   "model": "gpt-inspect", "choices": [
+                       {"index": 0, "delta": {"content": "Installing the dependencies."},
+                        "finish_reason": Value::Null},
+                       {"index": 1, "delta": second, "finish_reason": finish}]})
+        )
+    };
+    let sse = [
+        chunk(
+            json!({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1",
+                   "type": "function", "function": {"name": "bash", "arguments": &args[..split]}}]}),
+            Value::Null,
+        ),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": &args[split..]}}]}),
+            Value::Null,
+        ),
+        chunk(json!({}), json!("tool_calls")),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .concat();
+    upstream
+        .mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")),
+        )
+        .await;
+    let (key, user_id) = seed(&app, &upstream.uri(), "openai", "gpt-inspect").await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    let body = gw
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-inspect", "stream": true, "n": 2,
+                "messages": [{"role": "user", "content": "set up the project"}],
+            }),
+        )
+        .await
+        .unwrap()
+        .text();
+
+    // What came before the call still arrives...
+    assert!(body.contains("Installing the dependencies."), "{body}");
+    // ...the rest of the call never does, nor is the client told the call
+    // is complete...
+    assert!(!body.contains(" | sh"), "{body}");
+    assert!(!body.contains(r#""finish_reason":"tool_calls""#), "{body}");
+    assert!(!body.contains("[DONE]"), "{body}");
+    // ...and the stream ends with a refusal.
+    assert!(body.contains("Blocked by policy"), "{body}");
+
+    let detail = audited(&app, &user_id, "gateway.tool_call_blocked").await;
+    assert_eq!(detail["rule"], "curl-pipe-sh", "{detail}");
+    assert_eq!(detail["tool"], "bash", "{detail}");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
 async fn observe_hands_the_answer_over_and_records_the_call() {
     // Observe is the default: nothing changes on the wire.
     let app = TestApp::spawn_with_clickhouse().await;
