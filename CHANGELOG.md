@@ -11,6 +11,27 @@ target.
 
 ## [Unreleased]
 
+### Changed
+
+- The thinkwatch-core crates move from v0.75.0 to v0.77.0.
+
+### Fixed
+
+- **Tool-call inspection no longer judges arguments that are still
+  arriving.** A streamed tool call was checked against its arguments as
+  far as they had come in. A host cut off in the middle of its name
+  (`http://127` before `.0.0.1`) looked external, and a pattern anchored
+  at the end could match the half-received tail. A hit now counts only
+  once it is settled; rules that cut still act as early as possible.
+- **A recorded hit carries the whole call.** A hit that is only recorded,
+  and every hit in observe mode, was recorded with the arguments as they
+  stood at the first match. It is now recorded once the call is complete.
+  A Chat Completions call with no `finish_reason` or `[DONE]` is checked
+  when the stream ends.
+- **`-T` is an upload only in curl.** The upload rule took any `-T` for
+  `curl -T`, so `docker compose exec -T` next to a URL was recorded as a
+  file upload.
+
 ## [3.8.2] — 2026-10-16
 
 Tool-call inspection now checks every choice of an answer, not only the
