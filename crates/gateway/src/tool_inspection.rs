@@ -59,8 +59,16 @@ impl ToolInspection {
     }
 
     /// A wall for an SSE stream in the client's format. `None` when off.
+    ///
+    /// Only the rules that can stop the response are checked while a call
+    /// is still arriving, and only on what has settled (a host cut off at
+    /// `http://127` is not yet an external one). Everything else waits for
+    /// the call to complete, so a recorded hit carries the whole call. In
+    /// observe nothing can stop it, so every rule waits.
     pub fn stream(&self) -> Option<Wall> {
-        self.mode.detects().then(|| Wall::new(self.rules.clone()))
+        self.mode
+            .detects()
+            .then(|| Wall::new(self.rules.clone()).cut_early(self.mode.acts()))
     }
 
     /// Inspect a whole response. Empty when off.
@@ -124,6 +132,29 @@ impl StreamInspector {
             );
             if blocked {
                 return Some((refusal(&v), v.safe_prefix.min(bytes.len())));
+            }
+        }
+        None
+    }
+
+    /// The stream ran to its end. A Chat call that never got its
+    /// `finish_reason` or `[DONE]` is complete only now: the client runs it
+    /// when the stream closes. Returns the refusal when one stops it; the
+    /// rest of the stream should not go out then.
+    pub fn finish(&mut self) -> Option<crate::error::GatewayError> {
+        for v in self.wall.finish() {
+            let blocked = self.inspection.blocks(&v);
+            record(
+                &self.audit,
+                &self.caller,
+                &self.provider,
+                &v,
+                blocked,
+                self.inspection.mode,
+                &self.mask,
+            );
+            if blocked {
+                return Some(refusal(&v));
             }
         }
         None
@@ -362,6 +393,59 @@ mod tests {
         );
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].rule, "upload-file-to-host");
+    }
+
+    /// A hit that is only recorded waits for the call to complete: the
+    /// audit row carries the command the client got, not the piece that had
+    /// arrived when the rule first matched.
+    #[test]
+    fn a_recorded_hit_waits_for_the_whole_call() {
+        let t = ToolInspection::default();
+        let mut wall = t.stream().expect("on by default");
+        let ev = |name: &str, d: serde_json::Value| format!("event: {name}\ndata: {d}\n\n");
+        let delta = |part: &str| {
+            ev(
+                "content_block_delta",
+                serde_json::json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": part}}),
+            )
+        };
+        wall.feed(
+            ev(
+                "content_block_start",
+                serde_json::json!({"type": "content_block_start", "index": 0,
+                    "content_block": {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}}),
+            )
+            .as_bytes(),
+        );
+        assert!(
+            wall.feed(delta(r#"{"command":"rm -rf / "#).as_bytes())
+                .is_empty()
+        );
+        assert!(wall.feed(delta(r#"&& echo done"}"#).as_bytes()).is_empty());
+        let found = wall.feed(
+            ev(
+                "content_block_stop",
+                serde_json::json!({"type": "content_block_stop", "index": 0}),
+            )
+            .as_bytes(),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, "rm-rf-root");
+        assert_eq!(found[0].arguments, r#"{"command":"rm -rf / && echo done"}"#);
+    }
+
+    /// `-T` is an upload only in curl: `docker compose exec -T` turns off
+    /// the terminal.
+    #[test]
+    fn a_dash_t_outside_curl_is_not_an_upload() {
+        let t = ToolInspection::default();
+        assert!(
+            t.whole(&call(
+                "docker compose exec -T postgres psql -c 'select 1'; open https://docs.example.com"
+            ))
+            .is_empty()
+        );
     }
 
     #[test]

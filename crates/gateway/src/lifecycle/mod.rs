@@ -334,7 +334,12 @@ pub(crate) fn build_chat_pump(
         out.extend(shaper.finish());
         // The converter's last bytes can complete a tool call (the block's
         // stop), so they are inspected too.
-        let stop = inspector.as_mut().and_then(|i| i.check(&out));
+        // A Chat call with no `finish_reason` or `[DONE]` completes only
+        // as the stream closes; one that stops it keeps the tail back.
+        let stop = inspector.as_mut().and_then(|i| {
+            i.check(&out)
+                .or_else(|| i.finish().map(|err| (err, 0)))
+        });
         if let Some((err, safe)) = stop {
             let out = cut(&shaper, None, client, &out[..safe], &err);
             tell(&mut done_tx, StreamOutcome::UpstreamError {
