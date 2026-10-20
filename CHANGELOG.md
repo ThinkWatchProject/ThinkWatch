@@ -39,6 +39,12 @@ target.
   handler does: `503 Service Unavailable` with the usual JSON error when
   the database is unavailable, `500` with it for any other database
   error, and an error log naming the lookup that failed.
+- **Password hashing no longer holds up other requests.** Logins,
+  password changes, new users and first-run setup ran Argon2 (tens of
+  milliseconds of CPU by design) on the server's async workers, so every
+  other request scheduled on that worker waited for it. They now run it on
+  the blocking thread pool; the hashes and the constant-time login are
+  unchanged.
 
 ## [3.8.3] — 2026-10-20
 
