@@ -55,15 +55,18 @@ async fn parallel_installs_same_template_keep_count_in_sync() {
     seed_template(&app.db, &slug_owned, "GitHub IT").await;
 
     const N: usize = 5;
-    let mut handles = Vec::with_capacity(N);
+    // Each parallel install runs in its own admin session (independent
+    // cookie jar). That's the closest test-harness analogue to N
+    // browser tabs hitting the public endpoint at once. Log every
+    // session in before firing any install, so the N installs race
+    // each other rather than trickling out one login apart.
+    let mut sessions = Vec::with_capacity(N);
     for _ in 0..N {
-        let app_ref = &app;
+        sessions.push(admin_session(&app).await);
+    }
+    let mut handles = Vec::with_capacity(N);
+    for con in sessions {
         let slug = slug_owned.clone();
-        // Each parallel install runs in its own admin session
-        // (independent cookie jar) — same admin user, different
-        // logins. That's the closest test-harness analogue to N
-        // browser tabs hitting the public endpoint at once.
-        let con = admin_session(app_ref).await;
         handles.push(tokio::spawn(async move {
             con.post(
                 "/api/mcp/servers",

@@ -737,7 +737,7 @@ async fn forwarded_ip(
 async fn load_user_permissions_cached(
     state: &AppState,
     user_id: uuid::Uuid,
-) -> Result<(Vec<String>, Vec<String>), anyhow::Error> {
+) -> Result<(Vec<String>, Vec<String>), sqlx::Error> {
     use fred::interfaces::KeysInterface;
 
     let cache_key = format!("user_perms:{user_id}");
@@ -829,6 +829,15 @@ pub async fn invalidate_team_perms(
     for (uid,) in members {
         invalidate_user_perms(redis, uid).await;
     }
+}
+
+/// The response for a database failure inside an auth middleware: the
+/// same mapping handlers use (`From<sqlx::Error> for AppError`), so a
+/// pool timeout is a 503 with a JSON body instead of a bare, empty 500.
+/// `context` names the lookup that failed in the log line.
+pub(crate) fn db_failure_response(context: &str, err: sqlx::Error) -> Response {
+    tracing::error!(error = %err, "{context}");
+    AppError::from(err).into_response()
 }
 
 pub async fn require_auth(
@@ -931,16 +940,21 @@ pub async fn require_auth(
     //
     // The same lookup reads `totp_enabled` for the TOTP-requirement
     // gate further down, so enforcing it costs no extra query.
-    let user_row: Option<(bool, bool)> = sqlx::query_as(
+    let user_row: Option<(bool, bool)> = match sqlx::query_as(
         "SELECT is_active, totp_enabled FROM users WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(claims.sub)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "DB check for users.is_active failed");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    {
+        Ok(row) => row,
+        Err(e) => {
+            return Ok(db_failure_response(
+                "DB check for users.is_active failed",
+                e,
+            ));
+        }
+    };
     let Some((true, totp_enabled)) = user_row else {
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -959,9 +973,11 @@ pub async fn require_auth(
         .filter(|s| !s.is_empty());
 
     // Load permissions from Redis cache (60s TTL) → DB fallback.
-    let (permissions, denied_permissions) = load_user_permissions_cached(&state, claims.sub)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (permissions, denied_permissions) =
+        match load_user_permissions_cached(&state, claims.sub).await {
+            Ok(loaded) => loaded,
+            Err(e) => return Ok(db_failure_response("Loading user permissions failed", e)),
+        };
 
     if let Some(slot) = request
         .extensions()
@@ -1066,9 +1082,11 @@ async fn auth_via_api_key(
     .bind(&key_hash)
     .bind(global_inactivity_days)
     .fetch_optional(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .ok_or(StatusCode::UNAUTHORIZED)?;
+    .await;
+    let row = match row {
+        Ok(row) => row.ok_or(StatusCode::UNAUTHORIZED)?,
+        Err(e) => return Ok(db_failure_response("Console API key lookup failed", e)),
+    };
 
     if !row.surfaces.iter().any(|s| s == "console") {
         return Err(StatusCode::FORBIDDEN);
@@ -1104,21 +1122,32 @@ async fn auth_via_api_key(
     // Load current permissions from DB (not a snapshot like JWT claims).
     // This means permission changes take effect immediately for API key users.
     let all_perm_keys = crate::handlers::roles::all_permission_keys();
-    let permissions = rbac::compute_user_permissions(&state.db, user_id, &all_perm_keys)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let denied_permissions = rbac::compute_denied_permissions(&state.db, user_id, &permissions)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let permissions = match rbac::compute_user_permissions(&state.db, user_id, &all_perm_keys).await
+    {
+        Ok(permissions) => permissions,
+        Err(e) => return Ok(db_failure_response("Loading user permissions failed", e)),
+    };
+    let denied_permissions =
+        match rbac::compute_denied_permissions(&state.db, user_id, &permissions).await {
+            Ok(denied) => denied,
+            Err(e) => return Ok(db_failure_response("Loading user permissions failed", e)),
+        };
 
-    let email = sqlx::query_scalar::<_, String>(
+    let email = match sqlx::query_scalar::<_, String>(
         "SELECT email FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(user_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .ok_or(StatusCode::UNAUTHORIZED)?;
+    {
+        Ok(email) => email.ok_or(StatusCode::UNAUTHORIZED)?,
+        Err(e) => {
+            return Ok(db_failure_response(
+                "Console API key owner lookup failed",
+                e,
+            ));
+        }
+    };
 
     // Best-effort last_used_at update (same pattern as gateway path).
     let db = state.db.clone();
@@ -1231,5 +1260,33 @@ mod proxy_trust_tests {
             &headers_with("a3f1c0de00"),
             Some("a3f1c0de")
         ));
+    }
+}
+
+#[cfg(test)]
+mod db_failure_tests {
+    use super::*;
+
+    async fn status_and_body(err: sqlx::Error) -> (StatusCode, serde_json::Value) {
+        let resp = db_failure_response("lookup", err);
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_pool_timeout_is_a_503_with_an_error_body() {
+        let (status, body) = status_and_body(sqlx::Error::PoolTimedOut).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["type"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn any_other_database_error_is_a_500_with_an_error_body() {
+        let (status, body) = status_and_body(sqlx::Error::RowNotFound).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body["error"]["message"].is_string());
     }
 }
