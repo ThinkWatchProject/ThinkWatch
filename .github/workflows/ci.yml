@@ -189,7 +189,7 @@ jobs:
         with:
           # Pinned — matches `packageManager` in web/package.json.
           # Bump together with that field, never alone.
-          version: 12.9.1
+          version: 12.14.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
