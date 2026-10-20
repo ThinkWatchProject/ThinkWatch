@@ -2115,7 +2115,8 @@
     "reasonBadUrl": "The gateway address {{url}} cannot be added to ThinkWatch Lite.",
     "reasonBadKey": "This API key cannot be added to ThinkWatch Lite.",
     "noResponse": "Nothing happened?",
-    "installFirst": "Install ThinkWatch Lite ({{version}} or later) first"
+    "installFirst": "Install ThinkWatch Lite ({{version}} or later) first",
+    "limitsIncluded": "The link includes this key's request-count limits and opens in ThinkWatch Lite {{version}} or later."
   },
   "notFound": {
     "title": "404",

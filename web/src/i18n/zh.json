@@ -2115,7 +2115,8 @@
     "reasonBadUrl": "网关地址 {{url}} 无法添加到 ThinkWatch Lite。",
     "reasonBadKey": "这把 API 密钥无法添加到 ThinkWatch Lite。",
     "noResponse": "没有反应？",
-    "installFirst": "先安装 ThinkWatch Lite（{{version}} 或更新版本）"
+    "installFirst": "先安装 ThinkWatch Lite（{{version}} 或更新版本）",
+    "limitsIncluded": "链接附带此密钥的请求数限额，需 ThinkWatch Lite {{version}} 或更新版本打开。"
   },
   "notFound": {
     "title": "404",

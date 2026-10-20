@@ -76,6 +76,18 @@ export function keyLimitsQuery(keyId: string) {
   };
 }
 
+/** The key's own rate-limit rules alone, for the "Add to ThinkWatch Lite"
+ *  link. Under the same query key as [`keyLimitsQuery`], so an edit there
+ *  refreshes it. */
+export function keyRulesQuery(keyId: string) {
+  return {
+    queryKey: [...keyLimitsQueryKey(keyId), 'rules'] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }) =>
+      (await api<Items<Omit<KeyRule, 'current'>>>(`/api/admin/limits/api_key/${keyId}/rules`, { signal }))
+        .items,
+  };
+}
+
 /** The caller holds `rate_limits:read`, but not in a scope covering this key. */
 export function isForbidden(error: unknown): boolean {
   return (error as { status?: number } | null)?.status === 403;
