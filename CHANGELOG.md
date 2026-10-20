@@ -11,6 +11,45 @@ target.
 
 ## [Unreleased]
 
+## [3.8.3] — 2026-10-20
+
+Tool-call inspection in streamed answers now decides only on arguments
+that have settled, and a hit that is recorded carries the whole call. The
+thinkwatch-core crates move from v0.75.0 to v0.77.0. The web image is
+built with Node.js 24.22.0 and pnpm 12.14.0.
+
+No setting, schema or API route changes.
+
+### Changed
+
+- The thinkwatch-core crates move from v0.75.0 to v0.77.0.
+- Since a recorded hit now waits for the complete call, a streamed tool
+  call that never completes (the upstream stream breaks off, or the client
+  leaves, in the middle of it) leaves no tool-inspection row. Such a call
+  was never whole on the client side either. Rules that cut still check
+  the arguments while they arrive.
+- The web image's build stage uses Node.js 24.22.0 and pnpm 12.14.0. The
+  served image (nginx) is unchanged.
+- The development compose file (`deploy/docker-compose.dev.yml`) runs
+  Zitadel v4.19.5.
+
+### Fixed
+
+- **Tool-call inspection no longer judges arguments that are still
+  arriving.** A streamed tool call was checked against its arguments as
+  far as they had come in. A host cut off in the middle of its name
+  (`http://127` before `.0.0.1`) looked external, and a pattern anchored
+  at the end could match the half-received tail. A hit now counts only
+  once it is settled; rules that cut still act as early as possible.
+- **A recorded hit carries the whole call.** A hit that is only recorded,
+  and every hit in observe mode, was recorded with the arguments as they
+  stood at the first match. It is now recorded once the call is complete.
+  A Chat Completions call with no `finish_reason` or `[DONE]` is checked
+  when the stream ends.
+- **`-T` is an upload only in curl.** The upload rule took any `-T` for
+  `curl -T`, so `docker compose exec -T` next to a URL was recorded as a
+  file upload.
+
 ## [3.8.2] — 2026-10-16
 
 Tool-call inspection now checks every choice of an answer, not only the
@@ -2450,7 +2489,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.2...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.3...HEAD
+[3.8.3]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.3
 [3.8.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.2
 [3.8.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.1
 [3.8.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.0

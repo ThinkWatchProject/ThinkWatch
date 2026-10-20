@@ -6,7 +6,7 @@
 # `pnpm install` and `pnpm build` under QEMU: the build alone took 260s
 # against 23s natively, and when Node crashed there with SIGILL the step
 # never exited — the CI job sat idle until GitHub's six-hour limit.
-FROM --platform=$BUILDPLATFORM node:24.21.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:24.22.0-alpine AS builder
 
 # Pin pnpm to a known-good 12.x, matching `packageManager` in
 # web/package.json. The workspace YAML's `allowBuilds` field requires
@@ -15,7 +15,7 @@ FROM --platform=$BUILDPLATFORM node:24.21.0-alpine AS builder
 # a non-reproducible dist/. pnpm 12 is a native binary: Corepack fetches
 # the `pnpm` wrapper, whose first run downloads the musl build from the
 # npm registry and checks it against npm's signature before running it.
-RUN corepack enable && corepack prepare pnpm@12.9.1 --activate
+RUN corepack enable && corepack prepare pnpm@12.14.0 --activate
 
 WORKDIR /app
 # pnpm-workspace.yaml carries the install-script allowlist (see its
