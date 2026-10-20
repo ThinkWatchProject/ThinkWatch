@@ -52,9 +52,53 @@ pub fn verify_password_or_dummy(password: &str, hash: Option<&str>) -> bool {
     }
 }
 
+// Argon2 costs tens of milliseconds of CPU on purpose. Called from a
+// request handler it would hold an async worker for that long, stalling
+// every other request scheduled on that thread, so the handlers use
+// these versions, which run it on the blocking pool.
+
+/// [`hash_password`] on the blocking pool.
+pub async fn hash_password_off_runtime(password: String) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| anyhow::anyhow!("Password hashing task failed: {e}"))?
+}
+
+/// [`verify_password`] on the blocking pool.
+pub async fn verify_password_off_runtime(password: String, hash: String) -> anyhow::Result<bool> {
+    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .map_err(|e| anyhow::anyhow!("Password verification task failed: {e}"))?
+}
+
+/// [`verify_password_or_dummy`] on the blocking pool. A task that cannot
+/// run counts as a mismatch, like an unreadable hash.
+pub async fn verify_password_or_dummy_off_runtime(password: String, hash: Option<String>) -> bool {
+    tokio::task::spawn_blocking(move || verify_password_or_dummy(&password, hash.as_deref()))
+        .await
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_off_runtime_versions_agree_with_the_blocking_ones() {
+        let hash = hash_password_off_runtime("pw".into()).await.unwrap();
+        assert!(
+            verify_password_off_runtime("pw".into(), hash.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !verify_password_off_runtime("nope".into(), hash.clone())
+                .await
+                .unwrap()
+        );
+        assert!(verify_password_or_dummy_off_runtime("pw".into(), Some(hash)).await);
+        assert!(!verify_password_or_dummy_off_runtime("pw".into(), None).await);
+    }
 
     /// A hash written by argon2 0.5.3 (`Argon2::default()`, fixed salt).
     /// Stored hashes outlive crate upgrades: they must keep verifying.
