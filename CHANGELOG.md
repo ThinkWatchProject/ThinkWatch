@@ -11,6 +11,17 @@ target.
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-10-20
+
+The Add to ThinkWatch Lite link from a rotated key now carries the key's
+request limits. A database failure during authentication answers 503 or
+500 with the usual JSON error instead of an empty 500, and password
+hashing no longer runs on the request workers. Monitoring that matches
+only on 500 sees a database outage during authentication as a 503 from
+this release on. The thinkwatch-core crates stay at v0.77.0.
+
+No setting, schema or API route changes.
+
 ### Added
 
 - **The rotated-key dialog's Add to ThinkWatch Lite link carries the key's
@@ -40,11 +51,13 @@ target.
   the database is unavailable, `500` with it for any other database
   error, and an error log naming the lookup that failed.
 - **Password hashing no longer holds up other requests.** Logins,
-  password changes, new users and first-run setup ran Argon2 (tens of
-  milliseconds of CPU by design) on the server's async workers, so every
-  other request scheduled on that worker waited for it. They now run it on
-  the blocking thread pool; the hashes and the constant-time login are
-  unchanged.
+  password changes and resets, new users, turning off two-factor
+  authentication and first-run setup ran Argon2 (tens of milliseconds of
+  CPU by design) on the server's async workers, so every other request
+  scheduled on that worker waited for it. They now run it on the blocking
+  thread pool, at most one run per CPU at a time as before, so a burst of
+  logins holds no more memory than it did (19 MiB per run). The hashes
+  and the constant-time login are unchanged.
 
 ## [3.8.3] — 2026-10-20
 
@@ -2524,7 +2537,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.3...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.9.0...HEAD
+[3.9.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.0
 [3.8.3]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.3
 [3.8.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.2
 [3.8.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.1
