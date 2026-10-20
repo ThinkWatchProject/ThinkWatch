@@ -11,6 +11,24 @@ target.
 
 ## [Unreleased]
 
+### Added
+
+- **The rotated-key dialog's Add to ThinkWatch Lite link carries the key's
+  request limits.** The key's own enabled, unexpired AI-gateway rules that
+  count requests over a window of whole minutes up to 60, or whole hours
+  up to 24 (the console's 1 minute, 5 minutes, 1 hour, 5 hours and 24
+  hours among them), go into the link's `limits` parameter as Lite's
+  rolling windows of the same length; of two rules on one window the
+  smaller count goes, and at most 16 windows, those allowing the fewest
+  requests per second. Token rules stay out, since they count weighted
+  tokens and Lite counts plain ones; so do sliding 7-day rules (Lite's
+  week is a calendar week), budgets, MCP rules and the owner's limits.
+  A link with limits needs ThinkWatch Lite 2026.10.26 or later, which the
+  dialog states under the button. Reading the rules needs
+  `rate_limits:read` in a scope covering the key; without it, or when the
+  rules cannot be read, the link is built without limits as before. A new
+  key has no limits of its own yet, so its link carries none.
+
 ## [3.8.3] — 2026-10-20
 
 Tool-call inspection in streamed answers now decides only on arguments

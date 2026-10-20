@@ -230,6 +230,8 @@ export function CreateApiKeyDialog({
             <div className="rounded-md border bg-muted p-3">
               <code className="text-sm break-all">{createdKey}</code>
             </div>
+            {/* A new key starts a lineage of its own, with no limits yet:
+                its link carries none. */}
             <AddToLite apiKey={createdKey} aiGateway={createSurfaces.includes('ai_gateway')}>
               <Button variant="outline" className="w-full" onClick={handleCopy}>
                 {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
@@ -696,6 +698,7 @@ export function RotateApiKeyDialog({
   const { t } = useTranslation();
 
   const [rotatedNewKey, setRotatedNewKey] = useState<string | null>(null);
+  const [rotatedNewId, setRotatedNewId] = useState<string | undefined>();
   const [rotateSubmitting, setRotateSubmitting] = useState(false);
   const [rotateError, setRotateError] = useState('');
   const [rotateCopied, setRotateCopied] = useState(false);
@@ -703,6 +706,7 @@ export function RotateApiKeyDialog({
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       setRotatedNewKey(null);
+      setRotatedNewId(undefined);
       setRotateError('');
       setRotateCopied(false);
     }
@@ -716,6 +720,7 @@ export function RotateApiKeyDialog({
     try {
       const res = await apiPost<RotateKeyResponse>(`/api/keys/${apiKey.id}/rotate`, {});
       setRotatedNewKey(res.key);
+      setRotatedNewId(res.id);
       onSuccess();
     } catch (err) {
       setRotateError(err instanceof Error ? err.message : t('common.error'));
@@ -748,6 +753,9 @@ export function RotateApiKeyDialog({
             </div>
             <AddToLite
               apiKey={rotatedNewKey}
+              // The new key keeps the old one's limits (they belong to the
+              // key's lineage), so the link can carry them.
+              keyId={rotatedNewId}
               aiGateway={apiKey?.surfaces.includes('ai_gateway') ?? false}
             >
               <Button variant="outline" className="w-full" onClick={handleRotateCopy}>
