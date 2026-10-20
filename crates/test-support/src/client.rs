@@ -199,7 +199,8 @@ impl TestClient {
             .to_owned();
         let challenge_random = challenge["challenge_random"]
             .as_str()
-            .context("challenge_random missing")?;
+            .context("challenge_random missing")?
+            .to_owned();
         let difficulty = challenge["difficulty"]
             .as_u64()
             .and_then(|n| u8::try_from(n).ok())
@@ -223,28 +224,38 @@ impl TestClient {
             "PoW difficulty {difficulty} is too high to grind in a test"
         );
         let limit = 32u64 << difficulty;
-        let mut nonce: u64 = 0;
-        loop {
-            let nonce_str = nonce.to_string();
-            if think_watch_auth::pow::verify_pow(
-                challenge_random,
-                &bound_email,
-                &nonce_str,
-                difficulty,
-            ) {
-                return Ok(serde_json::json!({
-                    "challenge_id": challenge_id,
-                    "nonce": nonce_str,
-                }));
+        // Grind on the blocking pool. Tests run on a current-thread
+        // runtime that also drives the in-process server; grinding
+        // inline (half a second on average, several seconds in the
+        // tail on a busy runner) froze every request in flight, long
+        // enough for their database pool acquires to time out.
+        let nonce_str = tokio::task::spawn_blocking(move || {
+            let mut nonce: u64 = 0;
+            loop {
+                let nonce_str = nonce.to_string();
+                if think_watch_auth::pow::verify_pow(
+                    &challenge_random,
+                    &bound_email,
+                    &nonce_str,
+                    difficulty,
+                ) {
+                    return Ok(nonce_str);
+                }
+                nonce += 1;
+                if nonce > limit {
+                    anyhow::bail!(
+                        "PoW grinder found no nonce in {limit} tries at difficulty {difficulty}; \
+                         the server and `verify_pow` disagree"
+                    );
+                }
             }
-            nonce += 1;
-            if nonce > limit {
-                anyhow::bail!(
-                    "PoW grinder found no nonce in {limit} tries at difficulty {difficulty}; \
-                     the server and `verify_pow` disagree"
-                );
-            }
-        }
+        })
+        .await
+        .context("PoW grinder task")??;
+        Ok(serde_json::json!({
+            "challenge_id": challenge_id,
+            "nonce": nonce_str,
+        }))
     }
 
     pub async fn post_empty(&self, path: &str) -> Result<TestResponse> {

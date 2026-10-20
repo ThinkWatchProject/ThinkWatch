@@ -29,6 +29,17 @@ target.
   rules cannot be read, the link is built without limits as before. A new
   key has no limits of its own yet, so its link carries none.
 
+### Fixed
+
+- **A database outage during authentication is a 503 with an error body,
+  not an empty 500.** When the session or API-key check could not reach
+  Postgres (most often a connection-pool timeout), the console and the
+  gateway answered `500 Internal Server Error` with no body and, for the
+  permission lookup, no log line. These lookups now answer like every
+  handler does: `503 Service Unavailable` with the usual JSON error when
+  the database is unavailable, `500` with it for any other database
+  error, and an error log naming the lookup that failed.
+
 ## [3.8.3] — 2026-10-20
 
 Tool-call inspection in streamed answers now decides only on arguments
