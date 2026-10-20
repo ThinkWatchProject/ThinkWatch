@@ -294,4 +294,106 @@ describe('ApiKeysPage', () => {
     // The settings form is there as before.
     expect(within(screen.getByRole('dialog')).getByText('Gateway access')).toBeInTheDocument()
   })
+
+  async function rotateAndOpenLite() {
+    mockApiPost.mockResolvedValue({
+      id: 'key-2',
+      key: 'tw-rotated-key',
+      name: 'test-key',
+      key_prefix: 'tw_rota',
+    })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ApiKeysPage />)
+    await user.click(await screen.findByRole('button', { name: 'Rotate' }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate' }))
+    const add = await screen.findByRole('button', { name: 'Add to ThinkWatch Lite' })
+    await waitFor(() => expect(add).toBeEnabled())
+    return { user, add }
+  }
+
+  const LINK =
+    'thinkwatch://import?service=thinkwatch&name=thinkwatch' +
+    '&url=https%3A%2F%2Fgateway.example.com&key=tw-rotated-key'
+
+  it("carries the rotated key's request limits to ThinkWatch Lite", async () => {
+    mockKeysFetch([makeKey()], (url) =>
+      url.endsWith('/rules')
+        ? {
+            items: [
+              { id: 'r1', surface: 'ai_gateway', metric: 'requests', window_secs: 60, max_count: 30, enabled: true },
+              { id: 'r2', surface: 'ai_gateway', metric: 'requests', window_secs: 18000, max_count: 600, enabled: true },
+              // Left out: weighted tokens, a sliding week, an MCP rule.
+              { id: 'r3', surface: 'ai_gateway', metric: 'tokens', window_secs: 60, max_count: 9000, enabled: true },
+              { id: 'r4', surface: 'ai_gateway', metric: 'requests', window_secs: 604800, max_count: 9000, enabled: true },
+              { id: 'r5', surface: 'mcp_gateway', metric: 'requests', window_secs: 60, max_count: 5, enabled: true },
+            ],
+          }
+        : { items: [] },
+    )
+    const { user, add } = await rotateAndOpenLite()
+
+    await waitFor(() =>
+      expect(add).toHaveAccessibleDescription(
+        "The link includes this key's request-count limits and opens in ThinkWatch Lite 2026.10.26 or later.",
+      ),
+    )
+    expect(mockApi).toHaveBeenCalledWith('/api/admin/limits/api_key/key-2/rules', expect.anything())
+    await user.click(add)
+    const frame = document.querySelector('iframe')
+    expect(frame).toHaveAttribute(
+      'src',
+      LINK + '&limits=minute%7Crequests%7C30%3Bhour%7Crequests%7C600%7C5',
+    )
+    expect(screen.getByRole('link', { name: 'Install ThinkWatch Lite (2026.10.26 or later) first' }))
+      .toBeInTheDocument()
+    frame?.remove()
+  })
+
+  it('builds the link without limits when none of the rotated key maps', async () => {
+    mockKeysFetch([makeKey()])
+    const { user, add } = await rotateAndOpenLite()
+
+    await waitFor(() =>
+      expect(mockApi).toHaveBeenCalledWith('/api/admin/limits/api_key/key-2/rules', expect.anything()),
+    )
+    expect(add).not.toHaveAccessibleDescription()
+    await user.click(add)
+    const frame = document.querySelector('iframe')
+    expect(frame).toHaveAttribute('src', LINK)
+    expect(screen.getByRole('link', { name: 'Install ThinkWatch Lite (2026.10.16 or later) first' }))
+      .toBeInTheDocument()
+    frame?.remove()
+  })
+
+  it("builds the link without limits when the key's limits cannot be read", async () => {
+    mockKeysFetch([makeKey()], () => {
+      throw Object.assign(new Error('Forbidden'), { status: 403 })
+    })
+    const { user, add } = await rotateAndOpenLite()
+
+    await waitFor(() =>
+      expect(mockApi).toHaveBeenCalledWith('/api/admin/limits/api_key/key-2/rules', expect.anything()),
+    )
+    expect(add).toBeEnabled()
+    expect(add).not.toHaveAccessibleDescription()
+    await user.click(add)
+    const frame = document.querySelector('iframe')
+    expect(frame).toHaveAttribute('src', LINK)
+    frame?.remove()
+  })
+
+  it('reads no limits for the link without rate_limits:read', async () => {
+    mockHasPermission.mockImplementation((perm) => perm !== 'rate_limits:read')
+    mockKeysFetch([makeKey()])
+    const { user, add } = await rotateAndOpenLite()
+
+    await user.click(add)
+    const frame = document.querySelector('iframe')
+    expect(frame).toHaveAttribute('src', LINK)
+    expect(mockApi).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/admin/limits/'),
+      expect.anything(),
+    )
+    frame?.remove()
+  })
 })

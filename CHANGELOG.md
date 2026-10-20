@@ -11,6 +11,54 @@ target.
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-10-20
+
+The Add to ThinkWatch Lite link from a rotated key now carries the key's
+request limits. A database failure during authentication answers 503 or
+500 with the usual JSON error instead of an empty 500, and password
+hashing no longer runs on the request workers. Monitoring that matches
+only on 500 sees a database outage during authentication as a 503 from
+this release on. The thinkwatch-core crates stay at v0.77.0.
+
+No setting, schema or API route changes.
+
+### Added
+
+- **The rotated-key dialog's Add to ThinkWatch Lite link carries the key's
+  request limits.** The key's own enabled, unexpired AI-gateway rules that
+  count requests over a window of whole minutes up to 60, or whole hours
+  up to 24 (the console's 1 minute, 5 minutes, 1 hour, 5 hours and 24
+  hours among them), go into the link's `limits` parameter as Lite's
+  rolling windows of the same length; of two rules on one window the
+  smaller count goes, and at most 16 windows, those allowing the fewest
+  requests per second. Token rules stay out, since they count weighted
+  tokens and Lite counts plain ones; so do sliding 7-day rules (Lite's
+  week is a calendar week), budgets, MCP rules and the owner's limits.
+  A link with limits needs ThinkWatch Lite 2026.10.26 or later, which the
+  dialog states under the button. Reading the rules needs
+  `rate_limits:read` in a scope covering the key; without it, or when the
+  rules cannot be read, the link is built without limits as before. A new
+  key has no limits of its own yet, so its link carries none.
+
+### Fixed
+
+- **A database outage during authentication is a 503 with an error body,
+  not an empty 500.** When the session or API-key check could not reach
+  Postgres (most often a connection-pool timeout), the console and the
+  gateway answered `500 Internal Server Error` with no body and, for the
+  permission lookup, no log line. These lookups now answer like every
+  handler does: `503 Service Unavailable` with the usual JSON error when
+  the database is unavailable, `500` with it for any other database
+  error, and an error log naming the lookup that failed.
+- **Password hashing no longer holds up other requests.** Logins,
+  password changes and resets, new users, turning off two-factor
+  authentication and first-run setup ran Argon2 (tens of milliseconds of
+  CPU by design) on the server's async workers, so every other request
+  scheduled on that worker waited for it. They now run it on the blocking
+  thread pool, at most one run per CPU at a time as before, so a burst of
+  logins holds no more memory than it did (19 MiB per run). The hashes
+  and the constant-time login are unchanged.
+
 ## [3.8.3] — 2026-10-20
 
 Tool-call inspection in streamed answers now decides only on arguments
@@ -2489,7 +2537,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.8.3...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.9.0...HEAD
+[3.9.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.0
 [3.8.3]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.3
 [3.8.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.2
 [3.8.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.1

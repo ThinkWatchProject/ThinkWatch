@@ -927,11 +927,10 @@ pub async fn rotate_key(
         .await;
     let grace_period_ends_at = chrono::Utc::now() + chrono::Duration::hours(grace_hours);
 
-    // Generate new key. Rate-limit / budget rules attached to the
-    // OLD key id are NOT copied here — they live in `rate_limit_rules`
-    // / `budget_caps` keyed by api_key UUID. The follow-up phase
-    // ("limits attached to api_keys") will add an explicit copy step
-    // when rotation happens.
+    // Generate new key. Nothing to copy for limits: the key's
+    // rate-limit rules and budgets are attached to its `lineage_id`
+    // (`api_key_lineage` subjects, see `think_watch_common::limits`),
+    // and the new key keeps that lineage, so they carry over as is.
     let generated = api_key::generate_api_key();
 
     // The new key carries the old one's name verbatim — the chain is

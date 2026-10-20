@@ -145,7 +145,7 @@ pub async fn setup_initialize(
 
     // Create the super_admin user with the first API key, and mark
     // setup done.
-    let password_hash = password::hash_password(&req.admin.password)?;
+    let password_hash = password::hash_password_off_runtime(req.admin.password.clone()).await?;
     let generated = api_key::generate_api_key();
     let site_name = req.site_name.as_deref().unwrap_or("ThinkWatch");
     let admin_user = repo::create_first_admin(

@@ -497,10 +497,11 @@ pub async fn login(
     // Constant-time login: always run Argon2, against a dummy hash when
     // there is no account or it has no password, so the response time does
     // not tell which addresses have accounts.
-    let password_valid = password::verify_password_or_dummy(
-        &req.password,
-        user.as_ref().and_then(|u| u.password_hash.as_deref()),
-    );
+    let password_valid = password::verify_password_or_dummy_off_runtime(
+        req.password.clone(),
+        user.as_ref().and_then(|u| u.password_hash.clone()),
+    )
+    .await;
 
     if !password_valid || user.is_none() {
         // Per-email cross-IP failure counter. The `count` above is keyed
@@ -1053,7 +1054,7 @@ pub async fn register(
     let email = normalize_email(&req.email);
     validate_email(&email)?;
 
-    let password_hash = password::hash_password(&req.password)?;
+    let password_hash = password::hash_password_off_runtime(req.password.clone()).await?;
 
     // Use a transaction to ensure user creation + role assignment are atomic
     let mut tx = state.db.begin().await?;
@@ -1467,7 +1468,9 @@ pub async fn change_password(
         return Err(AppError::Unauthorized);
     }
 
-    if !password::verify_password(&req.old_password, current_hash)? {
+    if !password::verify_password_off_runtime(req.old_password.clone(), current_hash.to_owned())
+        .await?
+    {
         let fails =
             crate::services::auth_lockout::record_failure(&state.redis, &pwchange_fail_key).await?;
         if let Some(secs) = crate::services::auth_lockout::ladder_secs(fails) {
@@ -1481,7 +1484,7 @@ pub async fn change_password(
     crate::services::auth_lockout::clear(&state.redis, &[&pwchange_fail_key, &pwchange_locked_key])
         .await;
 
-    let new_hash = password::hash_password(&req.new_password)?;
+    let new_hash = password::hash_password_off_runtime(req.new_password.clone()).await?;
     repo::set_own_password(&state.db, user.id, &new_hash).await?;
 
     // Revoke all signing public keys for this user (invalidates sessions)
@@ -1832,7 +1835,7 @@ pub async fn totp_disable(
     let hash = user.password_hash.as_ref().ok_or(AppError::BadRequest(
         "SSO accounts cannot manage TOTP here".into(),
     ))?;
-    if !password::verify_password(&req.old_password, hash)? {
+    if !password::verify_password_off_runtime(req.old_password.clone(), hash.to_owned()).await? {
         return Err(AppError::Unauthorized);
     }
 

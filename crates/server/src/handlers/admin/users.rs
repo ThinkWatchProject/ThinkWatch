@@ -458,7 +458,7 @@ pub async fn create_user(
         return Err(AppError::Conflict("Email already registered".into()));
     }
 
-    let password_hash = password::hash_password(&raw_password)?;
+    let password_hash = password::hash_password_off_runtime(raw_password.clone()).await?;
 
     let mut tx = state.db.begin().await?;
 
@@ -920,7 +920,7 @@ pub async fn reset_user_password(
     }
 
     let new_password = password::generate_random_password();
-    let hash = password::hash_password(&new_password)?;
+    let hash = password::hash_password_off_runtime(new_password.clone()).await?;
 
     user_repository::update_password_hash(&state.db, user_id, &hash, true).await?;
 

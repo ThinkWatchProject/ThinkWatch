@@ -365,9 +365,16 @@ fn authenticate(
             .bind(&key_hash)
             .bind(global_inactivity_days)
             .fetch_optional(&state.db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .await;
+            let row = match row {
+                Ok(row) => row.ok_or(StatusCode::UNAUTHORIZED)?,
+                Err(e) => {
+                    return Ok(super::auth_guard::db_failure_response(
+                        "Gateway API key lookup failed",
+                        e,
+                    ));
+                }
+            };
 
             // Surface gate. Even a valid key gets rejected if its
             // `surfaces` list doesn't include the gateway being called.
@@ -433,9 +440,15 @@ fn authenticate(
                 // the aggregated `surface_constraints` JSON so the gateway
                 // hot path has rate limits + budgets without further lookups.
                 let (role_limits, user_roles, loaded_limits) = if let Some(uid) = row.user_id {
-                    let limits = rbac::compute_user_resource_limits(&state.db, uid)
-                        .await
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    let limits = match rbac::compute_user_resource_limits(&state.db, uid).await {
+                        Ok(limits) => limits,
+                        Err(e) => {
+                            return Ok(super::auth_guard::db_failure_response(
+                                "Loading the key owner's resource limits failed",
+                                e,
+                            ));
+                        }
+                    };
                     let names = rbac::load_user_role_names(&state.db, uid)
                         .await
                         .unwrap_or_default();
