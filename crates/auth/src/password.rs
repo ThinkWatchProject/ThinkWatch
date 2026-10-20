@@ -1,7 +1,10 @@
+use std::sync::{Arc, LazyLock};
+
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
+use tokio::sync::Semaphore;
 
 const RANDOM_PASSWORD_LEN: usize = 16;
 const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*";
@@ -57,16 +60,41 @@ pub fn verify_password_or_dummy(password: &str, hash: Option<&str>) -> bool {
 // every other request scheduled on that thread, so the handlers use
 // these versions, which run it on the blocking pool.
 
+/// How many Argon2 runs go at once: one per CPU, as many as the async
+/// workers allowed when they ran it. Each run holds 19 MiB (`m=19456`)
+/// while it lasts and the blocking pool grows to hundreds of threads, so
+/// without this a burst of logins would hold gigabytes at once.
+static ARGON2_PERMITS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+    ))
+});
+
+/// `f` on the blocking pool once an [`ARGON2_PERMITS`] place is free. The
+/// task keeps the place until it ends, even when the caller has gone.
+async fn on_blocking_pool<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    // Never closed, so the acquire cannot fail; the permit inside the
+    // result is held all the same.
+    let permit = Arc::clone(&ARGON2_PERMITS).acquire_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+}
+
 /// [`hash_password`] on the blocking pool.
 pub async fn hash_password_off_runtime(password: String) -> anyhow::Result<String> {
-    tokio::task::spawn_blocking(move || hash_password(&password))
+    on_blocking_pool(move || hash_password(&password))
         .await
         .map_err(|e| anyhow::anyhow!("Password hashing task failed: {e}"))?
 }
 
 /// [`verify_password`] on the blocking pool.
 pub async fn verify_password_off_runtime(password: String, hash: String) -> anyhow::Result<bool> {
-    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+    on_blocking_pool(move || verify_password(&password, &hash))
         .await
         .map_err(|e| anyhow::anyhow!("Password verification task failed: {e}"))?
 }
@@ -74,7 +102,7 @@ pub async fn verify_password_off_runtime(password: String, hash: String) -> anyh
 /// [`verify_password_or_dummy`] on the blocking pool. A task that cannot
 /// run counts as a mismatch, like an unreadable hash.
 pub async fn verify_password_or_dummy_off_runtime(password: String, hash: Option<String>) -> bool {
-    tokio::task::spawn_blocking(move || verify_password_or_dummy(&password, hash.as_deref()))
+    on_blocking_pool(move || verify_password_or_dummy(&password, hash.as_deref()))
         .await
         .unwrap_or(false)
 }
@@ -98,6 +126,32 @@ mod tests {
         );
         assert!(verify_password_or_dummy_off_runtime("pw".into(), Some(hash)).await);
         assert!(!verify_password_or_dummy_off_runtime("pw".into(), None).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_more_runs_at_once_than_there_are_permits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUNNING: AtomicUsize = AtomicUsize::new(0);
+        static PEAK: AtomicUsize = AtomicUsize::new(0);
+        let permits = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let tasks: Vec<_> = (0..permits * 4)
+            .map(|_| {
+                tokio::spawn(on_blocking_pool(|| {
+                    let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+                    PEAK.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    RUNNING.fetch_sub(1, Ordering::SeqCst);
+                }))
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let peak = PEAK.load(Ordering::SeqCst);
+        assert!(
+            (1..=permits).contains(&peak),
+            "peak {peak}, permits {permits}"
+        );
     }
 
     /// A hash written by argon2 0.5.3 (`Argon2::default()`, fixed salt).
