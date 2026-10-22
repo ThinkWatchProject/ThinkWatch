@@ -2944,7 +2944,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2983,7 +2983,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4838,7 +4838,7 @@ dependencies = [
 [[package]]
 name = "tw-bedrock"
 version = "0.80.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=366833934f58c490fa5eceb8e7b6d3a3d979c719#366833934f58c490fa5eceb8e7b6d3a3d979c719"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4853,7 +4853,7 @@ dependencies = [
 [[package]]
 name = "tw-breaker"
 version = "0.80.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=366833934f58c490fa5eceb8e7b6d3a3d979c719#366833934f58c490fa5eceb8e7b6d3a3d979c719"
 dependencies = [
  "serde",
 ]
@@ -4861,7 +4861,7 @@ dependencies = [
 [[package]]
 name = "tw-dialect"
 version = "0.80.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=366833934f58c490fa5eceb8e7b6d3a3d979c719#366833934f58c490fa5eceb8e7b6d3a3d979c719"
 dependencies = [
  "memchr",
  "serde",
@@ -4871,7 +4871,7 @@ dependencies = [
 [[package]]
 name = "tw-guard"
 version = "0.80.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?rev=366833934f58c490fa5eceb8e7b6d3a3d979c719#366833934f58c490fa5eceb8e7b6d3a3d979c719"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",

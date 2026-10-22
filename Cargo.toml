@@ -71,15 +71,15 @@ opt-level = 3
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
 #
-# TEMPORARY: on the core branch `fix/encrypted-history-pin` (core PR #368,
-# `tw_dialect::sealed`) until core tags it — replace with the next core tag
-# before this merges. Set on the dependencies themselves rather than in a
-# `[patch]` table: core's CI appends its own `[patch]` table for this URL to
-# check this branch, and a second one would not parse.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
+# TEMPORARY: on core main at the merge of core PR #368 (`tw_dialect::sealed`)
+# until core tags it — replace with the next core tag before this merges.
+# Set on the dependencies themselves rather than in a `[patch]` table: core's
+# CI appends its own `[patch]` table for this URL, and a second one would not
+# parse.
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "366833934f58c490fa5eceb8e7b6d3a3d979c719" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "366833934f58c490fa5eceb8e7b6d3a3d979c719" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "366833934f58c490fa5eceb8e7b6d3a3d979c719" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "366833934f58c490fa5eceb8e7b6d3a3d979c719" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
