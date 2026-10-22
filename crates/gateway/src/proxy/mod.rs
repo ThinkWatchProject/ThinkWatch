@@ -32,6 +32,7 @@ mod pipeline;
 mod protocol_relearn;
 mod responses_ws;
 mod routing;
+pub(crate) mod sealed;
 pub mod shaper;
 pub mod transport;
 

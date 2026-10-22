@@ -46,13 +46,16 @@ use tw_dialect::ir::{Dialect, Target};
 
 use super::body_capture::prepare_body_capture;
 use super::early_cancel::EarlyCancelSlot;
-use super::headers::{request_id_header, resolve_session_id, resolve_trace_id};
+use super::headers::{
+    request_id_header, resolve_conversation_id, resolve_session_id, resolve_trace_id,
+};
 use super::log_ctx::{LogCtx, emit_gateway_error_log, emit_gateway_log};
 use super::pipeline::{launch_stream_pump, run_buffered_post_invoke, run_preflight_stages};
 use super::routing::{
     build_selection_ctx, finalize_health, select_route_for_stream, select_route_with_failover,
     set_affinity,
 };
+use super::sealed::Conversation;
 use super::shaper::{StreamShaper, rewrite_model};
 use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
 
@@ -529,6 +532,8 @@ pub(crate) async fn send(
     let first = outbound
         .address(entry.protocol, model, official)?
         .for_upstream(upstream, model);
+    // The format of the last request sent, to read its refusal in.
+    let mut wire_dialect = first.dialect;
     let mut last = match first.send_to(upstream, call_ctx).await {
         Ok(resp) => return Ok((resp, first)),
         Err(e) => e,
@@ -562,6 +567,7 @@ pub(crate) async fn send(
             let wire = outbound
                 .address(*protocol, model, official)?
                 .for_upstream(upstream, model);
+            wire_dialect = wire.dialect;
             match wire.send_to(upstream, call_ctx).await {
                 Ok(resp) => {
                     super::protocol_relearn::persist(db, entry.route_id, *protocol).await;
@@ -577,7 +583,13 @@ pub(crate) async fn send(
             }
         }
     }
-    Err(last)
+    // A refusal of the conversation's encrypted history, said plainly.
+    Err(super::sealed::explain_refusal(
+        wire_dialect,
+        &entry.provider_name,
+        &upstream.label,
+        last,
+    ))
 }
 
 /// Read a whole answer and put it in the caller's format.
@@ -969,6 +981,40 @@ async fn run(
             )
         }
     };
+    // A conversation's encrypted history goes back to the provider that
+    // can read it (see `super::sealed`). Only Responses seals history, and
+    // only a request that names its conversation belongs to one.
+    let conversation = (surface.dialect == Dialect::Responses)
+        .then(|| {
+            Conversation::of(
+                identity.user_id.as_deref(),
+                resolve_conversation_id(&headers).as_deref(),
+            )
+        })
+        .flatten();
+    let pin = match (&conversation, tw_dialect::sealed::sealed(&outbound_body)) {
+        (Some(c), Some(sealed)) => {
+            let holder = c.holder(&state.redis).await;
+            let pin = super::sealed::decide(
+                Some(sealed),
+                holder.as_ref(),
+                routes.iter().map(|r| r.provider_id),
+                &mapped_model,
+            )
+            .map_err(|e| ctx.emit(e))?;
+            if let (Some(pin), Some(h)) = (pin, &holder) {
+                tracing::info!(
+                    request_id = %metadata.request_id,
+                    provider = %h.provider_name,
+                    ?sealed,
+                    ?pin,
+                    "Routing to the provider holding the conversation's encrypted history"
+                );
+            }
+            pin
+        }
+        _ => None,
+    };
     let outbound = Outbound {
         surface,
         path: path.to_string(),
@@ -992,12 +1038,15 @@ async fn run(
             cache_fingerprint: cache_fingerprint.clone(),
             request_started_at,
             input_estimate,
+            conversation: conversation.clone(),
         },
         preflight: crate::lifecycle::ChatPreflightLists {
             limits: preflight.limits.clone(),
         },
         route: crate::lifecycle::ChatPickedRoute {
+            provider_id: route.provider_id,
             provider_name: route.provider_name.clone(),
+            pinned: pin.is_some_and(|p| p.provider_id() == route.provider_id),
             upstream_model: route.upstream_model.clone(),
             sel_record,
             caps: crate::route_caps::RouteCaps::of(route),
@@ -1008,7 +1057,8 @@ async fn run(
     if outbound.stream {
         // One pick, no retry once bytes have gone to the client. A dialect
         // rejection still gets its retry: it arrives before any body.
-        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        let sel_ctx =
+            build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref(), pin).await;
         let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
             .await
             .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
@@ -1051,7 +1101,8 @@ async fn run(
     }
 
     // Buffered: full failover across healthy candidates.
-    let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+    let sel_ctx =
+        build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref(), pin).await;
     // Built before failover so the synchronous error closure can move it
     // in. Error paths capture the request only — nothing succeeded.
     let error_capture = prepare_body_capture(

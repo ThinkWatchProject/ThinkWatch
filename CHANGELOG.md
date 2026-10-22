@@ -11,6 +11,40 @@ target.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A conversation whose history a provider encrypted goes back to that
+  provider.** OpenAI's Responses API with `store: false` (Codex always
+  sends it) hands the client encrypted state that comes back every turn:
+  reasoning, remote compactions, Codex's messages between agents,
+  encrypted tool output. Only the account that encrypted it can read it,
+  so a conversation that moved to another provider — after five idle
+  minutes, a tripped breaker or a failover — was refused on every turn
+  from then on with `invalid_encrypted_content`. The gateway now
+  remembers, for 30 days and whatever the affinity settings say, the
+  provider that last answered each conversation (the authenticated user
+  and the request's `x-session-id`, or else the session header the client
+  sends by itself, such as Codex's `session_id`; over HTTP and over the
+  WebSocket). The log row's `session_id` still comes from `x-session-id`
+  only. A
+  Responses request carrying encrypted content that cannot be left out
+  goes only to that provider: no strategy pick, no failover, and its open
+  breaker does not stop it. When that provider has no route for the model
+  any more, the request is refused up front with 409, naming the provider
+  and saying to start a new conversation. A request carrying only
+  encrypted reasoning goes to that provider first and still fails over.
+  Requests that name no conversation are routed as before. The request's log
+  row records `"pinned_by": "encrypted_history"` when the provider was
+  picked this way.
+- **A provider that cannot read a conversation's encrypted history says
+  so.** Its refusal, as a 4xx answer or as the error event of a stream
+  that opened with 200, now reaches the caller and the log as
+  `SealedHistoryRefused`: the provider cannot read this conversation's
+  encrypted history because another provider encrypted it; route the
+  conversation back to that provider or start a new conversation. The
+  upstream's own words follow. It no longer counts against the route's
+  breaker.
+
 ## [3.9.0] — 2026-10-20
 
 The Add to ThinkWatch Lite link from a rotated key now carries the key's

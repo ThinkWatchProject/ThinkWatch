@@ -357,3 +357,46 @@ async fn an_answer_rule_filters_each_turn_across_frames() {
     }
     socket.close(None).await.unwrap();
 }
+
+/// A turn on a socket opened with `x-session-id` belongs to that
+/// conversation like an HTTP request does: the provider that answered it
+/// is remembered for the encrypted history it may have handed back, and
+/// the next connection's turns go back to it (see `gateway_sealed_history`).
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_turn_remembers_which_provider_answered_its_conversation() {
+    use fred::interfaces::KeysInterface;
+
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::openai_chat_stream_ok("ws-sealed").await;
+    let (user_id, key) = seed(&app, &upstream.uri(), "ws-sealed").await;
+    let provider_id: Uuid =
+        sqlx::query_scalar("SELECT provider_id FROM model_routes WHERE model_id = $1")
+            .bind("ws-sealed")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+
+    let mut req = ws_url(&app).into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    req.headers_mut()
+        .insert("x-session-id", "ws-conv".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    socket.send(create("ws-sealed", "hi")).await.unwrap();
+    let events = turn(&mut socket).await;
+    assert_eq!(events.last().unwrap()["type"], "response.completed");
+    socket.close(None).await.unwrap();
+
+    let binding = format!("sealed_holder:{user_id}:ws-conv");
+    let mut held: Option<String> = None;
+    for _ in 0..50 {
+        held = app.state.redis.get(&binding).await.unwrap();
+        if held.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let held = held.expect("the answering provider is remembered");
+    assert!(held.starts_with(&provider_id.to_string()), "{held}");
+}
