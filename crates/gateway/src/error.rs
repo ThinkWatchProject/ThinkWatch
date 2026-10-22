@@ -69,6 +69,32 @@ pub enum GatewayError {
     /// pass it on. Maps to 403.
     #[error("Blocked by policy: {0}")]
     PolicyBlocked(String),
+    /// The upstream refused the conversation's encrypted history (OpenAI
+    /// Responses `encrypted_content`, see `tw_dialect::sealed`): another
+    /// provider's account encrypted it, and only that one can read it.
+    /// `status` is the upstream's (as an answer, or what its error in a
+    /// stream would have been), `said` its own words, truncated. Not the
+    /// upstream failing: no failover, nothing against its breaker.
+    #[error(
+        "Provider `{provider}` cannot read this conversation's encrypted history: another \
+         provider encrypted it, and only that one can read it. Route the conversation back to \
+         that provider, or start a new conversation. The provider said: {said}"
+    )]
+    SealedHistoryRefused {
+        status: u16,
+        provider: String,
+        said: String,
+    },
+    /// The conversation's history is encrypted by `provider`, which has no
+    /// route for the model any more, and no other provider can read it.
+    /// Refused before anything is sent. Maps to 409: the request is well
+    /// formed, but the conversation cannot go on here.
+    #[error(
+        "This conversation's history is encrypted by provider `{provider}`, which can no \
+         longer serve model `{model}`, and no other provider can read it. Start a new \
+         conversation."
+    )]
+    SealedHistoryUnavailable { provider: String, model: String },
 }
 
 impl GatewayError {
@@ -90,6 +116,8 @@ impl GatewayError {
             GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited { .. } => 429,
             GatewayError::UpstreamAuthError { .. } => 401,
             GatewayError::PolicyBlocked(_) => 403,
+            GatewayError::SealedHistoryRefused { status, .. } => i64::from(*status),
+            GatewayError::SealedHistoryUnavailable { .. } => 409,
         }
     }
 
@@ -108,6 +136,8 @@ impl GatewayError {
             GatewayError::LocalRateLimited { .. } => "LocalRateLimited",
             GatewayError::UpstreamAuthError { .. } => "UpstreamAuthError",
             GatewayError::PolicyBlocked(_) => "PolicyBlocked",
+            GatewayError::SealedHistoryRefused { .. } => "SealedHistoryRefused",
+            GatewayError::SealedHistoryUnavailable { .. } => "SealedHistoryUnavailable",
         }
     }
 

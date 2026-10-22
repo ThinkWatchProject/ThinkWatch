@@ -1,6 +1,8 @@
 //! Multi-route selection: strategy-driven weights + circuit-breaker
 //! filter + per-route capacity caps (`crate::route_caps`) + per-model
-//! session affinity (none / provider / route).
+//! session affinity (none / provider / route) — and, above all of them,
+//! the provider that holds a conversation's encrypted history
+//! (`super::sealed`).
 
 use rand::RngExt;
 use std::str::FromStr;
@@ -13,6 +15,8 @@ use crate::health::{CircuitBreakerConfig, RouteHealth};
 use crate::route_caps::{self, Admission, CappedRoutes, RouteCaps};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
+
+use super::sealed::Pin;
 
 /// What the affinity layer can pin a session to.
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +129,10 @@ pub(super) struct SelectionCtx<'a> {
     pub(super) breaker: CircuitBreakerConfig,
     /// `security.rate_limit_fail_closed`, for the route caps.
     pub(super) fail_closed: bool,
+    /// The provider holding the conversation's encrypted history, when
+    /// the request carries some (see `super::sealed::decide`). Overrides
+    /// the strategy and the affinity.
+    pub(super) pin: Option<Pin>,
     pub(super) state: &'a GatewayState,
 }
 
@@ -132,6 +140,7 @@ pub(super) async fn build_selection_ctx<'a>(
     state: &'a GatewayState,
     model_id: &'a str,
     user_id: Option<&'a str>,
+    pin: Option<Pin>,
 ) -> SelectionCtx<'a> {
     let (strategy, affinity_mode, affinity_ttl_secs) =
         resolve_routing_config(state, model_id).await;
@@ -147,6 +156,7 @@ pub(super) async fn build_selection_ctx<'a>(
         latency_k,
         breaker,
         fail_closed,
+        pin,
         state,
     }
 }
@@ -186,9 +196,10 @@ async fn pick_with_strategy<'a>(
     let mut excluded: Vec<bool> = Vec::with_capacity(group.len());
     for (i, entry) in group.iter().enumerate() {
         let h = &healths[i];
-        let excl = h.state == tw_breaker::State::Open
-            || tried.contains(&entry.provider_id)
-            || capped.contains(&entry.route_id);
+        // A provider that alone can read the history is asked even with
+        // its breaker open: there is nowhere else to go.
+        let broken = h.state == tw_breaker::State::Open && !matches!(ctx.pin, Some(Pin::Only(_)));
+        let excl = broken || tried.contains(&entry.provider_id) || capped.contains(&entry.route_id);
         excluded.push(excl);
         let success_rate = if h.total > 0 {
             Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
@@ -203,6 +214,7 @@ async fn pick_with_strategy<'a>(
     }
 
     let weights = strategy::compute_weights(ctx.strategy, &signals, ctx.latency_k);
+    pin_to_holder(group, &mut excluded, ctx.pin);
 
     // If affinity points to a still-eligible candidate, use it.
     if let Some(hit) = affinity {
@@ -247,6 +259,26 @@ async fn pick_with_strategy<'a>(
     };
 
     picked_idx.map(|i| group[i])
+}
+
+/// Narrow the candidates to the provider holding the conversation's
+/// encrypted history: always for [`Pin::Only`], for [`Pin::First`] while
+/// one of its routes is still eligible.
+fn pin_to_holder(group: &[&RouteEntry], excluded: &mut [bool], pin: Option<Pin>) {
+    let Some(pin) = pin else { return };
+    let holder = pin.provider_id();
+    let eligible = group
+        .iter()
+        .zip(excluded.iter())
+        .any(|(e, x)| !*x && e.provider_id == holder);
+    if matches!(pin, Pin::First(_)) && !eligible {
+        return;
+    }
+    for (e, x) in group.iter().zip(excluded.iter_mut()) {
+        if e.provider_id != holder {
+            *x = true;
+        }
+    }
 }
 
 /// What the proxy handler needs back from a selection in order to
@@ -300,7 +332,9 @@ pub(crate) async fn finalize_health(state: &GatewayState, sel: &SelectionRecord,
 /// gateway draws the same line.
 ///
 /// Refusals by the gateway itself (`TransformError`, `PolicyBlocked`,
-/// local limits) are not the upstream's doing either.
+/// local limits) are not the upstream's doing either. Nor is an upstream
+/// refusing a conversation's encrypted history (`SealedHistoryRefused`):
+/// the history belongs to another provider, not to a broken route.
 pub(crate) fn is_upstream_failure(err: &GatewayError) -> bool {
     fails(err.error_tag(), err.status_code())
 }
@@ -311,7 +345,11 @@ pub(crate) fn is_upstream_failure(err: &GatewayError) -> bool {
 pub(crate) fn fails(error_tag: &str, status: i64) -> bool {
     match error_tag {
         "ProviderHttpError" => status >= 500 || status == 408,
-        "TransformError" | "PolicyBlocked" | "LocalRateLimited" => false,
+        "TransformError"
+        | "PolicyBlocked"
+        | "LocalRateLimited"
+        | "SealedHistoryRefused"
+        | "SealedHistoryUnavailable" => false,
         _ => true,
     }
 }
@@ -462,7 +500,11 @@ pub(super) async fn select_route_with_failover<'a>(
                 // An upstream that answered with a refusal is working:
                 // it counts as a success for the route, as it does on
                 // the desktop.
-                if matches!(e, GatewayError::ProviderHttpError { .. }) {
+                if matches!(
+                    e,
+                    GatewayError::ProviderHttpError { .. }
+                        | GatewayError::SealedHistoryRefused { .. }
+                ) {
                     let _ = ctx
                         .state
                         .health
@@ -512,4 +554,66 @@ pub(super) async fn select_route_for_stream<'a>(
     Err(capped.refusal().unwrap_or_else(|| {
         GatewayError::ProviderError(format!("No provider found for model: {}", ctx.model_id))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn entry(provider_id: Uuid) -> RouteEntry {
+        RouteEntry {
+            upstream: Arc::new(crate::proxy::transport::Upstream::new(
+                "https://example.invalid",
+                Vec::new(),
+                crate::proxy::transport::Shape::Standard,
+                "p",
+            )),
+            provider_id,
+            route_id: Uuid::new_v4(),
+            provider_name: "p".into(),
+            upstream_model: None,
+            weight: 100,
+            label: None,
+            rpm_cap: None,
+            tpm_cap: None,
+            protocol: crate::protocol::UpstreamProtocol::OpenAiResponses,
+            alternates: Vec::new(),
+        }
+    }
+
+    /// Which of `a`, `b`, `a` (a second route of the holder) are left.
+    fn left(pin: Option<Pin>, a: Uuid, excluded: [bool; 3]) -> [bool; 3] {
+        let routes = [entry(a), entry(Uuid::new_v4()), entry(a)];
+        let group: Vec<&RouteEntry> = routes.iter().collect();
+        let mut excluded = excluded;
+        pin_to_holder(&group, &mut excluded, pin);
+        excluded.map(|x| !x)
+    }
+
+    #[test]
+    fn a_pin_narrows_the_candidates_to_the_holders_routes() {
+        let a = Uuid::new_v4();
+        let none = [false; 3];
+        assert_eq!(left(None, a, none), [true, true, true]);
+        assert_eq!(left(Some(Pin::Only(a)), a, none), [true, false, true]);
+        assert_eq!(left(Some(Pin::First(a)), a, none), [true, false, true]);
+    }
+
+    #[test]
+    fn only_sealed_reasoning_falls_over_once_the_holder_is_out() {
+        let a = Uuid::new_v4();
+        // The holder tried (or capped, or broken): reasoning moves on…
+        let out = [true, false, true];
+        assert_eq!(left(Some(Pin::First(a)), a, out), [false, true, false]);
+        // …anything else sealed has nowhere to go.
+        assert_eq!(left(Some(Pin::Only(a)), a, out), [false, false, false]);
+    }
+
+    #[test]
+    fn sealed_refusals_and_refusing_up_front_do_not_count_against_the_route() {
+        assert!(!fails("SealedHistoryRefused", 400));
+        assert!(!fails("SealedHistoryUnavailable", 409));
+        assert!(fails("ProviderHttpError", 500));
+    }
 }

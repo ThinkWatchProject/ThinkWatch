@@ -70,10 +70,16 @@ opt-level = 3
 # never re-exported through a local shim. And the reverse: something only
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.77.0" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.77.0" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.77.0" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.77.0" }
+#
+# TEMPORARY: on the core branch `fix/encrypted-history-pin` (core PR #368,
+# `tw_dialect::sealed`) until core tags it — replace with the next core tag
+# before this merges. Set on the dependencies themselves rather than in a
+# `[patch]` table: core's CI appends its own `[patch]` table for this URL to
+# check this branch, and a second one would not parse.
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "fix/encrypted-history-pin" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }

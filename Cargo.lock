@@ -2554,7 +2554,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -2944,7 +2944,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2983,7 +2983,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4837,8 +4837,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.77.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.77.0#00c9a892675c75c97e29609d762e63accb37fa34"
+version = "0.80.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4852,16 +4852,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.77.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.77.0#00c9a892675c75c97e29609d762e63accb37fa34"
+version = "0.80.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.77.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.77.0#00c9a892675c75c97e29609d762e63accb37fa34"
+version = "0.80.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
 dependencies = [
  "memchr",
  "serde",
@@ -4870,8 +4870,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.77.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.77.0#00c9a892675c75c97e29609d762e63accb37fa34"
+version = "0.80.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=fix%2Fencrypted-history-pin#b5fda83a1f0301e615a09249b4589fe22956a524"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
