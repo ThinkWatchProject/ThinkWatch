@@ -114,6 +114,10 @@ pub(crate) struct ChatRequestSnapshot {
     /// The request's input in tokens, estimated — billed only when the
     /// upstream reports no usage.
     pub input_estimate: u64,
+    /// The conversation a Responses request with a session id belongs to.
+    /// The provider that answers it is remembered for it (see
+    /// `proxy::sealed`).
+    pub conversation: Option<crate::proxy::sealed::Conversation>,
 }
 
 /// Pre-flight rule + cap lists, reused by the post-flight debit.
@@ -123,7 +127,12 @@ pub(crate) struct ChatPreflightLists {
 
 /// The route that actually served the request.
 pub(crate) struct ChatPickedRoute {
+    pub provider_id: uuid::Uuid,
     pub provider_name: String,
+    /// Picked because it holds the conversation's encrypted history, not by
+    /// the strategy or the affinity (see `proxy::sealed`). Said on the log
+    /// row as `"pinned_by": "encrypted_history"`.
+    pub pinned: bool,
     /// Upstream-side model id when the route remapped it.
     pub upstream_model: Option<String>,
     /// Used by `finalize_health` inside `record_outcome`.
@@ -286,8 +295,31 @@ pub(crate) fn build_chat_pump(
             };
             match item {
                 Ok(chunk) => {
-                    if let Ok(mut r) = readers.lock() {
-                        r.feed(&chunk);
+                    let sealed = match readers.lock() {
+                        Ok(mut r) => {
+                            r.feed(&chunk);
+                            r.sealed_refusal()
+                        }
+                        Err(_) => None,
+                    };
+                    // The upstream cannot read the conversation's encrypted
+                    // history: the client is told why in plain words, in
+                    // place of the upstream's own error.
+                    if let Some(said) = sealed {
+                        let err = sealed_refused(&provider, &said);
+                        tracing::warn!(
+                            provider = %provider,
+                            message = %said.message,
+                            "upstream refused the conversation's encrypted history"
+                        );
+                        let out = cut(&shaper, convert.as_mut(), client, &[], &err);
+                        tell(&mut done_tx, StreamOutcome::UpstreamError {
+                            error_type: err.error_tag().to_string(),
+                            message: err.to_string(),
+                            status_code: err.status_code(),
+                        });
+                        yield Ok(Bytes::from(out));
+                        return;
                     }
                     let client_bytes = match convert.as_mut() {
                         Some(c) => c.process(&chunk),
@@ -528,6 +560,12 @@ impl Readers {
         }
     }
 
+    /// The upstream's refusal of the conversation's encrypted history, once
+    /// its stream has said it. Left in place for the tail.
+    fn sealed_refusal(&self) -> Option<Said> {
+        self.said.as_ref().filter(|s| s.sealed).cloned()
+    }
+
     /// The error the upstream reported in its stream, if it did — read to
     /// the end, for an upstream whose last frame has no blank line after
     /// it.
@@ -575,13 +613,16 @@ impl ErrorWatch {
 }
 
 /// An error the upstream reported in its stream.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Said {
     /// In its words, or [`NO_MESSAGE`] when the error carried none.
     message: String,
     /// The status the same error has as an answer, when the error names
     /// one (see [`status_of`]).
     status: Option<u16>,
+    /// The error refuses the conversation's encrypted history: another
+    /// provider sealed it (see `proxy::sealed`).
+    sealed: bool,
 }
 
 /// The message of an error the upstream reported without one.
@@ -638,6 +679,7 @@ fn said_in(upstream: Dialect, f: &tw_dialect::frame::Frame) -> Option<Said> {
     Some(Said {
         message: message.to_string(),
         status: error.and_then(status_of),
+        sealed: crate::proxy::sealed::refused(upstream, &f.data),
     })
 }
 
@@ -708,6 +750,14 @@ fn failed_partway(provider: &str, said: &Said) -> StreamOutcome {
         "upstream reported an error partway through a stream"
     );
     let words: String = said.message.chars().take(500).collect();
+    if said.sealed {
+        let e = sealed_refused(provider, said);
+        return StreamOutcome::UpstreamError {
+            error_type: e.error_tag().to_string(),
+            message: e.to_string(),
+            status_code: e.status_code(),
+        };
+    }
     let what = format!("{provider} reported an error partway through the answer: {words}");
     let e = match said.status {
         Some(status) => crate::proxy::transport::status_error(status, None, what.clone()),
@@ -724,6 +774,17 @@ fn failed_partway(provider: &str, said: &Said) -> StreamOutcome {
         error_type: e.error_tag().to_string(),
         message,
         status_code: e.status_code(),
+    }
+}
+
+/// The upstream refused the conversation's encrypted history in its
+/// stream: the error said plainly, with its words (500 characters at most).
+/// A refusal that names no status is a bad request's.
+fn sealed_refused(provider: &str, said: &Said) -> GatewayError {
+    GatewayError::SealedHistoryRefused {
+        status: said.status.unwrap_or(400),
+        provider: provider.to_string(),
+        said: said.message.chars().take(500).collect(),
     }
 }
 
@@ -759,6 +820,7 @@ fn bedrock_ended(
             let said = Said {
                 message: format!("{kind}: {message}"),
                 status: Some(bedrock_status(&kind)),
+                sealed: false,
             };
             (told, failed_partway(provider, &said))
         }
@@ -957,6 +1019,25 @@ impl Surface for ChatCompletionSurface {
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
         };
         finalize_health(&deps.state, &deps.route.sel_record, success).await;
+
+        // The provider that answered holds whatever it sealed in the answer
+        // (see `proxy::sealed`). Only a whole answer: one cut short never
+        // reached the client to be sent back.
+        let answered = matches!(
+            &invoked.view,
+            CapturedView::Streaming {
+                outcome: StreamOutcome::Natural,
+                ..
+            } | CapturedView::Buffered(ChatCompletionOutcome::Success(_))
+        );
+        if answered && let Some(c) = &deps.request.conversation {
+            c.answered_by(
+                &deps.state.redis,
+                deps.route.provider_id,
+                &deps.route.provider_name,
+            )
+            .await;
+        }
     }
 
     async fn write_cache(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
@@ -1074,7 +1155,11 @@ impl Surface for ChatCompletionSurface {
             cost,
             deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
-            with_usage_detail(error_detail, &usage, usage_estimated(&invoked.view)),
+            with_usage_detail(
+                pinned_detail(error_detail, deps.route.pinned),
+                &usage,
+                usage_estimated(&invoked.view),
+            ),
             body_capture,
         );
     }
@@ -1108,6 +1193,20 @@ fn with_usage_detail(
         extra.extend(d);
     }
     Some(serde_json::Value::Object(extra))
+}
+
+/// The audit detail, with `"pinned_by": "encrypted_history"` when the
+/// route was picked because it holds the conversation's encrypted history.
+fn pinned_detail(detail: Option<serde_json::Value>, pinned: bool) -> Option<serde_json::Value> {
+    if !pinned {
+        return detail;
+    }
+    let mut d = match detail {
+        Some(serde_json::Value::Object(d)) => d,
+        _ => serde_json::Map::new(),
+    };
+    d.insert("pinned_by".into(), "encrypted_history".into());
+    Some(serde_json::Value::Object(d))
 }
 
 /// The usage a captured view bills — shared by `record_usage` and
@@ -1219,6 +1318,65 @@ mod tests {
             "response": {"id": "resp_1", "status": "failed", "error": error},
         });
         format!("event: response.failed\ndata: {v}\n\n")
+    }
+
+    /// A refusal of the conversation's encrypted history in the stream —
+    /// as `response.failed` or as the Codex backend's bare `error` event —
+    /// is said plainly, keeps the upstream's words, and is a refusal, not
+    /// the route failing.
+    #[test]
+    fn a_refusal_of_encrypted_history_in_a_stream_is_said_plainly() {
+        let failed = responses_failed(serde_json::json!({
+            "code": "invalid_encrypted_content",
+            "message": "The encrypted content for item rs_68 could not be verified.",
+        }));
+        let bare = "event: error\ndata: {\"type\":\"error\",\"message\":\"Encrypted function output content could not be decrypted or decoded.\"}\n\n";
+        for frames in [failed.as_str(), bare] {
+            let mut r = Readers {
+                errors: Some(ErrorWatch::new(Dialect::Responses)),
+                ..Default::default()
+            };
+            r.feed(frames.as_bytes());
+            assert!(r.sealed_refusal().is_some(), "{frames}");
+            let (error_type, status, message, counted) =
+                recorded(Dialect::Responses, frames).unwrap();
+            assert_eq!(
+                (error_type.as_str(), status),
+                ("SealedHistoryRefused", 400),
+                "{frames}"
+            );
+            assert!(!counted);
+            assert!(
+                message
+                    .starts_with("Provider `up` cannot read this conversation's encrypted history"),
+                "{message}"
+            );
+            assert!(message.contains("could not be"), "{message}");
+        }
+
+        // Another error is not one.
+        let other = responses_failed(serde_json::json!({
+            "code": "invalid_prompt", "message": "Invalid prompt",
+        }));
+        let mut r = Readers {
+            errors: Some(ErrorWatch::new(Dialect::Responses)),
+            ..Default::default()
+        };
+        r.feed(other.as_bytes());
+        assert!(r.sealed_refusal().is_none());
+    }
+
+    #[test]
+    fn a_pinned_route_is_said_on_the_log_row() {
+        assert_eq!(pinned_detail(None, false), None);
+        assert_eq!(
+            pinned_detail(None, true),
+            Some(serde_json::json!({"pinned_by": "encrypted_history"}))
+        );
+        assert_eq!(
+            pinned_detail(Some(serde_json::json!({"error_type": "x"})), true),
+            Some(serde_json::json!({"error_type": "x", "pinned_by": "encrypted_history"}))
+        );
     }
 
     /// Throttling stays a 429, and counts against the route like a 429
@@ -1338,6 +1496,7 @@ mod tests {
         let said = Said {
             message: "x".repeat(2_000),
             status: None,
+            sealed: false,
         };
         let StreamOutcome::UpstreamError { message, .. } = failed_partway("anthropic-main", &said)
         else {
@@ -1356,6 +1515,7 @@ mod tests {
         let said = Said {
             message: "arn:aws:iam::123456789012:user/gateway may not".into(),
             status: Some(403),
+            sealed: false,
         };
         let StreamOutcome::UpstreamError {
             error_type,

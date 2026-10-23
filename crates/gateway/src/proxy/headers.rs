@@ -24,8 +24,38 @@ pub(super) fn resolve_trace_id(headers: &HeaderMap) -> String {
 /// store NULL so the ClickHouse `idx_session` bloom filter stays
 /// selective for rows that do carry an id.
 pub(super) fn resolve_session_id(headers: &HeaderMap) -> Option<String> {
+    header_id(headers, "x-session-id")
+}
+
+/// The headers coding agents name their conversation in by themselves:
+/// Codex's `session_id` (and its older `conversation_id`), Claude Code's,
+/// OpenCode's. The same list the desktop gateway reads.
+const CLIENT_SESSION_HEADERS: &[&str] = &[
+    "session_id",
+    "session-id",
+    "conversation_id",
+    "x-claude-code-session-id",
+    "x-session-affinity",
+    "x-opencode-session",
+];
+
+/// The conversation a request belongs to, for remembering which provider
+/// holds its encrypted history (`super::sealed`): `x-session-id` when the
+/// caller sent one, else the id the client names its conversation with on
+/// its own — Codex sends `session_id` and no `x-session-id`. Validated as
+/// `x-session-id` is. Only for routing; the log row keeps
+/// [`resolve_session_id`].
+pub(super) fn resolve_conversation_id(headers: &HeaderMap) -> Option<String> {
+    resolve_session_id(headers).or_else(|| {
+        CLIENT_SESSION_HEADERS
+            .iter()
+            .find_map(|name| header_id(headers, name))
+    })
+}
+
+fn header_id(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
-        .get("x-session-id")
+        .get(name)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
@@ -82,6 +112,21 @@ mod tests {
         h.insert("x-trace-id", "   ".parse().unwrap());
         let id = resolve_trace_id(&h);
         assert_eq!(id.len(), 36, "blank header should fall back to UUID");
+    }
+
+    #[test]
+    fn a_conversation_is_named_by_x_session_id_or_by_the_client_itself() {
+        let mut h = HeaderMap::new();
+        assert_eq!(resolve_conversation_id(&h), None);
+        h.insert("session_id", "codex-1".parse().unwrap());
+        assert_eq!(resolve_conversation_id(&h).as_deref(), Some("codex-1"));
+        // Not a session id for the log row.
+        assert_eq!(resolve_session_id(&h), None);
+        h.insert("x-session-id", "mine".parse().unwrap());
+        assert_eq!(resolve_conversation_id(&h).as_deref(), Some("mine"));
+        let mut blank = HeaderMap::new();
+        blank.insert("session_id", "  ".parse().unwrap());
+        assert_eq!(resolve_conversation_id(&blank), None);
     }
 
     /// 128-char boundary: exactly 128 should pass, 129 should reject.
