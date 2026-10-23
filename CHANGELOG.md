@@ -11,6 +11,16 @@ target.
 
 ## [Unreleased]
 
+## [3.9.1] — 2026-10-23
+
+A conversation whose history a provider encrypted, such as a Codex
+conversation over OpenAI's Responses API, now stays with that provider
+instead of failing on every turn once it moves, and a provider that
+cannot read such history says why. The thinkwatch-core crates move from
+v0.77.0 to v0.81.0.
+
+No setting, schema or API route changes.
+
 ### Fixed
 
 - **A conversation whose history a provider encrypted goes back to that
