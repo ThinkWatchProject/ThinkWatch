@@ -15,6 +15,7 @@
 use super::identity::limits_for_ai_gateway;
 use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
 
+use super::routing::Resend;
 use super::shaper::StreamShaper;
 use crate::lifecycle::{
     ChatCompletionOutcome, ChatCompletionSurface, ChatPostInvokeDeps, Completed, OpenUpstream,
@@ -112,14 +113,16 @@ fn short_circuit_to_response(outcome: ChatCompletionOutcome) -> GatewayErrorResp
 /// awaits the tail future, then drives `run_post_invoke` through
 /// record_outcome → write_cache → record_usage → emit_audit.
 pub(super) fn launch_stream_pump(
-    deps: ChatPostInvokeDeps,
+    mut deps: ChatPostInvokeDeps,
     open: OpenUpstream,
+    resend: Resend,
     shaper: StreamShaper,
     client: Dialect,
     client_sse: bool,
 ) -> axum::response::Response {
     let (response, tail) = build_chat_pump(
         open,
+        resend,
         shaper,
         client,
         client_sse,
@@ -129,7 +132,17 @@ pub(super) fn launch_stream_pump(
         &deps.route.provider_name,
     );
     tokio::spawn(async move {
-        let invoked = tail.await;
+        let (invoked, sent) = tail.await;
+        // A stream that went out again: the route's time is the attempt
+        // that ended it, and the row says how many retries there were.
+        if sent.retries > 0 {
+            deps.route.sel_record.started_at = sent.last_sent;
+            deps.route.sel_record.retries = sent.retries;
+        }
+        // The client left while the stream waited to go out again: the
+        // attempt that failed was counted against the route when the retry
+        // was decided, and nothing went out since.
+        deps.route.sel_record.counted = sent.waiting;
         run_post_invoke::<ChatCompletionSurface>(invoked, &deps).await;
     });
     response

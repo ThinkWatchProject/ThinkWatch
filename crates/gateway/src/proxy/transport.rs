@@ -209,8 +209,14 @@ impl Upstream {
 /// A request that never got an answer: the upstream timed out, or the
 /// connection could not be made or broke. Either way it says nothing
 /// about the request, and another route may well answer it.
+///
+/// A request that could not even be built — a provider whose base URL is
+/// no URL — is the route's configuration, not a failure of the moment:
+/// sending it again would fail the same way (see `retry::transient`).
 pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
-    if e.is_timeout() {
+    if e.is_builder() {
+        GatewayError::ProviderError(format!("The upstream request could not be built: {e}"))
+    } else if e.is_timeout() {
         GatewayError::ProviderTimeout(e.to_string())
     } else {
         GatewayError::NetworkError(e.to_string())
@@ -229,17 +235,39 @@ pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
 /// Every other status is kept as it is, in `ProviderHttpError`. Whether
 /// it is the upstream failing (5xx, 408) or the upstream refusing this
 /// request (any other 4xx) decides failover and the circuit breaker —
-/// see `routing::is_upstream_failure`.
+/// see `routing::is_upstream_failure` — and whether it is worth sending
+/// again after a wait, `proxy::retry`. The error keeps how long the
+/// upstream said to wait.
 pub(crate) fn status_error(
     status: u16,
-    retry_after_secs: Option<u32>,
+    retry_after: Option<Duration>,
     message: String,
 ) -> GatewayError {
     match status {
-        429 => GatewayError::UpstreamRateLimited { retry_after_secs },
+        429 => GatewayError::UpstreamRateLimited {
+            retry_after_secs: retry_after.map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX)),
+        },
         401 | 403 => GatewayError::UpstreamAuthError { status, message },
-        _ => GatewayError::ProviderHttpError { status, message },
+        _ => GatewayError::ProviderHttpError {
+            status,
+            message,
+            retry_after,
+        },
     }
+}
+
+/// When an answer says to try again: OpenAI's `retry-after-ms`, or
+/// `Retry-After` in seconds (see [`crate::error::parse_retry_after_seconds`]).
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    header("retry-after-ms")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .or_else(|| {
+            header(reqwest::header::RETRY_AFTER.as_str())
+                .and_then(crate::error::parse_retry_after_seconds)
+                .map(|s| Duration::from_secs(u64::from(s)))
+        })
 }
 
 /// Turn a non-2xx upstream answer into the error the caller sees (see
@@ -256,14 +284,16 @@ async fn check_status(
 ) -> Result<reqwest::Response, GatewayError> {
     let status = resp.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        // Echoed to the caller in whole seconds, as the upstream wrote it.
         let retry_after_secs = resp
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(crate::error::parse_retry_after_seconds);
-        return Err(status_error(429, retry_after_secs, String::new()));
+        return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
     }
     if !status.is_success() {
+        let retry_after = retry_after(resp.headers());
         let body = resp.text().await.unwrap_or_default();
         tracing::warn!(provider = label, status = %status, body = %body, "upstream returned non-2xx");
         const CLIENT_MAX: usize = 512;
@@ -279,7 +309,7 @@ async fn check_status(
         };
         return Err(status_error(
             status.as_u16(),
-            None,
+            retry_after,
             format!("{label}: {shown}"),
         ));
     }
@@ -391,6 +421,51 @@ mod tests {
             .body(body.to_string())
             .unwrap()
             .into()
+    }
+
+    /// A base URL that is no URL fails every time: not worth sending
+    /// again, unlike a connection that could not be made.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_is_not_a_failure_of_the_moment() {
+        let built = client().post("http://exa mple.invalid/v1").send().await;
+        let e = transport_error(built.unwrap_err());
+        assert!(matches!(e, GatewayError::ProviderError(_)), "{e:?}");
+        assert!(!crate::proxy::retry::is_transient(&e));
+
+        let refused = client().post("http://127.0.0.1:1/v1").send().await;
+        let e = transport_error(refused.unwrap_err());
+        assert!(matches!(e, GatewayError::NetworkError(_)), "{e:?}");
+        assert!(crate::proxy::retry::is_transient(&e));
+    }
+
+    #[tokio::test]
+    async fn an_overloaded_answer_keeps_how_long_to_wait() {
+        let with = |headers: &[(&str, &str)]| {
+            let mut b = http_1x::Response::builder().status(503);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            reqwest::Response::from(b.body("busy".to_string()).unwrap())
+        };
+        let wait = |e: GatewayError| match e {
+            GatewayError::ProviderHttpError { retry_after, .. } => retry_after,
+            e => panic!("{e:?}"),
+        };
+        let e = check_status(
+            with(&[("retry-after-ms", "250"), ("retry-after", "3")]),
+            "p",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(wait(e), Some(Duration::from_millis(250)));
+        let e = check_status(with(&[("retry-after", "3")]), "p")
+            .await
+            .unwrap_err();
+        assert_eq!(wait(e), Some(Duration::from_secs(3)));
+        let e = check_status(with(&[("retry-after", "soon")]), "p")
+            .await
+            .unwrap_err();
+        assert_eq!(wait(e), None);
     }
 
     #[tokio::test]

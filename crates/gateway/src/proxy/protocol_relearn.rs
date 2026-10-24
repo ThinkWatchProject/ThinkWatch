@@ -27,7 +27,10 @@ use crate::protocol::UpstreamProtocol;
 /// once. Only 4xx bodies that name an API surface qualify — the shape
 /// upstreams actually use to report this.
 pub(super) fn is_protocol_mismatch(err: &GatewayError) -> bool {
-    let GatewayError::ProviderHttpError { status, message } = err else {
+    let GatewayError::ProviderHttpError {
+        status, message, ..
+    } = err
+    else {
         return false;
     };
     // A 5xx is an upstream incident, not a dialect problem, and retrying
@@ -104,10 +107,12 @@ mod tests {
             message: "The model 'anthropic.claude-opus-4' does not support the \
                       '/v1/chat/completions' API"
                 .into(),
+            retry_after: None,
         }));
         assert!(is_protocol_mismatch(&GatewayError::ProviderHttpError {
             status: 404,
             message: "unsupported endpoint /v1/responses for this model".into(),
+            retry_after: None,
         }));
     }
 
@@ -119,11 +124,13 @@ mod tests {
         assert!(!is_protocol_mismatch(&GatewayError::ProviderHttpError {
             status: 400,
             message: "messages: at least one message is required".into(),
+            retry_after: None,
         }));
         // Upstream incident, not a dialect problem.
         assert!(!is_protocol_mismatch(&GatewayError::ProviderHttpError {
             status: 503,
             message: "/v1/chat/completions is not available right now".into(),
+            retry_after: None,
         }));
         assert!(!is_protocol_mismatch(&GatewayError::UpstreamAuthError {
             status: 401,

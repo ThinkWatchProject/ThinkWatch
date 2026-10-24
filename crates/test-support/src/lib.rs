@@ -237,6 +237,12 @@ impl TestApp {
         config.validate().map_err(anyhow::Error::msg)?;
 
         let mut state = init::init_state(config.clone(), db.clone(), redis, ch_client).await?;
+        // An upstream that fails in a test is not sent to again: waiting
+        // out two minutes of retries on every failing upstream would only
+        // slow the suite. Tests of the retries turn them on with
+        // `set_setting("gateway.retry_wait_secs", …)`.
+        fixtures::set_setting(&db, "gateway.retry_wait_secs", serde_json::json!(0)).await?;
+        state.dynamic_config.reload().await?;
         if let Some(v) = opts.url_validator {
             // Every outbound fetch goes through it — webhook and Kafka
             // deliveries included, not only the admin handlers.

@@ -1816,6 +1816,8 @@
     "defaultAffinityTtlHint": "How long an affinity assignment lasts. 0 disables affinity entirely.",
     "latencyStrategyK": "Latency aggressiveness (k)",
     "latencyStrategyKHint": "Exponent in 1/latency^k. Higher = more aggressive bias toward fast routes. Default 2.0 (aggressive). Range 0.5–8.0.",
+    "retryWaitSecs": "Retry window (seconds)",
+    "retryWaitSecsHint": "When every route failed for the moment (overloaded, a server error, a broken connection) before any of the answer reached the client, the request is sent again after a short wait, for up to this long after it arrived. 0 disables retries. Range 0–600.",
     "strategy": {
       "weighted": "Weighted random",
       "latency": "Latency-first",

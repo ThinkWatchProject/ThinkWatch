@@ -51,9 +51,10 @@ use super::headers::{
 };
 use super::log_ctx::{LogCtx, emit_gateway_error_log, emit_gateway_log};
 use super::pipeline::{launch_stream_pump, run_buffered_post_invoke, run_preflight_stages};
+use super::retry::Budget;
 use super::routing::{
-    build_selection_ctx, finalize_health, select_route_for_stream, select_route_with_failover,
-    set_affinity,
+    Resend, build_selection_ctx, finalize_health, select_route_for_stream,
+    select_route_with_failover, set_affinity,
 };
 use super::sealed::Conversation;
 use super::shaper::{StreamShaper, rewrite_model};
@@ -113,6 +114,7 @@ pub async fn proxy_chat_completion(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -120,6 +122,7 @@ pub async fn proxy_chat_completion(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         CHAT,
         "/v1/chat/completions",
@@ -134,6 +137,7 @@ pub async fn proxy_anthropic_messages(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -141,6 +145,7 @@ pub async fn proxy_anthropic_messages(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         MESSAGES,
         "/v1/messages",
@@ -155,6 +160,7 @@ pub async fn proxy_responses(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -162,6 +168,7 @@ pub async fn proxy_responses(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         RESPONSES,
         "/v1/responses",
@@ -180,6 +187,7 @@ pub async fn proxy_gemini(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -187,6 +195,7 @@ pub async fn proxy_gemini(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         GEMINI,
         uri.path(),
@@ -640,21 +649,27 @@ pub(crate) async fn read_whole(
 ///
 /// `cancel` is the middleware's record of a request whose client leaves
 /// before the response exists (see `early_cancel`); `None` on a
-/// WebSocket turn, whose connection records its own end.
+/// WebSocket turn, whose connection records its own end. `arrived` is
+/// when the gateway port's request timeout started counting (see
+/// [`super::Arrived`]); `None` on a WebSocket turn, which it does not
+/// bound.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
     cancel: Option<EarlyCancelSlot>,
+    arrived: Option<std::time::Instant>,
     body: Bytes,
     surface: ClientSurface,
     path: &str,
     query: Option<&str>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    run(state, headers, identity, cancel, body, surface, path, query)
-        .await
-        .map_err(|e| e.in_dialect(surface.dialect))
+    run(
+        state, headers, identity, cancel, arrived, body, surface, path, query,
+    )
+    .await
+    .map_err(|e| e.in_dialect(surface.dialect))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -663,6 +678,7 @@ async fn run(
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
     cancel: Option<EarlyCancelSlot>,
+    arrived: Option<std::time::Instant>,
     body: Bytes,
     surface: ClientSurface,
     path: &str,
@@ -1054,14 +1070,21 @@ async fn run(
         cache_enabled: surface.caches,
     };
 
+    // How long after it arrived the request may still go out again to
+    // upstreams that failed for the moment (see `super::retry`).
+    let retry_wait = std::time::Duration::from_secs(state.dynamic_config.retry_wait_secs().await);
+
     if outbound.stream {
-        // One pick, no retry once bytes have gone to the client. A dialect
-        // rejection still gets its retry: it arrives before any body.
+        // One pick, no failover once bytes have gone to the client. A
+        // dialect rejection still gets its retry: it arrives before any
+        // body. A transient failure before any of the answer went out
+        // sends to the same route again (see `build_chat_pump`).
         let sel_ctx =
             build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref(), pin).await;
         let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
             .await
             .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
+        let resend = Resend::new(entry, &sel_ctx, Budget::new(request_started_at, retry_wait));
 
         set_affinity(
             &state.redis,
@@ -1075,16 +1098,26 @@ async fn run(
 
         let hide_usage = outbound.hides_usage();
         // Started on the stream's first poll — see `build_chat_pump` for
-        // why it must not be awaited here.
+        // why it must not be awaited here — and again for each retry.
         let open: crate::lifecycle::OpenUpstream = {
             let entry = entry.clone();
+            let outbound = std::sync::Arc::new(outbound);
             let call_ctx = call_ctx.clone();
             let db = state.db.clone();
             let model = entry
                 .upstream_model
                 .clone()
                 .unwrap_or_else(|| mapped_model.clone());
-            Box::pin(async move { send(&entry, &outbound, &call_ctx, &db, &model).await })
+            Box::new(move || {
+                let (entry, outbound, call_ctx, db, model) = (
+                    entry.clone(),
+                    outbound.clone(),
+                    call_ctx.clone(),
+                    db.clone(),
+                    model.clone(),
+                );
+                Box::pin(async move { send(&entry, &outbound, &call_ctx, &db, &model).await })
+            })
         };
 
         let deps = snapshot(entry, sel_record);
@@ -1094,6 +1127,7 @@ async fn run(
         return Ok(launch_stream_pump(
             deps,
             open,
+            resend,
             shaper,
             surface.dialect,
             client_sse,
@@ -1114,28 +1148,44 @@ async fn run(
         None,
     )
     .await;
-    let (entry, completed, answer_ledger, sel_record) =
-        select_route_with_failover(routes, &outbound, &call_ctx, &sel_ctx, &mapped_model)
-            .await
-            .map_err(|e| {
-                // Every candidate failed — no winning provider to name.
-                emit_gateway_error_log(
-                    &state.audit,
-                    &metadata.request_id,
-                    session_id.as_deref(),
-                    identity.user_id.as_deref(),
-                    identity.user_email.as_deref(),
-                    identity.api_key_id.as_deref(),
-                    identity.api_key_lineage_id.as_deref(),
-                    identity.ip_address.as_deref(),
-                    &mapped_model,
-                    None,
-                    request_started_at.elapsed().as_millis() as i64,
-                    &e,
-                    error_capture,
-                );
-                GatewayErrorResponse::from(e)
-            })?;
+    // A whole answer must be back within the gateway port's request
+    // timeout, which started counting before this handler did (auth, the
+    // body): past it the client gets an empty 408 and the request no log
+    // row. Each attempt is cut a little before it, and a retry starts only
+    // when it fits (see `super::retry`).
+    let mut budget = Budget::new(request_started_at, retry_wait);
+    if let Some(arrived) = arrived {
+        budget = budget.within(super::retry::hard_deadline(arrived));
+    }
+    let (entry, completed, answer_ledger, sel_record) = select_route_with_failover(
+        routes,
+        &outbound,
+        &call_ctx,
+        &sel_ctx,
+        &mapped_model,
+        &mut budget,
+    )
+    .await
+    .map_err(|e| {
+        // Every candidate failed — no winning provider to name.
+        emit_gateway_error_log(
+            &state.audit,
+            &metadata.request_id,
+            session_id.as_deref(),
+            identity.user_id.as_deref(),
+            identity.user_email.as_deref(),
+            identity.api_key_id.as_deref(),
+            identity.api_key_lineage_id.as_deref(),
+            identity.ip_address.as_deref(),
+            &mapped_model,
+            None,
+            request_started_at.elapsed().as_millis() as i64,
+            &e,
+            budget.retries(),
+            error_capture,
+        );
+        GatewayErrorResponse::from(e)
+    })?;
 
     // The answer as the caller will receive it: their values restored,
     // then its text through the content rules that check answers.

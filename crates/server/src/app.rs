@@ -409,9 +409,12 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         .merge(key_routes)
         .merge(mcp_routes)
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
+        // When the timeout below starts counting: a whole answer's retries
+        // stop in time for its error to be written (see `gateway_proxy::retry`).
+        .layer(axum::middleware::from_fn(gateway_proxy::stamp_arrival))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(120), // longer timeout for streaming
+            gateway_proxy::REQUEST_TIMEOUT,
         ))
         .layer(gateway_cors)
         .layer(SetResponseHeaderLayer::overriding(
