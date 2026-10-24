@@ -31,6 +31,7 @@ mod models;
 mod pipeline;
 mod protocol_relearn;
 mod responses_ws;
+pub(crate) mod retry;
 mod routing;
 pub(crate) mod sealed;
 pub mod shaper;
@@ -40,7 +41,7 @@ pub mod transport;
 pub(crate) use accounting::post_flight_account;
 pub(crate) use body_capture::prepare_body_capture;
 pub(crate) use log_ctx::emit_gateway_log_with_extra;
-pub(crate) use routing::{SelectionRecord, fails as upstream_failed, finalize_health};
+pub(crate) use routing::{Resend, SelectionRecord, fails as upstream_failed, finalize_health};
 
 // pub re-exports — `server::app` mounts these as route handlers.
 pub use early_cancel::{EarlyCancel, EarlyCancelSlot};
@@ -50,6 +51,12 @@ pub use generate::{
 pub use identity::limits_for_ai_gateway;
 pub use models::{list_gemini_models_handler, list_models_handler};
 pub use responses_ws::proxy_responses_ws;
+
+/// How long the gateway port gives a handler to produce its response
+/// before answering 408 (the server's `TimeoutLayer`). A stream's body is
+/// not bound by it — only the time to its head — but a whole answer is,
+/// failover and retries included, so its retries stop by then too.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
@@ -259,6 +266,7 @@ mod helper_tests {
                 GatewayError::ProviderHttpError {
                     status: 418,
                     message: "teapot".into(),
+                    retry_after: None,
                 },
                 418,
             ),
@@ -329,6 +337,7 @@ mod helper_tests {
             GatewayError::ProviderHttpError {
                 status: 503,
                 message: "down".into(),
+                retry_after: None,
             },
         ] {
             let expected = err.status_code();

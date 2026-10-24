@@ -16,6 +16,7 @@ use crate::route_caps::{self, Admission, CappedRoutes, RouteCaps};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
 
+use super::retry::Budget;
 use super::sealed::Pin;
 
 /// What the affinity layer can pin a session to.
@@ -293,6 +294,10 @@ pub(crate) struct SelectionRecord {
     /// at finalize time — which is correct for streams since there's
     /// no failover loop inflating the e2e timer.
     pub picked_latency_ms: Option<u32>,
+    /// How many times the request went out again after a transient
+    /// failure before this route answered (see `super::retry`). Said on
+    /// the log row as `"retries"`.
+    pub retries: u32,
 }
 
 /// Record health for the picked route once the request finishes.
@@ -302,8 +307,8 @@ pub(crate) async fn finalize_health(state: &GatewayState, sel: &SelectionRecord,
     // For health, we want the picked route's *own* time, not the
     // cumulative including prior failed attempts. Non-stream sets
     // this explicitly when it picks a winner; stream falls back to
-    // total elapsed (which is the picked route's time anyway since
-    // streams don't loop).
+    // total elapsed, which is the picked route's time: a stream that
+    // went out again starts `started_at` at the attempt that answered.
     let health_latency_ms = sel.picked_latency_ms.unwrap_or(total_latency_ms);
     let breaker = resolve_breaker_config(state).await;
     let _ = state
@@ -405,12 +410,20 @@ async fn pick_admitted<'a>(
 /// fails (see [`is_upstream_failure`]) tries another candidate from the
 /// remaining set until exhausted. When every candidate left is at its
 /// cap and none failed, the answer is the caps' 429.
+///
+/// When every candidate is exhausted and the last one failed for the
+/// moment (see `super::retry`), the request waits as `budget` allows and
+/// goes round again, to the providers whose last failure in this request
+/// was transient — picked as before, so the strategy, the breaker, the
+/// caps, the affinity and a sealed conversation's pin all apply. A model
+/// with one route sends to it again.
 pub(super) async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
     outbound: &super::generate::Outbound,
     call_ctx: &CallCtx,
     ctx: &SelectionCtx<'_>,
     caller_model: &str,
+    budget: &mut Budget,
 ) -> Result<Answered<'a>, GatewayError> {
     let started_at = std::time::Instant::now();
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
@@ -418,24 +431,39 @@ pub(super) async fn select_route_with_failover<'a>(
     let mut last_error: Option<GatewayError> = None;
     let mut tried: Vec<Uuid> = Vec::new();
     let mut capped = CappedRoutes::default();
+    // The providers whose last failure in this request was transient, in
+    // the order they failed: the ones a retry goes back to.
+    let mut transient: Vec<Uuid> = Vec::new();
 
-    for _ in 0..candidates.len() {
-        let Some(entry) = pick_admitted(&candidates, &tried, &mut capped, ctx).await? else {
-            break;
-        };
-        tried.push(entry.provider_id);
+    loop {
+        let retrying = budget.retries() > 0;
+        let mut attempted = false;
+        for _ in 0..candidates.len() {
+            let Some(entry) = pick_admitted(&candidates, &tried, &mut capped, ctx).await? else {
+                break;
+            };
+            tried.push(entry.provider_id);
+            attempted = true;
+            if retrying {
+                super::retry::count(&entry.provider_name);
+            }
 
-        let upstream_model = entry.upstream_model.as_deref().unwrap_or(caller_model);
+            let upstream_model = entry.upstream_model.as_deref().unwrap_or(caller_model);
 
-        // Per-attempt clock: record latency against this route as
-        // *its* time, not "everything since the request started"
-        // (which would double-count earlier failed attempts in
-        // a failover chain and skew the latency strategy).
-        let attempt_started_at = std::time::Instant::now();
-        // A rejected dialect is retried inside `send`, on this same route.
-        let result =
-            match super::generate::send(entry, outbound, call_ctx, &ctx.state.db, upstream_model)
-                .await
+            // Per-attempt clock: record latency against this route as
+            // *its* time, not "everything since the request started"
+            // (which would double-count earlier failed attempts in
+            // a failover chain and skew the latency strategy).
+            let attempt_started_at = std::time::Instant::now();
+            // A rejected dialect is retried inside `send`, on this same route.
+            let result = match super::generate::send(
+                entry,
+                outbound,
+                call_ctx,
+                &ctx.state.db,
+                upstream_model,
+            )
+            .await
             {
                 Ok((resp, wire)) => {
                     super::generate::read_whole(resp, &wire, caller_model, outbound.input_estimate)
@@ -445,75 +473,107 @@ pub(super) async fn select_route_with_failover<'a>(
                 Err(e) => Err(e),
             };
 
-        let attempt_latency_ms = attempt_started_at
-            .elapsed()
-            .as_millis()
-            .min(u32::MAX as u128) as u32;
+            let attempt_latency_ms = attempt_started_at
+                .elapsed()
+                .as_millis()
+                .min(u32::MAX as u128) as u32;
 
-        match result {
-            Ok((response, ledger)) => {
-                set_affinity(
-                    &ctx.state.redis,
-                    ctx.user_id,
-                    ctx.model_id,
-                    ctx.affinity_mode,
-                    entry,
-                    ctx.affinity_ttl_secs,
-                )
-                .await;
-                return Ok((
-                    entry,
-                    response,
-                    ledger,
-                    SelectionRecord {
-                        picked_route_id: entry.route_id,
-                        started_at,
-                        picked_latency_ms: Some(attempt_latency_ms),
-                    },
-                ));
-            }
-            Err(e) if is_upstream_failure(&e) => {
-                tracing::warn!(
-                    provider = %entry.provider_name,
-                    provider_id = %entry.provider_id,
-                    error = %e,
-                    "Route failed, trying next"
-                );
-                metrics::counter!(
-                    "gateway_provider_fallback_total",
-                    "from" => crate::metrics_labels::normalize_provider_label(&entry.provider_name),
-                )
-                .increment(1);
-                // Record the failed attempt in health so the
-                // breaker can trip mid-failover.
-                let _ = ctx
-                    .state
-                    .health
-                    .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
+            match result {
+                Ok((response, ledger)) => {
+                    set_affinity(
+                        &ctx.state.redis,
+                        ctx.user_id,
+                        ctx.model_id,
+                        ctx.affinity_mode,
+                        entry,
+                        ctx.affinity_ttl_secs,
+                    )
                     .await;
-                last_error = Some(e);
-                continue;
-            }
-            Err(e) => {
-                // The request itself was refused. Sibling routes would
-                // refuse it the same way, so it goes back to the caller.
-                // An upstream that answered with a refusal is working:
-                // it counts as a success for the route, as it does on
-                // the desktop.
-                if matches!(
-                    e,
-                    GatewayError::ProviderHttpError { .. }
-                        | GatewayError::SealedHistoryRefused { .. }
-                ) {
+                    return Ok((
+                        entry,
+                        response,
+                        ledger,
+                        SelectionRecord {
+                            picked_route_id: entry.route_id,
+                            started_at,
+                            picked_latency_ms: Some(attempt_latency_ms),
+                            retries: budget.retries(),
+                        },
+                    ));
+                }
+                Err(e) if is_upstream_failure(&e) => {
+                    tracing::warn!(
+                        provider = %entry.provider_name,
+                        provider_id = %entry.provider_id,
+                        error = %e,
+                        "Route failed, trying next"
+                    );
+                    metrics::counter!(
+                        "gateway_provider_fallback_total",
+                        "from" => crate::metrics_labels::normalize_provider_label(&entry.provider_name),
+                    )
+                    .increment(1);
+                    // Record the failed attempt in health so the
+                    // breaker can trip mid-failover.
                     let _ = ctx
                         .state
                         .health
-                        .record(entry.route_id, attempt_latency_ms, false, ctx.breaker)
+                        .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
                         .await;
+                    transient.retain(|p| *p != entry.provider_id);
+                    if super::retry::is_transient(&e) {
+                        transient.push(entry.provider_id);
+                    }
+                    last_error = Some(e);
+                    continue;
                 }
-                return Err(e);
+                Err(e) => {
+                    // The request itself was refused. Sibling routes would
+                    // refuse it the same way, so it goes back to the caller.
+                    // An upstream that answered with a refusal is working:
+                    // it counts as a success for the route, as it does on
+                    // the desktop.
+                    if matches!(
+                        e,
+                        GatewayError::ProviderHttpError { .. }
+                            | GatewayError::SealedHistoryRefused { .. }
+                    ) {
+                        let _ = ctx
+                            .state
+                            .health
+                            .record(entry.route_id, attempt_latency_ms, false, ctx.breaker)
+                            .await;
+                    }
+                    return Err(e);
+                }
             }
         }
+
+        // Every candidate is exhausted. Go round again only when this
+        // round sent something, its last failure was transient, and the
+        // wait fits before the deadline.
+        let wait = match &last_error {
+            Some(e) if attempted && !transient.is_empty() => budget.wait_after(e),
+            _ => None,
+        };
+        let Some(wait) = wait else { break };
+        tracing::info!(
+            model = ctx.model_id,
+            retry = budget.retries() + 1,
+            wait_ms = wait.as_millis() as u64,
+            error = ?last_error.as_ref().map(GatewayError::error_tag),
+            "Every route failed for the moment, sending again after a wait"
+        );
+        tokio::time::sleep(wait).await;
+        budget.sent();
+        // Only the providers that failed for the moment are asked again.
+        // Caps are counted afresh: a window full then may have room now.
+        tried = candidates
+            .iter()
+            .map(|e| e.provider_id)
+            .filter(|p| !transient.contains(p))
+            .collect();
+        capped = CappedRoutes::default();
     }
 
     // An upstream that failed is the answer's cause even when the rest
@@ -547,6 +607,7 @@ pub(super) async fn select_route_for_stream<'a>(
                 // back to elapsed-from-started_at, which IS the
                 // picked route's wall time for the streaming case.
                 picked_latency_ms: None,
+                retries: 0,
             },
         ));
     }
@@ -554,6 +615,67 @@ pub(super) async fn select_route_for_stream<'a>(
     Err(capped.refusal().unwrap_or_else(|| {
         GatewayError::ProviderError(format!("No provider found for model: {}", ctx.model_id))
     }))
+}
+
+/// What a stream needs to go out again to its route after a transient
+/// failure before any of the answer reached the client (see
+/// `super::retry`). A stream is sent to the one route it picked, so that
+/// is where it goes again, under the pin and affinity it was picked with.
+pub(crate) struct Resend {
+    state: GatewayState,
+    route_id: Uuid,
+    provider: String,
+    caps: RouteCaps,
+    breaker: CircuitBreakerConfig,
+    fail_closed: bool,
+    /// The route's provider alone can read the conversation's encrypted
+    /// history: asked again with its breaker open, as it was picked.
+    pinned_only: bool,
+    pub(crate) budget: Budget,
+}
+
+impl Resend {
+    pub(super) fn new(entry: &RouteEntry, ctx: &SelectionCtx<'_>, budget: Budget) -> Self {
+        Self {
+            state: ctx.state.clone(),
+            route_id: entry.route_id,
+            provider: entry.provider_name.clone(),
+            caps: RouteCaps::of(entry),
+            breaker: ctx.breaker,
+            fail_closed: ctx.fail_closed,
+            pinned_only: matches!(ctx.pin, Some(Pin::Only(p)) if p == entry.provider_id),
+            budget,
+        }
+    }
+
+    /// Before the wait: may the route be sent to again? Not while its
+    /// breaker is open, nor at one of its caps — the pick a failover makes;
+    /// the retry is counted against the caps now. When it may, the attempt
+    /// that failed (`failed_ms` long) counts against the route, as a failed
+    /// attempt in a failover does, and the retry is counted. When it may
+    /// not, the failure is the answer and the stream's tail records it.
+    pub(crate) async fn admit(&mut self, failed_ms: u32) -> bool {
+        let health = self
+            .state
+            .health
+            .snapshot(self.route_id, self.breaker)
+            .await;
+        if health.state == tw_breaker::State::Open && !self.pinned_only {
+            return false;
+        }
+        match route_caps::admit(&self.state.redis, &self.caps, self.fail_closed).await {
+            Ok(Admission::Admitted) => {}
+            Ok(Admission::Capped { .. }) | Err(_) => return false,
+        }
+        let _ = self
+            .state
+            .health
+            .record(self.route_id, failed_ms, true, self.breaker)
+            .await;
+        self.budget.sent();
+        super::retry::count(&self.provider);
+        true
+    }
 }
 
 #[cfg(test)]

@@ -411,7 +411,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(120), // longer timeout for streaming
+            gateway_proxy::REQUEST_TIMEOUT,
         ))
         .layer(gateway_cors)
         .layer(SetResponseHeaderLayer::overriding(

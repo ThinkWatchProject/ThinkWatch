@@ -216,6 +216,12 @@ macro_rules! dc_getters_u64_from_i64 {
     };
 }
 
+/// `gateway.retry_wait_secs` when the setting is missing.
+pub const RETRY_WAIT_DEFAULT_SECS: i64 = 120;
+/// Upper bound on `gateway.retry_wait_secs`, enforced both at write time
+/// (the settings handler) and at read time.
+pub const RETRY_WAIT_MAX_SECS: i64 = 600;
+
 /// Upper bound on `security.signature_drift_secs`, enforced both at
 /// write time (admin settings validation) and at read time (the
 /// getter below). Anything beyond five minutes weakens replay
@@ -438,6 +444,18 @@ impl DynamicConfig {
             .await
             .unwrap_or(300);
         raw.clamp(0, 86400)
+    }
+
+    /// How long after it arrived a request may still be sent again to
+    /// upstreams that failed for the moment (overloaded, a server error,
+    /// a broken connection) before any of the answer reached the client.
+    /// Clamped to [0, 600]; 0 never sends a request again.
+    pub async fn retry_wait_secs(&self) -> u64 {
+        let raw = self
+            .get_i64("gateway.retry_wait_secs")
+            .await
+            .unwrap_or(RETRY_WAIT_DEFAULT_SECS);
+        raw.clamp(0, RETRY_WAIT_MAX_SECS) as u64
     }
 
     /// Exponent for the `latency` strategy: higher = more aggressive

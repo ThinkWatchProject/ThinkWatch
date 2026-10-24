@@ -179,9 +179,9 @@ pub(crate) fn explain_refusal(
     e: GatewayError,
 ) -> GatewayError {
     match e {
-        GatewayError::ProviderHttpError { status, message }
-            if (400..500).contains(&status) && refused(wire, &message) =>
-        {
+        GatewayError::ProviderHttpError {
+            status, message, ..
+        } if (400..500).contains(&status) && refused(wire, &message) => {
             let said = message
                 .strip_prefix(label)
                 .and_then(|m| m.strip_prefix(": "))
@@ -294,6 +294,7 @@ mod tests {
         let e = GatewayError::ProviderHttpError {
             status: 400,
             message: format!("relay-b: {body}"),
+            retry_after: None,
         };
         let e = explain_refusal(Dialect::Responses, "relay-b", "relay-b", e);
         let GatewayError::SealedHistoryRefused {
@@ -323,6 +324,7 @@ mod tests {
         let other = || GatewayError::ProviderHttpError {
             status: 400,
             message: "p: max_output_tokens is too large".into(),
+            retry_after: None,
         };
         assert!(matches!(
             explain_refusal(Dialect::Responses, "p", "p", other()),
@@ -331,6 +333,7 @@ mod tests {
         let sealed = || GatewayError::ProviderHttpError {
             status: 400,
             message: "p: invalid_encrypted_content".into(),
+            retry_after: None,
         };
         // Not sent as Responses: nothing of OpenAI's was sealed in it.
         assert!(matches!(
@@ -341,6 +344,7 @@ mod tests {
         let e = GatewayError::ProviderHttpError {
             status: 500,
             message: "p: invalid_encrypted_content".into(),
+            retry_after: None,
         };
         assert!(matches!(
             explain_refusal(Dialect::Responses, "p", "p", e),

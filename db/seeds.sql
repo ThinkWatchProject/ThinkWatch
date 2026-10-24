@@ -354,6 +354,8 @@ INSERT INTO system_settings (key, value, category, description) VALUES
      'Default session affinity mode (none/provider/route)'),
     ('gateway.default_affinity_ttl_secs','300',        'gateway',
      'Default affinity key TTL in seconds (0-86400)'),
+    ('gateway.retry_wait_secs',          '120',        'gateway',
+     'How long after a request arrives it may still be sent again to upstreams that failed for the moment (overloaded, server error, broken connection) before any of the answer reached the client, in seconds (0-600; 0 = never)'),
     ('gateway.latency_strategy_k',       '2.0',        'gateway',
      'Exponent for the latency-strategy weighting (higher = more aggressive). Default 2.0 (aggressive).'),
     ('gateway.cb_enabled',               'true',       'gateway',

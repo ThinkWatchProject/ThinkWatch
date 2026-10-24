@@ -51,9 +51,10 @@ use super::headers::{
 };
 use super::log_ctx::{LogCtx, emit_gateway_error_log, emit_gateway_log};
 use super::pipeline::{launch_stream_pump, run_buffered_post_invoke, run_preflight_stages};
+use super::retry::Budget;
 use super::routing::{
-    build_selection_ctx, finalize_health, select_route_for_stream, select_route_with_failover,
-    set_affinity,
+    Resend, build_selection_ctx, finalize_health, select_route_for_stream,
+    select_route_with_failover, set_affinity,
 };
 use super::sealed::Conversation;
 use super::shaper::{StreamShaper, rewrite_model};
@@ -1054,14 +1055,21 @@ async fn run(
         cache_enabled: surface.caches,
     };
 
+    // How long after it arrived the request may still go out again to
+    // upstreams that failed for the moment (see `super::retry`).
+    let retry_wait = std::time::Duration::from_secs(state.dynamic_config.retry_wait_secs().await);
+
     if outbound.stream {
-        // One pick, no retry once bytes have gone to the client. A dialect
-        // rejection still gets its retry: it arrives before any body.
+        // One pick, no failover once bytes have gone to the client. A
+        // dialect rejection still gets its retry: it arrives before any
+        // body. A transient failure before any of the answer went out
+        // sends to the same route again (see `build_chat_pump`).
         let sel_ctx =
             build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref(), pin).await;
         let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
             .await
             .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
+        let resend = Resend::new(entry, &sel_ctx, Budget::new(request_started_at, retry_wait));
 
         set_affinity(
             &state.redis,
@@ -1075,16 +1083,26 @@ async fn run(
 
         let hide_usage = outbound.hides_usage();
         // Started on the stream's first poll — see `build_chat_pump` for
-        // why it must not be awaited here.
+        // why it must not be awaited here — and again for each retry.
         let open: crate::lifecycle::OpenUpstream = {
             let entry = entry.clone();
+            let outbound = std::sync::Arc::new(outbound);
             let call_ctx = call_ctx.clone();
             let db = state.db.clone();
             let model = entry
                 .upstream_model
                 .clone()
                 .unwrap_or_else(|| mapped_model.clone());
-            Box::pin(async move { send(&entry, &outbound, &call_ctx, &db, &model).await })
+            Box::new(move || {
+                let (entry, outbound, call_ctx, db, model) = (
+                    entry.clone(),
+                    outbound.clone(),
+                    call_ctx.clone(),
+                    db.clone(),
+                    model.clone(),
+                );
+                Box::pin(async move { send(&entry, &outbound, &call_ctx, &db, &model).await })
+            })
         };
 
         let deps = snapshot(entry, sel_record);
@@ -1094,6 +1112,7 @@ async fn run(
         return Ok(launch_stream_pump(
             deps,
             open,
+            resend,
             shaper,
             surface.dialect,
             client_sse,
@@ -1114,28 +1133,38 @@ async fn run(
         None,
     )
     .await;
-    let (entry, completed, answer_ledger, sel_record) =
-        select_route_with_failover(routes, &outbound, &call_ctx, &sel_ctx, &mapped_model)
-            .await
-            .map_err(|e| {
-                // Every candidate failed — no winning provider to name.
-                emit_gateway_error_log(
-                    &state.audit,
-                    &metadata.request_id,
-                    session_id.as_deref(),
-                    identity.user_id.as_deref(),
-                    identity.user_email.as_deref(),
-                    identity.api_key_id.as_deref(),
-                    identity.api_key_lineage_id.as_deref(),
-                    identity.ip_address.as_deref(),
-                    &mapped_model,
-                    None,
-                    request_started_at.elapsed().as_millis() as i64,
-                    &e,
-                    error_capture,
-                );
-                GatewayErrorResponse::from(e)
-            })?;
+    // A whole answer is bound by the gateway's request timeout, retries
+    // included: one past it would end in a 408 and no log row.
+    let mut budget = Budget::new(request_started_at, retry_wait.min(super::REQUEST_TIMEOUT));
+    let (entry, completed, answer_ledger, sel_record) = select_route_with_failover(
+        routes,
+        &outbound,
+        &call_ctx,
+        &sel_ctx,
+        &mapped_model,
+        &mut budget,
+    )
+    .await
+    .map_err(|e| {
+        // Every candidate failed — no winning provider to name.
+        emit_gateway_error_log(
+            &state.audit,
+            &metadata.request_id,
+            session_id.as_deref(),
+            identity.user_id.as_deref(),
+            identity.user_email.as_deref(),
+            identity.api_key_id.as_deref(),
+            identity.api_key_lineage_id.as_deref(),
+            identity.ip_address.as_deref(),
+            &mapped_model,
+            None,
+            request_started_at.elapsed().as_millis() as i64,
+            &e,
+            budget.retries(),
+            error_capture,
+        );
+        GatewayErrorResponse::from(e)
+    })?;
 
     // The answer as the caller will receive it: their values restored,
     // then its text through the content rules that check answers.

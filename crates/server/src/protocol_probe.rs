@@ -456,6 +456,7 @@ mod tests {
         assert!(is_inconclusive(&GatewayError::ProviderHttpError {
             status: 503,
             message: "OpenAI: overloaded".into(),
+            retry_after: None,
         }));
     }
 
@@ -491,10 +492,12 @@ mod tests {
             message: "OpenAI: The model 'openai.gpt-5.5' does not support \
                       the '/v1/chat/completions' API"
                 .into(),
+            retry_after: None,
         }));
         assert!(!is_inconclusive(&GatewayError::ProviderHttpError {
             status: 404,
             message: "no such model".into(),
+            retry_after: None,
         }));
     }
 

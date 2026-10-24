@@ -82,6 +82,7 @@ impl<'a> LogCtx<'a> {
             None,
             self.started.elapsed().as_millis() as i64,
             &err,
+            0,
             // Pre-route-selection failures don't have a parsed request
             // we can safely serialize (transform errors, malformed JSON,
             // etc. land here). Body capture for these paths is a follow-
@@ -96,6 +97,10 @@ impl<'a> LogCtx<'a> {
 /// blob mirrors the success-path shape but also carries `error_type`
 /// and `error_message` so operators can drill down without joining
 /// against a separate error-log stream.
+///
+/// `retries`: how many times the request went out again after a
+/// transient failure (see `super::retry`), said as `"retries"` when any
+/// did.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_gateway_error_log(
     audit: &think_watch_common::audit::AuditLogger,
@@ -110,9 +115,13 @@ pub(super) fn emit_gateway_error_log(
     provider: Option<&str>,
     latency_ms: i64,
     err: &GatewayError,
+    retries: u32,
     bodies: BodyCapture,
 ) {
-    let detail = error_detail(model_id, provider, latency_ms, err);
+    let mut detail = error_detail(model_id, provider, latency_ms, err);
+    if retries > 0 {
+        detail["retries"] = retries.into();
+    }
     // Same `chat.completion` action as the success path — flush_gateway
     // drops the action when it writes ChGatewayRow, so the trace
     // endpoint distinguishes errors via `status_code` (>= 400) instead.
@@ -272,6 +281,7 @@ mod tests {
             GatewayError::ProviderHttpError {
                 status: 500,
                 message: "bedrock: arn:aws:iam::123456789012:user/gateway".into(),
+                retry_after: None,
             },
             GatewayError::UpstreamRateLimited {
                 retry_after_secs: Some(12),

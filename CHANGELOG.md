@@ -11,6 +11,63 @@ target.
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **A request whose upstreams fail for the moment can take up to two
+  minutes to fail.** When every route of a model failed with an overload
+  or a server error, or could not be reached, before any of the answer
+  reached the client, the gateway now waits and sends the request again
+  instead of returning the error at once, for up to
+  `gateway.retry_wait_secs` (120 seconds by default) after the request
+  arrived. A whole (non-streaming) answer also stays within the gateway's
+  120-second request timeout. Clients and load balancers with a shorter
+  timeout than that may give up first. Set `gateway.retry_wait_secs` to 0
+  to keep the earlier behaviour.
+- **A stream's opening events arrive with its first content.** While a
+  stream can still be sent again, what the upstream sends before any
+  content (Anthropic `message_start` and `ping`, Responses
+  `response.created` and `response.in_progress`, a Chat chunk with only
+  the role) is held back and goes out together with the first content.
+  While it is held, and while the gateway waits to send again, the client
+  receives an SSE comment (`: keep-alive`) after every 15 seconds without
+  data. The status is 200 as before.
+
+### Added
+
+- **Transient upstream failures are retried.** When every candidate route
+  has been tried and the last one failed for the moment — 500, 502, 503,
+  504 or 529, a connection that could not be made or broke before the
+  answer's head, a stream that broke off or reported an overload or a
+  server error (`overloaded_error`, `api_error`, `server_error`,
+  `server_is_overloaded`, `slow_down`, Gemini `UNAVAILABLE`) before any
+  content — and none of the answer reached the client, the request waits
+  2, 4, 8, then 16 seconds (each give or take 20%), or as long as the
+  upstream said in `retry-after-ms` or `Retry-After`, and goes out again
+  to the routes that failed that way. A model with one route, and a
+  stream, goes back to the same route. Each attempt is picked as before:
+  the strategy, the circuit breaker, the route caps, session affinity
+  and the provider holding a conversation's encrypted history all apply,
+  and each failed attempt counts against its route's breaker as it did.
+  Retries stop when the next wait would end past the deadline; an attempt
+  already under way is not cut short. Rate limits and spent quota (429),
+  refused credentials (401, 403), any other 4xx, timeouts, the gateway's
+  own limits, budgets and policies, and a client that left are never
+  retried, and neither is a stream after part of its answer went out.
+- **`gateway.retry_wait_secs`** (Settings → Gateway → Routing strategy):
+  how long after a request arrives it may still be sent again, 0 to 600
+  seconds, default 120; 0 turns retries off.
+- **`gateway_provider_retry_total{provider}`**: attempts sent again after
+  a transient failure, by the provider they went to, next to
+  `gateway_provider_fallback_total`.
+- The `gateway_logs` row of a request that was sent again records
+  `"retries": n` in its detail, whether it then succeeded or failed.
+
+### Changed
+
+- An error a stream reports as OpenAI's `server_error` is logged as the
+  upstream's 500 (`ProviderHttpError`), as the same error answered with
+  HTTP 500 is, instead of 502 (`ProviderError`).
+
 ## [3.9.1] — 2026-10-23
 
 A conversation whose history a provider encrypted, such as a Codex

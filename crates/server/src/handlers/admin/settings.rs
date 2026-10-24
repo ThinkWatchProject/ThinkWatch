@@ -656,6 +656,17 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                 ));
             }
         }
+        "gateway.retry_wait_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            let max = think_watch_common::dynamic_config::RETRY_WAIT_MAX_SECS;
+            if !(0..=max).contains(&v) {
+                return Err(AppError::BadRequest(format!(
+                    "retry_wait_secs must be between 0 and {max}"
+                )));
+            }
+        }
         "gateway.latency_strategy_k" => {
             let v = value
                 .as_f64()
@@ -749,6 +760,16 @@ mod tests {
         assert!(validate_setting("api_keys.default_expiry_days", &json!(0)).is_ok());
         assert!(validate_setting("api_keys.default_expiry_days", &json!(30)).is_ok());
         assert!(validate_setting("api_keys.default_expiry_days", &json!(-1)).is_err());
+    }
+
+    #[test]
+    fn the_retry_wait_takes_zero_up_to_ten_minutes() {
+        assert!(validate_setting("gateway.retry_wait_secs", &json!(0)).is_ok());
+        assert!(validate_setting("gateway.retry_wait_secs", &json!(120)).is_ok());
+        assert!(validate_setting("gateway.retry_wait_secs", &json!(600)).is_ok());
+        assert!(validate_setting("gateway.retry_wait_secs", &json!(601)).is_err());
+        assert!(validate_setting("gateway.retry_wait_secs", &json!(-1)).is_err());
+        assert!(validate_setting("gateway.retry_wait_secs", &json!("120")).is_err());
     }
 
     #[test]
