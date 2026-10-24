@@ -58,6 +58,24 @@ pub use responses_ws::proxy_responses_ws;
 /// failover and retries included, so its retries stop by then too.
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// When a request reached the gateway port, stamped just inside the
+/// server's `TimeoutLayer` (see [`stamp_arrival`]): the moment its
+/// [`REQUEST_TIMEOUT`] started counting, before authentication and the
+/// body were read.
+#[derive(Debug, Clone, Copy)]
+pub struct Arrived(pub std::time::Instant);
+
+/// Stamp [`Arrived`] on the request. Layered directly inside the gateway
+/// port's `TimeoutLayer`.
+pub async fn stamp_arrival(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    req.extensions_mut()
+        .insert(Arrived(std::time::Instant::now()));
+    next.run(req).await
+}
+
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
 pub struct GatewayState {

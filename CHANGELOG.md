@@ -19,10 +19,17 @@ target.
   reached the client, the gateway now waits and sends the request again
   instead of returning the error at once, for up to
   `gateway.retry_wait_secs` (120 seconds by default) after the request
-  arrived. A whole (non-streaming) answer also stays within the gateway's
-  120-second request timeout. Clients and load balancers with a shorter
-  timeout than that may give up first. Set `gateway.retry_wait_secs` to 0
-  to keep the earlier behaviour.
+  arrived. Clients and load balancers with a shorter timeout than that may
+  give up first. Set `gateway.retry_wait_secs` to 0 to keep the earlier
+  behaviour.
+- **A whole answer that runs into the request timeout is now an error
+  with a log row.** A non-streaming request's upstream attempt is cut
+  2 seconds before the gateway's 120-second request timeout (counted from
+  when the request reached the gateway port), and the client gets the
+  last upstream error, or a 504 `ProviderTimeout` when there was none,
+  with its `gateway_logs` row, instead of an empty 408. A retry starts
+  only when its wait and another attempt as long as the last one fit
+  before then.
 - **A stream's opening events arrive with its first content.** While a
   stream can still be sent again, what the upstream sends before any
   content (Anthropic `message_start` and `ping`, Responses
@@ -30,7 +37,8 @@ target.
   the role) is held back and goes out together with the first content.
   While it is held, and while the gateway waits to send again, the client
   receives an SSE comment (`: keep-alive`) after every 15 seconds without
-  data. The status is 200 as before.
+  data — except Gemini clients, which never receive one. The status is
+  200 as before.
 
 ### Added
 
@@ -42,7 +50,8 @@ target.
   `server_is_overloaded`, `slow_down`, Gemini `UNAVAILABLE`) before any
   content — and none of the answer reached the client, the request waits
   2, 4, 8, then 16 seconds (each give or take 20%), or as long as the
-  upstream said in `retry-after-ms` or `Retry-After`, and goes out again
+  upstream said in `retry-after-ms` or `Retry-After` (a zero wait is
+  ignored, and a shorter one than 250 ms is taken as 250 ms), and goes out again
   to the routes that failed that way. A model with one route, and a
   stream, goes back to the same route. Each attempt is picked as before:
   the strategy, the circuit breaker, the route caps, session affinity
@@ -64,6 +73,8 @@ target.
 
 ### Changed
 
+- A provider whose base URL cannot be made into a request fails as
+  `ProviderError` instead of `NetworkError`, and is not retried.
 - An error a stream reports as OpenAI's `server_error` is logged as the
   upstream's 500 (`ProviderHttpError`), as the same error answered with
   HTTP 500 is, instead of 502 (`ProviderError`).

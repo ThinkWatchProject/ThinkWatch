@@ -182,6 +182,9 @@ pub(crate) type StreamTail =
 pub(crate) struct Sent {
     pub retries: u32,
     pub last_sent: std::time::Instant,
+    /// Waiting to go out again: the attempt that failed was counted
+    /// against the route already, and nothing is under way.
+    pub waiting: bool,
 }
 
 /// Build the streaming pump: forward the upstream's bytes to the caller —
@@ -280,7 +283,11 @@ pub(crate) fn build_chat_pump(
     let sent = Arc::new(Mutex::new(Sent {
         retries: 0,
         last_sent: std::time::Instant::now(),
+        waiting: false,
     }));
+    // Gemini clients get no keep-alive comments: the google-genai SDK reads
+    // every SSE line as JSON.
+    let keep_alive = keeps_alive(client);
     let sent_for_tail = Arc::clone(&sent);
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
@@ -295,15 +302,19 @@ pub(crate) fn build_chat_pump(
         'attempt: loop {
             if let Some(wait) = backoff.take() {
                 let until = tokio::time::Instant::now() + wait;
-                let mut ticks = std::pin::pin!(keep_alives(quiet_since, until));
-                while ticks.next().await.is_some() {
-                    quiet_since = tokio::time::Instant::now();
-                    yield Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(KEEP_ALIVE_FRAME));
+                if keep_alive {
+                    let mut ticks = std::pin::pin!(keep_alives(quiet_since, until));
+                    while ticks.next().await.is_some() {
+                        quiet_since = tokio::time::Instant::now();
+                        yield Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(KEEP_ALIVE_FRAME));
+                    }
+                } else {
+                    tokio::time::sleep_until(until).await;
                 }
             }
             let sent_at = std::time::Instant::now();
             if let Ok(mut s) = sent.lock() {
-                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at };
+                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at, waiting: false };
             }
             // What an attempt that failed had read is not this one's: its
             // usage is not billed, its error not the request's.
@@ -318,7 +329,7 @@ pub(crate) fn build_chat_pump(
                 let tick = tokio::time::sleep_until(quiet_since + KEEP_ALIVE);
                 let next = tokio::select! {
                     opened = &mut opening => Some(opened),
-                    _ = tick, if resent => None,
+                    _ = tick, if resent && keep_alive => None,
                 };
                 match next {
                     Some(opened) => break opened,
@@ -336,7 +347,7 @@ pub(crate) fn build_chat_pump(
                     if let Some(wait) = resend.budget.wait_after(&e)
                         && resend.admit(elapsed_ms(sent_at)).await
                     {
-                        resending(&provider, resend.budget.retries(), wait, e.error_tag());
+                        resending(&provider, resend.budget.retries(), wait, e.error_tag(), &readers, &sent);
                         backoff = Some(wait);
                         continue 'attempt;
                     }
@@ -378,7 +389,7 @@ pub(crate) fn build_chat_pump(
             loop {
                 let next = tokio::select! {
                     item = source.next() => Some(item),
-                    _ = tokio::time::sleep_until(quiet_since + KEEP_ALIVE), if hold.is_some() => None,
+                    _ = tokio::time::sleep_until(quiet_since + KEEP_ALIVE), if hold.is_some() && keep_alive => None,
                 };
                 let Some(item) = next else {
                     quiet_since = tokio::time::Instant::now();
@@ -396,7 +407,7 @@ pub(crate) fn build_chat_pump(
                             && let Some(wait) = retry_after_said(&resend, &provider, &said)
                             && resend.admit(elapsed_ms(sent_at)).await
                         {
-                            resending(&provider, resend.budget.retries(), wait, "in-stream error");
+                            resending(&provider, resend.budget.retries(), wait, "in-stream error", &readers, &sent);
                             backoff = Some(wait);
                             continue 'attempt;
                         }
@@ -467,7 +478,7 @@ pub(crate) fn build_chat_pump(
                                     if let Some(wait) = retry_after_said(&resend, &provider, said)
                                         && resend.admit(elapsed_ms(sent_at)).await
                                     {
-                                        resending(&provider, resend.budget.retries(), wait, "in-stream error");
+                                        resending(&provider, resend.budget.retries(), wait, "in-stream error", &readers, &sent);
                                         backoff = Some(wait);
                                         continue 'attempt;
                                     }
@@ -501,7 +512,7 @@ pub(crate) fn build_chat_pump(
                                 && let Some(wait) = resend.budget.wait_after_outcome(error_type, *status_code)
                                 && resend.admit(elapsed_ms(sent_at)).await
                             {
-                                resending(&provider, resend.budget.retries(), wait, error_type);
+                                resending(&provider, resend.budget.retries(), wait, error_type, &readers, &sent);
                                 backoff = Some(wait);
                                 continue 'attempt;
                             }
@@ -671,6 +682,7 @@ pub(crate) fn build_chat_pump(
         let sent = sent_for_tail.lock().map(|s| *s).unwrap_or(Sent {
             retries: 0,
             last_sent: started_at,
+            waiting: false,
         });
         let invoked = Invoked {
             client_ip: identity.ip_address.clone(),
@@ -1059,8 +1071,36 @@ fn retry_after_said(resend: &Resend, provider: &str, said: &Said) -> Option<std:
     }
 }
 
-/// The log line for a stream that goes out again.
-fn resending(provider: &str, retry: u32, wait: std::time::Duration, error: &str) {
+/// Whether the client may be sent keep-alive comments while the gateway
+/// holds its stream back. Not a Gemini client: the google-genai SDK reads
+/// every SSE line as JSON, and a JSON-array stream has no place for them.
+fn keeps_alive(client: Dialect) -> bool {
+    client != Dialect::Gemini
+}
+
+/// A stream goes out again after `wait`: what the failed attempt left for
+/// the tail is cleared — a client that leaves during the wait left a
+/// request whose failed attempt is already counted against the route
+/// (see `routing::Resend::admit`), with nothing to bill — and the log
+/// line written.
+fn resending(
+    provider: &str,
+    retry: u32,
+    wait: std::time::Duration,
+    error: &str,
+    readers: &Mutex<Readers>,
+    sent: &Mutex<Sent>,
+) {
+    if let Ok(mut r) = readers.lock() {
+        *r = Readers::default();
+    }
+    if let Ok(mut s) = sent.lock() {
+        *s = Sent {
+            retries: retry,
+            last_sent: std::time::Instant::now(),
+            waiting: true,
+        };
+    }
     tracing::info!(
         provider,
         retry,
@@ -1755,6 +1795,46 @@ mod tests {
         assert_eq!(r.reported(false), None);
         let said = r.reported(true).unwrap();
         assert_eq!(said.status, Some(500));
+    }
+
+    /// A Gemini client, SSE or JSON array, never gets a keep-alive comment.
+    #[test]
+    fn only_non_gemini_clients_get_keep_alives() {
+        assert!(!keeps_alive(Dialect::Gemini));
+        for client in [Dialect::Chat, Dialect::Anthropic, Dialect::Responses] {
+            assert!(keeps_alive(client));
+        }
+    }
+
+    /// A retry clears what the failed attempt left for the tail, and says
+    /// the stream is waiting.
+    #[test]
+    fn deciding_a_retry_clears_the_failed_attempt() {
+        let readers = Mutex::new(Readers {
+            errors: Some(ErrorWatch::new(Dialect::Anthropic)),
+            sniffer: Some(tw_dialect::usage::Sniffer::new()),
+            ..Default::default()
+        });
+        readers.lock().unwrap().feed(
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"x\"}}\n\n",
+        );
+        let sent = Mutex::new(Sent {
+            retries: 0,
+            last_sent: std::time::Instant::now(),
+            waiting: false,
+        });
+        resending(
+            "up",
+            1,
+            std::time::Duration::from_secs(2),
+            "x",
+            &readers,
+            &sent,
+        );
+        let mut r = readers.lock().unwrap();
+        assert!(r.sniffer.is_none() && r.upstream_error().is_none());
+        let s = *sent.lock().unwrap();
+        assert_eq!((s.retries, s.waiting), (1, true));
     }
 
     /// While the gateway waits, the client hears a keep-alive every 15

@@ -209,8 +209,14 @@ impl Upstream {
 /// A request that never got an answer: the upstream timed out, or the
 /// connection could not be made or broke. Either way it says nothing
 /// about the request, and another route may well answer it.
+///
+/// A request that could not even be built — a provider whose base URL is
+/// no URL — is the route's configuration, not a failure of the moment:
+/// sending it again would fail the same way (see `retry::transient`).
 pub(crate) fn transport_error(e: reqwest::Error) -> GatewayError {
-    if e.is_timeout() {
+    if e.is_builder() {
+        GatewayError::ProviderError(format!("The upstream request could not be built: {e}"))
+    } else if e.is_timeout() {
         GatewayError::ProviderTimeout(e.to_string())
     } else {
         GatewayError::NetworkError(e.to_string())
@@ -415,6 +421,21 @@ mod tests {
             .body(body.to_string())
             .unwrap()
             .into()
+    }
+
+    /// A base URL that is no URL fails every time: not worth sending
+    /// again, unlike a connection that could not be made.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_is_not_a_failure_of_the_moment() {
+        let built = client().post("http://exa mple.invalid/v1").send().await;
+        let e = transport_error(built.unwrap_err());
+        assert!(matches!(e, GatewayError::ProviderError(_)), "{e:?}");
+        assert!(!crate::proxy::retry::is_transient(&e));
+
+        let refused = client().post("http://127.0.0.1:1/v1").send().await;
+        let e = transport_error(refused.unwrap_err());
+        assert!(matches!(e, GatewayError::NetworkError(_)), "{e:?}");
+        assert!(crate::proxy::retry::is_transient(&e));
     }
 
     #[tokio::test]

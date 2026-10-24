@@ -114,6 +114,7 @@ pub async fn proxy_chat_completion(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -121,6 +122,7 @@ pub async fn proxy_chat_completion(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         CHAT,
         "/v1/chat/completions",
@@ -135,6 +137,7 @@ pub async fn proxy_anthropic_messages(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -142,6 +145,7 @@ pub async fn proxy_anthropic_messages(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         MESSAGES,
         "/v1/messages",
@@ -156,6 +160,7 @@ pub async fn proxy_responses(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -163,6 +168,7 @@ pub async fn proxy_responses(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         RESPONSES,
         "/v1/responses",
@@ -181,6 +187,7 @@ pub async fn proxy_gemini(
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     cancel: Option<axum::Extension<EarlyCancelSlot>>,
+    arrived: Option<axum::Extension<super::Arrived>>,
     body: Bytes,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     generate(
@@ -188,6 +195,7 @@ pub async fn proxy_gemini(
         headers,
         identity,
         cancel.map(|c| c.0),
+        arrived.map(|a| a.0.0),
         body,
         GEMINI,
         uri.path(),
@@ -641,21 +649,27 @@ pub(crate) async fn read_whole(
 ///
 /// `cancel` is the middleware's record of a request whose client leaves
 /// before the response exists (see `early_cancel`); `None` on a
-/// WebSocket turn, whose connection records its own end.
+/// WebSocket turn, whose connection records its own end. `arrived` is
+/// when the gateway port's request timeout started counting (see
+/// [`super::Arrived`]); `None` on a WebSocket turn, which it does not
+/// bound.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
     cancel: Option<EarlyCancelSlot>,
+    arrived: Option<std::time::Instant>,
     body: Bytes,
     surface: ClientSurface,
     path: &str,
     query: Option<&str>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    run(state, headers, identity, cancel, body, surface, path, query)
-        .await
-        .map_err(|e| e.in_dialect(surface.dialect))
+    run(
+        state, headers, identity, cancel, arrived, body, surface, path, query,
+    )
+    .await
+    .map_err(|e| e.in_dialect(surface.dialect))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -664,6 +678,7 @@ async fn run(
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
     cancel: Option<EarlyCancelSlot>,
+    arrived: Option<std::time::Instant>,
     body: Bytes,
     surface: ClientSurface,
     path: &str,
@@ -1133,9 +1148,15 @@ async fn run(
         None,
     )
     .await;
-    // A whole answer is bound by the gateway's request timeout, retries
-    // included: one past it would end in a 408 and no log row.
-    let mut budget = Budget::new(request_started_at, retry_wait.min(super::REQUEST_TIMEOUT));
+    // A whole answer must be back within the gateway port's request
+    // timeout, which started counting before this handler did (auth, the
+    // body): past it the client gets an empty 408 and the request no log
+    // row. Each attempt is cut a little before it, and a retry starts only
+    // when it fits (see `super::retry`).
+    let mut budget = Budget::new(request_started_at, retry_wait);
+    if let Some(arrived) = arrived {
+        budget = budget.within(super::retry::hard_deadline(arrived));
+    }
     let (entry, completed, answer_ledger, sel_record) = select_route_with_failover(
         routes,
         &outbound,

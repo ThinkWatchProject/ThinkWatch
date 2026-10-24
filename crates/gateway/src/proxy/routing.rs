@@ -298,11 +298,17 @@ pub(crate) struct SelectionRecord {
     /// failure before this route answered (see `super::retry`). Said on
     /// the log row as `"retries"`.
     pub retries: u32,
+    /// The request's last attempt was already counted against the route:
+    /// a stream whose client left while it waited to go out again.
+    pub counted: bool,
 }
 
 /// Record health for the picked route once the request finishes.
 /// Best-effort; failures are logged.
 pub(crate) async fn finalize_health(state: &GatewayState, sel: &SelectionRecord, success: bool) {
+    if sel.counted {
+        return;
+    }
     let total_latency_ms = sel.started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
     // For health, we want the picked route's *own* time, not the
     // cumulative including prior failed attempts. Non-stream sets
@@ -411,6 +417,10 @@ async fn pick_admitted<'a>(
 /// remaining set until exhausted. When every candidate left is at its
 /// cap and none failed, the answer is the caps' 429.
 ///
+/// Under `budget`'s hard deadline (a whole answer's request timeout),
+/// each attempt is cut there and the last failure, or a timeout, is the
+/// answer.
+///
 /// When every candidate is exhausted and the last one failed for the
 /// moment (see `super::retry`), the request waits as `budget` allows and
 /// goes round again, to the providers whose last failure in this request
@@ -434,6 +444,9 @@ pub(super) async fn select_route_with_failover<'a>(
     // The providers whose last failure in this request was transient, in
     // the order they failed: the ones a retry goes back to.
     let mut transient: Vec<Uuid> = Vec::new();
+    // How long the last attempt took: under a hard deadline, a retry
+    // starts only when one as long fits after its wait.
+    let mut last_took = std::time::Duration::ZERO;
 
     loop {
         let retrying = budget.retries() > 0;
@@ -456,27 +469,59 @@ pub(super) async fn select_route_with_failover<'a>(
             // a failover chain and skew the latency strategy).
             let attempt_started_at = std::time::Instant::now();
             // A rejected dialect is retried inside `send`, on this same route.
-            let result = match super::generate::send(
-                entry,
-                outbound,
-                call_ctx,
-                &ctx.state.db,
-                upstream_model,
-            )
-            .await
-            {
-                Ok((resp, wire)) => {
-                    super::generate::read_whole(resp, &wire, caller_model, outbound.input_estimate)
-                        .await
-                        .map(|answer| (answer, wire.ledger))
+            let attempt = async {
+                match super::generate::send(
+                    entry,
+                    outbound,
+                    call_ctx,
+                    &ctx.state.db,
+                    upstream_model,
+                )
+                .await
+                {
+                    Ok((resp, wire)) => super::generate::read_whole(
+                        resp,
+                        &wire,
+                        caller_model,
+                        outbound.input_estimate,
+                    )
+                    .await
+                    .map(|answer| (answer, wire.ledger)),
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
+            };
+            // Cut at the hard deadline, so that the answer is an error the
+            // client and the log are told, not the request timeout's 408.
+            let result = match budget.hard_deadline() {
+                Some(hard) => {
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(hard), attempt).await
+                }
+                None => Ok(attempt.await),
             };
 
-            let attempt_latency_ms = attempt_started_at
-                .elapsed()
-                .as_millis()
-                .min(u32::MAX as u128) as u32;
+            last_took = attempt_started_at.elapsed();
+            let attempt_latency_ms = last_took.as_millis().min(u32::MAX as u128) as u32;
+
+            let Ok(result) = result else {
+                tracing::warn!(
+                    provider = %entry.provider_name,
+                    provider_id = %entry.provider_id,
+                    "Route still had not answered at the gateway's request timeout"
+                );
+                let _ = ctx
+                    .state
+                    .health
+                    .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
+                    .await;
+                // An earlier failure says more than the cut; with none,
+                // the upstream simply took too long.
+                return Err(last_error.unwrap_or_else(|| {
+                    GatewayError::ProviderTimeout(format!(
+                        "{} did not answer within the gateway's request timeout",
+                        entry.provider_name
+                    ))
+                }));
+            };
 
             match result {
                 Ok((response, ledger)) => {
@@ -498,6 +543,7 @@ pub(super) async fn select_route_with_failover<'a>(
                             started_at,
                             picked_latency_ms: Some(attempt_latency_ms),
                             retries: budget.retries(),
+                            counted: false,
                         },
                     ));
                 }
@@ -553,7 +599,7 @@ pub(super) async fn select_route_with_failover<'a>(
         // round sent something, its last failure was transient, and the
         // wait fits before the deadline.
         let wait = match &last_error {
-            Some(e) if attempted && !transient.is_empty() => budget.wait_after(e),
+            Some(e) if attempted && !transient.is_empty() => budget.wait_after_taking(e, last_took),
             _ => None,
         };
         let Some(wait) = wait else { break };
@@ -608,6 +654,7 @@ pub(super) async fn select_route_for_stream<'a>(
                 // picked route's wall time for the streaming case.
                 picked_latency_ms: None,
                 retries: 0,
+                counted: false,
             },
         ));
     }

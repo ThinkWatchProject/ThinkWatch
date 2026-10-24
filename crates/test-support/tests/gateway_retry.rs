@@ -50,10 +50,10 @@ async fn with_retries(secs: i64) -> TestApp {
     app
 }
 
-/// An overloaded upstream that says to come back in 50 ms.
+/// An overloaded upstream that says to come back in 250 ms.
 fn overloaded() -> ResponseTemplate {
     ResponseTemplate::new(503)
-        .insert_header("retry-after-ms", "50")
+        .insert_header("retry-after-ms", "250")
         .set_body_json(json!({"error": {"message": "overloaded"}}))
 }
 
@@ -143,6 +143,31 @@ async fn without_a_word_from_the_upstream_the_retry_waits_out_the_backoff() {
     assert_eq!(sent(&server).await, 2);
 }
 
+/// An upstream that says to come back at once is not asked again at
+/// once: a zero wait is no word at all, and the backoff applies.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_wait_of_zero_from_the_upstream_still_waits_out_the_backoff() {
+    let app = with_retries(30).await;
+    let now = ResponseTemplate::new(503)
+        .insert_header("retry-after-ms", "0")
+        .insert_header("retry-after", "0")
+        .set_body_json(json!({"error": {"message": "overloaded"}}));
+    let server = upstream("/v1/chat/completions", now, 1, chat_ok("retry-zero")).await;
+    let key = seed(&app, &server.uri(), "openai", "retry-zero").await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    let started = Instant::now();
+    gw.post("/v1/chat/completions", chat("retry-zero", false))
+        .await
+        .unwrap()
+        .assert_ok();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(1600), "{took:?}");
+    assert_eq!(sent(&server).await, 2);
+}
+
 /// A refusal — a bad request, the upstream's rate limit — is the answer:
 /// the upstream is asked once.
 #[ignore = "integration test — run via `make test-it`"]
@@ -155,7 +180,7 @@ async fn a_refusal_is_not_sent_again() {
         (404, "retry-404"),
     ] {
         let refusal = ResponseTemplate::new(status)
-            .insert_header("retry-after-ms", "50")
+            .insert_header("retry-after-ms", "250")
             .set_body_json(json!({"error": {"message": "no"}}));
         let server = upstream("/v1/chat/completions", refusal, 1, chat_ok(model)).await;
         let key = seed(&app, &server.uri(), "openai", model).await;
@@ -459,4 +484,83 @@ async fn a_stream_refused_before_any_content_is_not_sent_again() {
     assert_eq!(text.matches("event: message_start").count(), 1, "{text}");
     assert!(text.contains("prompt is too long"), "{text}");
     assert_eq!(sent(&server).await, 1);
+}
+
+/// While a stream waits to go out again, a Chat client hears a keep-alive
+/// comment after 15 seconds of silence; a Gemini client reading SSE does
+/// not — the google-genai SDK reads every line as JSON.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn only_non_gemini_clients_get_keep_alives_while_a_stream_waits() {
+    let app = with_retries(60).await;
+    let chunk = |model: &str, delta: Value, finish: Value| {
+        format!(
+            "data: {}\n\n",
+            json!({"id": "c", "object": "chat.completion.chunk", "created": 1, "model": model,
+                   "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+        )
+    };
+    let stream_of = |model: &str| {
+        [
+            chunk(model, json!({"content": "hello"}), Value::Null),
+            chunk(model, json!({}), json!("stop")),
+            "data: [DONE]\n\n".to_string(),
+        ]
+        .concat()
+    };
+    // Overloaded once, saying to come back in 16 s: longer than the
+    // keep-alive interval.
+    let busy = || {
+        ResponseTemplate::new(503)
+            .insert_header("retry-after-ms", "16000")
+            .set_body_json(json!({"error": {"message": "overloaded"}}))
+    };
+    let mut keys = Vec::new();
+    for model in ["retry-ka-chat", "retry-ka-gemini"] {
+        let ok = ResponseTemplate::new(200).set_body_raw(stream_of(model), "text/event-stream");
+        let server = upstream("/v1/chat/completions", busy(), 1, ok).await;
+        keys.push((seed(&app, &server.uri(), "openai", model).await, server));
+    }
+
+    let chat = async {
+        reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", app.gateway_url))
+            .bearer_auth(&keys[0].0)
+            .json(&chat("retry-ka-chat", true))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    let gemini = async {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/v1beta/models/retry-ka-gemini:streamGenerateContent?alt=sse",
+                app.gateway_url
+            ))
+            .header("x-goog-api-key", &keys[1].0)
+            .json(&json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    let (chat, gemini) = tokio::join!(chat, gemini);
+
+    assert!(chat.contains(": keep-alive\n\n"), "{chat}");
+    assert!(chat.contains("hello"), "{chat}");
+    assert!(gemini.contains("hello"), "{gemini}");
+    for line in gemini.lines().filter(|l| !l.is_empty()) {
+        let data = line
+            .strip_prefix("data: ")
+            .unwrap_or_else(|| panic!("not a data line: {line:?}\n{gemini}"));
+        serde_json::from_str::<Value>(data).unwrap_or_else(|e| panic!("{e}: {data}"));
+    }
+    for (_, server) in &keys {
+        assert_eq!(sent(server).await, 2);
+    }
 }

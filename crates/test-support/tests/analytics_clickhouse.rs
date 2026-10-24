@@ -973,7 +973,7 @@ async fn a_retried_request_says_so_on_its_log_row() {
     // Every request is overloaded once, then answered.
     let overloaded = || {
         ResponseTemplate::new(503)
-            .insert_header("retry-after-ms", "50")
+            .insert_header("retry-after-ms", "250")
             .set_body_json(json!({"error": {"message": "overloaded"}}))
     };
     let chunk = |delta: Value, finish: Value| {

@@ -139,6 +139,10 @@ pub(super) fn launch_stream_pump(
             deps.route.sel_record.started_at = sent.last_sent;
             deps.route.sel_record.retries = sent.retries;
         }
+        // The client left while the stream waited to go out again: the
+        // attempt that failed was counted against the route when the retry
+        // was decided, and nothing went out since.
+        deps.route.sel_record.counted = sent.waiting;
         run_post_invoke::<ChatCompletionSurface>(invoked, &deps).await;
     });
     response
