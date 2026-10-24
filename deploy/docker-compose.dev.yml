@@ -112,7 +112,7 @@ services:
 
   # --- Zitadel (OIDC / SSO provider for development) ---
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v4.19.5
+    image: ghcr.io/zitadel/zitadel:v4.20.0
     command: start-from-init --masterkeyFromEnv --tlsMode disabled
     environment:
       ZITADEL_MASTERKEY: "${ZITADEL_MASTERKEY:?ZITADEL_MASTERKEY is required (32 chars)}"
