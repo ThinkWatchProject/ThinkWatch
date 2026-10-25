@@ -70,10 +70,10 @@ opt-level = 3
 # never re-exported through a local shim. And the reverse: something only
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "14f52f25a434faf1e7336746b57c9ad8d8aebb96" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "14f52f25a434faf1e7336746b57c9ad8d8aebb96" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "14f52f25a434faf1e7336746b57c9ad8d8aebb96" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "14f52f25a434faf1e7336746b57c9ad8d8aebb96" }
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "9d5abe2f980fbd0983d5f2a84b232cb8fb4fea7a" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "9d5abe2f980fbd0983d5f2a84b232cb8fb4fea7a" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "9d5abe2f980fbd0983d5f2a84b232cb8fb4fea7a" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", rev = "9d5abe2f980fbd0983d5f2a84b232cb8fb4fea7a" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
