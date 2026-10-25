@@ -78,6 +78,9 @@ pub struct ModelRoutingConfig {
     /// limit. Carried alongside the routing overrides so the proxy reads
     /// everything model-scoped in one HashMap lookup.
     pub max_output_tokens: Option<u32>,
+    /// The model's reasoning setting (`models.reasoning_effort`): see
+    /// `proxy::effort`. `None` ⇒ requests go out as sent.
+    pub reasoning: Option<crate::proxy::effort::ReasoningSetting>,
 }
 
 /// Affinity scope — see `proxy.rs` for the runtime semantics.
@@ -334,6 +337,7 @@ mod tests {
                 affinity_mode: Some(AffinityMode::None),
                 affinity_ttl_secs: Some(60),
                 max_output_tokens: None,
+                reasoning: None,
             },
         );
         let cfg = router.config_for("gpt-4o-mini");

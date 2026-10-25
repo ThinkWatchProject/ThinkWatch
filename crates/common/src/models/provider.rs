@@ -65,6 +65,10 @@ pub struct Model {
     /// limit.
     #[serde(default)]
     pub max_output_tokens: Option<i32>,
+    /// The reasoning setting: `off`, or a level (`low` … `max`) for
+    /// requests whose reasoning is on. `None` ⇒ requests go out as sent.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_enabled() -> bool {

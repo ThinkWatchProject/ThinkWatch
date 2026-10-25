@@ -23,6 +23,7 @@ mod accounting;
 mod body_capture;
 pub(crate) mod cache_marks;
 mod early_cancel;
+pub mod effort;
 pub(crate) mod generate;
 mod headers;
 mod identity;

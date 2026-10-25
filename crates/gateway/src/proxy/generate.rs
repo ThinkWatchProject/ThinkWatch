@@ -46,6 +46,7 @@ use tw_dialect::ir::{Dialect, Target};
 
 use super::body_capture::prepare_body_capture;
 use super::early_cancel::EarlyCancelSlot;
+use super::effort::{self, EffortChange, Reason};
 use super::headers::{
     request_id_header, resolve_conversation_id, resolve_session_id, resolve_trace_id,
 };
@@ -249,6 +250,9 @@ pub(crate) struct Outbound {
     /// The model's output cap (`models.max_output_tokens`), applied to each
     /// hop as it is addressed (see [`Outbound::cap_output`]).
     pub max_output_tokens: Option<u32>,
+    /// The request's reasoning: what the caller asked, and what the model's
+    /// setting changed in `body` (see `super::effort`).
+    pub reasoning: effort::Applied,
 }
 
 /// The request as it goes out to one upstream, and what it takes to read
@@ -275,6 +279,9 @@ pub(crate) struct Wire {
     /// the caller marked none. An upstream that refuses them gets the
     /// request again without them (see `proxy::cache_marks`).
     pub auto_cache: bool,
+    /// This hop sends a different reasoning effort than the caller asked
+    /// for, and why (see `super::effort`).
+    pub effort: Option<EffortChange>,
 }
 
 impl Wire {
@@ -291,6 +298,48 @@ impl Wire {
             }
             None => false,
         }
+    }
+
+    /// The reasoning effort this hop sends, as its own format writes it.
+    fn sent_effort(&self) -> Option<tw_dialect::ir::Effort> {
+        effort::sent_effort(self.dialect, &self.body)
+    }
+
+    /// Send `to` for the reasoning effort instead (`None`: leave it out),
+    /// against what the caller `asked`. False when nothing changed.
+    fn resend_effort(
+        &mut self,
+        to: Option<tw_dialect::ir::Effort>,
+        asked: Option<tw_dialect::ir::Effort>,
+        reason: Reason,
+    ) -> bool {
+        if !effort::rewrite(self.dialect, &mut self.body, to) {
+            return false;
+        }
+        self.effort = Some(EffortChange {
+            asked,
+            sent: effort::Sent::of(self.sent_effort()),
+            reason,
+        });
+        true
+    }
+
+    /// This hop with the effort `memory` says the upstream takes instead
+    /// of the one it would send.
+    fn remembered(
+        mut self,
+        memory: &effort::Memory,
+        asked: Option<tw_dialect::ir::Effort>,
+    ) -> Wire {
+        if memory.is_empty() {
+            return self;
+        }
+        if let Some(sent) = self.sent_effort()
+            && let Some(instead) = memory.instead_of(sent, effort::now())
+        {
+            self.resend_effort(instead, asked, Reason::Remembered);
+        }
+        self
     }
 
     async fn send_to(
@@ -473,6 +522,7 @@ impl Outbound {
                 collect,
                 ledger,
                 auto_cache: false,
+                effort: self.reasoning.change,
             });
         }
 
@@ -514,6 +564,7 @@ impl Outbound {
             collect: prepared.session,
             ledger,
             auto_cache,
+            effort: self.reasoning.change,
         })
     }
 }
@@ -525,40 +576,94 @@ impl Outbound {
 /// added gets the request once more without them, and is remembered as
 /// refusing them for this model (see `proxy::cache_marks`).
 ///
-/// A rejected dialect or breakpoint is known before a single byte of body
-/// arrives — the status check happens inside `send` — so a stream needs
-/// no special handling: nothing has reached the client yet when the retry
-/// happens.
+/// An upstream that refuses the reasoning effort gets the request once
+/// more with the one it named, or without one, and is remembered as
+/// refusing it for this model when that is answered (see `proxy::effort`).
+/// A level it refused before goes out as what worked then.
+///
+/// A rejected dialect, breakpoint or effort is known before a single byte
+/// of body arrives — the status check happens inside `send` — so a stream
+/// needs no special handling: nothing has reached the client yet when the
+/// retry happens. None of these count as a retry (`proxy::retry`): the
+/// upstream did not fail, it refused something that can be left out.
 pub(crate) async fn send(
     entry: &RouteEntry,
     outbound: &Outbound,
     call_ctx: &CallCtx,
     db: &sqlx::PgPool,
+    redis: &fred::clients::Client,
     model: &str,
 ) -> Result<(reqwest::Response, Wire), GatewayError> {
     let upstream = &entry.upstream;
     let official = upstream.is_official();
+    let asked = outbound.reasoning.asked;
+    // Only a request with reasoning on sends an effort to refuse.
+    let memory = if outbound.reasoning.on {
+        effort::recall(redis, entry.provider_id, model).await
+    } else {
+        effort::Memory::default()
+    };
     let first = outbound
         .address(entry.protocol, model, official)?
-        .for_upstream(upstream, model);
+        .for_upstream(upstream, model)
+        .remembered(&memory, asked);
+    if let Some(change) = first.effort.filter(|c| c.reason == Reason::Remembered) {
+        tracing::info!(
+            provider = %entry.provider_name,
+            model,
+            effort = %change.detail(),
+            "Sending the reasoning effort the upstream took before instead of one it refused"
+        );
+    }
     // The format of the last request sent, to read its refusal in.
     let mut wire_dialect = first.dialect;
     let mut last = match first.send_to(upstream, call_ctx).await {
         Ok(resp) => return Ok((resp, first)),
         Err(e) => e,
     };
+    let mut wire = first;
 
-    if first.auto_cache && super::cache_marks::is_refusal(&last, &upstream.label) {
-        let mut wire = first;
-        if wire.drop_added_marks() {
-            upstream.cache_marks.note(model);
+    if wire.auto_cache
+        && super::cache_marks::is_refusal(&last, &upstream.label)
+        && wire.drop_added_marks()
+    {
+        upstream.cache_marks.note(model);
+        tracing::info!(
+            provider = %entry.provider_name,
+            model,
+            "Upstream refused the cache breakpoints added on conversion — sending again without them"
+        );
+        match wire.send_to(upstream, call_ctx).await {
+            Ok(resp) => return Ok((resp, wire)),
+            Err(e) => last = e,
+        }
+    }
+
+    // Read only off a 400: the body is parsed for it.
+    if matches!(last, GatewayError::ProviderHttpError { status: 400, .. })
+        && let Some(sent) = wire.sent_effort()
+        && let Some(fix) = effort::rejection(&last, &upstream.label, sent)
+    {
+        let instead = match fix {
+            tw_dialect::think::EffortFix::Use(e) => Some(e),
+            tw_dialect::think::EffortFix::Drop => None,
+        };
+        if wire.resend_effort(instead, asked, Reason::Rejected) {
             tracing::info!(
                 provider = %entry.provider_name,
                 model,
-                "Upstream refused the cache breakpoints added on conversion — sending again without them"
+                effort = %wire.effort.map(|c| c.detail()).unwrap_or_default(),
+                "Upstream refused the reasoning effort — sending again with one it takes"
             );
             match wire.send_to(upstream, call_ctx).await {
-                Ok(resp) => return Ok((resp, wire)),
+                Ok(resp) => {
+                    let (redis, provider_id, model) =
+                        (redis.clone(), entry.provider_id, model.to_string());
+                    tokio::spawn(async move {
+                        effort::remember(&redis, provider_id, &model, sent, instead).await;
+                    });
+                    return Ok((resp, wire));
+                }
                 Err(e) => last = e,
             }
         }
@@ -575,11 +680,14 @@ pub(crate) async fn send(
             );
             let wire = outbound
                 .address(*protocol, model, official)?
-                .for_upstream(upstream, model);
+                .for_upstream(upstream, model)
+                .remembered(&memory, asked);
             wire_dialect = wire.dialect;
             match wire.send_to(upstream, call_ctx).await {
                 Ok(resp) => {
                     super::protocol_relearn::persist(db, entry.route_id, *protocol).await;
+                    // What it refused was said in another format.
+                    effort::forget_provider(redis, entry.provider_id).await;
                     return Ok((resp, wire));
                 }
                 Err(e) => {
@@ -823,15 +931,19 @@ async fn run(
         })?
     };
 
-    // 6. The model's output cap. Applied to each hop as it is addressed
-    //    (`Outbound::cap_output`): whether to fill one in depends on the
-    //    upstream model, and the field on the upstream's format. The
-    //    upstream stops there by itself; the answer is not measured.
-    let max_output_tokens = state
-        .router
-        .load()
-        .config_for(&mapped_model)
-        .max_output_tokens;
+    // 6. The model's settings. The output cap is applied to each hop as it
+    //    is addressed (`Outbound::cap_output`): whether to fill one in
+    //    depends on the upstream model, and the field on the upstream's
+    //    format. The upstream stops there by itself; the answer is not
+    //    measured. The reasoning setting changes the caller's request here,
+    //    once, in its own format (see `super::effort`): a hop converted for
+    //    another format carries the changed effort the way that one writes
+    //    it.
+    let model_config = state.router.load().config_for(&mapped_model);
+    let max_output_tokens = model_config.max_output_tokens;
+    let mut outbound_body = outbound_body;
+    let reasoning =
+        effort::Applied::apply(model_config.reasoning, surface.dialect, &mut outbound_body);
 
     let call_ctx = CallCtx::new(
         Some(trace_id.clone()),
@@ -844,6 +956,9 @@ async fn run(
     //    otherwise repeating a cached prompt would get round every token
     //    limit.
     let cache_fingerprint = if surface.caches {
+        // The reasoning setting is already in the body: an answer made at
+        // one effort is not served for another, and a request the setting
+        // left alone shares its slot with the same request elsewhere.
         ResponseCache::fingerprint(&outbound_body).map(|mut fp| {
             // The cap is applied after this, per hop: an answer made under
             // one cap must not be served under another.
@@ -1041,6 +1156,7 @@ async fn run(
         redaction: guards.redaction.clone(),
         ledger: ledger.clone(),
         max_output_tokens,
+        reasoning,
     };
     let snapshot = |route: &RouteEntry, sel_record| crate::lifecycle::ChatPostInvokeDeps {
         state: state.clone(),
@@ -1104,19 +1220,23 @@ async fn run(
             let outbound = std::sync::Arc::new(outbound);
             let call_ctx = call_ctx.clone();
             let db = state.db.clone();
+            let redis = state.redis.clone();
             let model = entry
                 .upstream_model
                 .clone()
                 .unwrap_or_else(|| mapped_model.clone());
             Box::new(move || {
-                let (entry, outbound, call_ctx, db, model) = (
+                let (entry, outbound, call_ctx, db, redis, model) = (
                     entry.clone(),
                     outbound.clone(),
                     call_ctx.clone(),
                     db.clone(),
+                    redis.clone(),
                     model.clone(),
                 );
-                Box::pin(async move { send(&entry, &outbound, &call_ctx, &db, &model).await })
+                Box::pin(
+                    async move { send(&entry, &outbound, &call_ctx, &db, &redis, &model).await },
+                )
             })
         };
 
@@ -1349,7 +1469,138 @@ mod tests {
             redaction,
             ledger,
             max_output_tokens: cap,
+            reasoning: effort::Applied::default(),
         }
+    }
+
+    /// `body` from a `surface` caller, under the reasoning `setting`.
+    fn with_setting(
+        surface: ClientSurface,
+        path: &str,
+        mut body: Value,
+        setting: &str,
+    ) -> Outbound {
+        let setting = effort::ReasoningSetting::parse(setting);
+        let reasoning = effort::Applied::apply(setting, surface.dialect, &mut body);
+        Outbound {
+            reasoning,
+            ..outbound(surface, path, body, None)
+        }
+    }
+
+    #[test]
+    fn the_reasoning_setting_goes_out_on_every_hop_in_its_format() {
+        let ask = serde_json::json!({
+            "model": "gpt-5", "reasoning_effort": "xhigh",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "max");
+        assert_eq!(
+            outbound.reasoning.asked,
+            Some(tw_dialect::ir::Effort::XHigh)
+        );
+        // As sent, to a Chat upstream.
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(sent["reasoning_effort"], "max", "{sent}");
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "xhigh", "sent": "max", "reason": "setting"}))
+        );
+        // Converted, to a Responses upstream.
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5", false)
+            .unwrap();
+        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(sent["reasoning"]["effort"], "max", "{sent}");
+
+        // Off: no reasoning goes out at all.
+        let ask = serde_json::json!({
+            "model": "gpt-5", "reasoning": {"effort": "high"}, "input": "ping"
+        });
+        let outbound = with_setting(RESPONSES, "/v1/responses", ask, "off");
+        assert!(!outbound.reasoning.on);
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert!(sent.get("reasoning_effort").is_none(), "{sent}");
+
+        // A request without reasoning goes out as without the setting.
+        let ask = serde_json::json!({"model": "gpt-5", "messages": []});
+        let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "max");
+        assert_eq!(outbound.reasoning, effort::Applied::default());
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        assert_eq!(wire.effort, None);
+        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert!(sent.get("reasoning_effort").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn a_refused_effort_is_sent_again_as_what_the_upstream_took() {
+        use tw_dialect::ir::Effort;
+        let ask = serde_json::json!({
+            "model": "gpt-5", "reasoning_effort": "xhigh",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "");
+        assert_eq!(outbound.reasoning.change, None);
+        let mut wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        assert_eq!(wire.effort, None);
+        assert_eq!(wire.sent_effort(), Some(Effort::XHigh));
+
+        assert!(wire.resend_effort(
+            Some(Effort::High),
+            outbound.reasoning.asked,
+            Reason::Rejected
+        ));
+        assert_eq!(wire.sent_effort(), Some(Effort::High));
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "xhigh", "sent": "high", "reason": "rejected"}))
+        );
+        // Left out: the model's default.
+        assert!(wire.resend_effort(None, outbound.reasoning.asked, Reason::Rejected));
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "xhigh", "sent": null, "reason": "rejected"}))
+        );
+    }
+
+    #[test]
+    fn a_level_refused_before_goes_out_as_what_worked() {
+        use tw_dialect::ir::Effort;
+        let ask = serde_json::json!({
+            "model": "gpt-5", "reasoning_effort": "xhigh",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "");
+        let mut memory = effort::Memory::default();
+        memory.note(Effort::XHigh, Some(Effort::High), effort::now());
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap()
+            .remembered(&memory, outbound.reasoning.asked);
+        assert_eq!(wire.sent_effort(), Some(Effort::High));
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "xhigh", "sent": "high", "reason": "remembered"}))
+        );
+        // Another level: as sent.
+        let mut other = effort::Memory::default();
+        other.note(Effort::Max, None, effort::now());
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap()
+            .remembered(&other, outbound.reasoning.asked);
+        assert_eq!(wire.sent_effort(), Some(Effort::XHigh));
+        assert_eq!(wire.effort, None);
     }
 
     /// The body a Chat caller's request goes out with to a Chat upstream,

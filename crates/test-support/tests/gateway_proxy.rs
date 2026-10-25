@@ -665,3 +665,247 @@ async fn an_upstream_that_refuses_added_cache_breakpoints_gets_the_request_witho
     assert_eq!(sent.len(), 3);
     assert!(!String::from_utf8_lossy(&sent[2].body).contains("cache_control"));
 }
+
+/// A Chat upstream that takes reasoning efforts up to `high`: a request
+/// asking for more is refused with a 400 naming the ones it takes, the
+/// way OpenAI words it.
+async fn chat_upstream_up_to_high() -> MockProvider {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, Request, ResponseTemplate};
+    let upstream = MockProvider {
+        server: wiremock::MockServer::start().await,
+    };
+    upstream
+        .mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(|req: &Request| {
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                    let effort = body["reasoning_effort"].as_str().unwrap_or("");
+                    if matches!(effort, "xhigh" | "max") {
+                        return ResponseTemplate::new(400).set_body_json(json!({"error": {
+                            "message": format!("Unsupported value: '{effort}' is not supported with this model. Supported values are: 'low', 'medium', and 'high'."),
+                            "type": "invalid_request_error",
+                            "param": "reasoning_effort",
+                            "code": "unsupported_value",
+                        }}));
+                    }
+                    let usage = json!({"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2});
+                    if body["stream"] == true {
+                        let chunk = |choices: Value, usage: Value| {
+                            format!(
+                                "data: {}\n\n",
+                                json!({"id": "c", "object": "chat.completion.chunk", "created": 0,
+                                       "model": "m", "choices": choices, "usage": usage})
+                            )
+                        };
+                        let sse = [
+                            chunk(
+                                json!([{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": null}]),
+                                Value::Null,
+                            ),
+                            chunk(json!([{"index": 0, "delta": {}, "finish_reason": "stop"}]), Value::Null),
+                            chunk(json!([]), usage),
+                            "data: [DONE]\n\n".to_string(),
+                        ]
+                        .concat();
+                        ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(json!({
+                            "id": "c", "object": "chat.completion", "created": 0, "model": "m",
+                            "choices": [{"index": 0, "finish_reason": "stop",
+                                         "message": {"role": "assistant", "content": "hi"}}],
+                            "usage": usage,
+                        }))
+                    }
+                }),
+        )
+        .await;
+    upstream
+}
+
+/// The reasoning efforts `upstream` received, in order.
+async fn efforts_sent(upstream: &MockProvider) -> Vec<Option<String>> {
+    upstream
+        .received_requests()
+        .await
+        .iter()
+        .map(|r| {
+            let body: Value = r.body_json().unwrap();
+            body["reasoning_effort"].as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+/// `model` on `upstream` (OpenAI Chat), with the reasoning `setting`, and a
+/// key: the provider's id and the key.
+async fn seed_reasoning(
+    app: &TestApp,
+    upstream: &str,
+    model: &str,
+    setting: Option<&str>,
+) -> (Uuid, String) {
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let provider =
+        fixtures::create_provider(&app.db, &unique_name("effort"), "openai", upstream, None)
+            .await
+            .unwrap();
+    fixtures::create_model_and_route(&app.db, provider.id, model)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE models SET reasoning_effort = $1 WHERE model_id = $2")
+        .bind(setting)
+        .bind(model)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    let key =
+        fixtures::create_api_key(&app.db, user.user.id, "effort", &["ai_gateway"], None, None)
+            .await
+            .unwrap()
+            .plaintext;
+    (provider.id, key)
+}
+
+/// A refused reasoning effort goes to the same upstream once more with the
+/// level it named, the client gets the answer, and later requests send
+/// that level straight away — streamed or not.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_refused_reasoning_effort_is_resent_once_and_remembered() {
+    use fred::interfaces::HashesInterface;
+    // The provider's new base URL is the loopback mock again.
+    let app = TestApp::spawn_reaching_loopback().await;
+    let upstream = chat_upstream_up_to_high().await;
+    let model = "effort-refused";
+    let (provider_id, key) = seed_reasoning(&app, &upstream.uri(), model, None).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    // Sampled at a temperature: a repeated request is not a cache hit.
+    let ask = |stream: bool| {
+        json!({"model": model, "stream": stream, "temperature": 0.5,
+               "reasoning_effort": "xhigh",
+               "messages": [{"role": "user", "content": "ping"}]})
+    };
+
+    let resp = gw.post("/v1/chat/completions", ask(false)).await.unwrap();
+    resp.assert_ok();
+    assert_eq!(
+        efforts_sent(&upstream).await,
+        [Some("xhigh".into()), Some("high".into())]
+    );
+
+    // Remembered once the resend was answered (written in the background).
+    let memory_key = format!("effort_memory:{{provider:{provider_id}}}");
+    let mut remembered: Option<String> = None;
+    for _ in 0..50 {
+        remembered = app.state.redis.hget(&memory_key, model).await.unwrap();
+        if remembered.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let remembered: Value = serde_json::from_str(&remembered.expect("remembered")).unwrap();
+    assert_eq!(remembered["xhigh"]["use"], "high", "{remembered}");
+
+    // Now straight to `high`, for a whole answer and a stream alike.
+    for stream in [false, true] {
+        let before = upstream.received_requests().await.len();
+        let resp = gw.post("/v1/chat/completions", ask(stream)).await.unwrap();
+        resp.assert_ok();
+        assert_eq!(
+            efforts_sent(&upstream).await[before..],
+            [Some("high".to_string())],
+            "stream={stream}"
+        );
+    }
+
+    // A changed endpoint forgets: another upstream may take `xhigh`.
+    let (console, _) = admin_session_with_user(&app).await;
+    console
+        .patch(
+            &format!("/api/admin/providers/{provider_id}"),
+            json!({"base_url": upstream.uri()}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+    let gone: Option<String> = app.state.redis.hget(&memory_key, model).await.unwrap();
+    assert_eq!(gone, None);
+}
+
+/// A refused effort refused again is the answer: one resend, no more.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn an_effort_refused_twice_is_the_answer() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider {
+        server: wiremock::MockServer::start().await,
+    };
+    upstream
+        .mount(
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": {
+                    "message": "reasoning_effort: only 'low' or 'medium' are allowed",
+                    "type": "invalid_request_error"}}))),
+        )
+        .await;
+    let (_, key) = seed_reasoning(&app, &upstream.uri(), "effort-twice", None).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "effort-twice", "reasoning_effort": "high",
+                   "messages": [{"role": "user", "content": "ping"}]}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(400);
+    assert_eq!(
+        efforts_sent(&upstream).await,
+        [Some("high".into()), Some("medium".into())]
+    );
+}
+
+/// The model's setting: a level changes requests that have reasoning on
+/// and leaves the rest alone; `off` takes reasoning out.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn the_models_reasoning_setting_rewrites_requests_with_reasoning_on() {
+    let app = TestApp::spawn().await;
+    let upstream = chat_upstream_up_to_high().await;
+    let (_, key) = seed_reasoning(&app, &upstream.uri(), "effort-medium", Some("medium")).await;
+    let (_, off_key) = seed_reasoning(&app, &upstream.uri(), "effort-off", Some("off")).await;
+    let gw = app.gateway_client();
+
+    gw.set_bearer(&key);
+    for (n, effort) in [(1, Some("low")), (2, None)] {
+        let mut body = json!({"model": "effort-medium", "temperature": 0.1 * f64::from(n),
+                              "messages": [{"role": "user", "content": "ping"}]});
+        if let Some(e) = effort {
+            body["reasoning_effort"] = json!(e);
+        }
+        gw.post("/v1/chat/completions", body)
+            .await
+            .unwrap()
+            .assert_ok();
+    }
+    // `low` became `medium`; the request without reasoning stayed without.
+    assert_eq!(efforts_sent(&upstream).await, [Some("medium".into()), None]);
+
+    gw.set_bearer(&off_key);
+    gw.post(
+        "/v1/chat/completions",
+        json!({"model": "effort-off", "reasoning_effort": "high",
+               "messages": [{"role": "user", "content": "ping"}]}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    assert_eq!(efforts_sent(&upstream).await[2..], [None]);
+}

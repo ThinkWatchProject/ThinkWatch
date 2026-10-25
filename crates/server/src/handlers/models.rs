@@ -124,6 +124,12 @@ pub struct CreateModelRequest {
     /// for nothing gets it. NULL/missing = no limit.
     #[serde(default)]
     pub max_output_tokens: Option<i64>,
+    /// The reasoning setting: `off` takes reasoning out of requests that
+    /// have it on; `low` / `medium` / `high` / `xhigh` / `max` change the
+    /// effort of requests whose reasoning is on. NULL/missing = requests
+    /// go out as sent.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     /// Removed: see [`refuse_output_guardrails`].
     #[serde(default)]
     #[schema(value_type = Option<Vec<serde_json::Value>>, deprecated)]
@@ -175,6 +181,7 @@ pub async fn create_model(
     )?;
     refuse_output_guardrails(req.output_guardrails.as_ref())?;
     let max_output_tokens = max_output_tokens(req.max_output_tokens)?;
+    let reasoning_effort = reasoning_effort(req.reasoning_effort)?;
 
     let model = repo::insert(
         &state.db,
@@ -188,6 +195,7 @@ pub async fn create_model(
             affinity_ttl_secs: req.affinity_ttl_secs,
             tags: req.tags.as_deref(),
             max_output_tokens,
+            reasoning_effort: reasoning_effort.as_deref(),
             cache_weights: cache,
         },
     )
@@ -207,9 +215,9 @@ pub async fn create_model(
     // the 5-min TTL elapses.
     state.weight_cache.invalidate_all().await;
 
-    // The output cap is read from the router's per-model config; a route
-    // naming this model id may already exist.
-    if max_output_tokens.is_some() {
+    // The output cap and the reasoning setting are read from the router's
+    // per-model config; a route naming this model id may already exist.
+    if max_output_tokens.is_some() || reasoning_effort.is_some() {
         crate::app::rebuild_gateway_router(&state).await;
     }
 
@@ -254,6 +262,11 @@ pub struct UpdateModelRequest {
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<i64>)]
     pub max_output_tokens: Option<Option<i64>>,
+    /// PATCH-clearable reasoning setting. Absent = unchanged, JSON `null`
+    /// = clear (requests go out as sent), string = one of off / low /
+    /// medium / high / xhigh / max.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub reasoning_effort: Option<Option<String>>,
     /// Removed: see [`refuse_output_guardrails`].
     #[serde(default)]
     #[schema(value_type = Option<Vec<serde_json::Value>>, deprecated)]
@@ -290,6 +303,20 @@ pub(crate) fn max_output_tokens(n: Option<i64>) -> Result<Option<i32>, AppError>
         })
     })
     .transpose()
+}
+
+/// A model's reasoning setting as stored: one of
+/// `think_watch_gateway::proxy::effort::SETTINGS`, or none — the column's
+/// CHECK, as a useful 400.
+pub(crate) fn reasoning_effort(value: Option<String>) -> Result<Option<String>, AppError> {
+    use think_watch_gateway::proxy::effort::SETTINGS;
+    match value {
+        Some(v) if !SETTINGS.contains(&v.as_str()) => Err(AppError::BadRequest(format!(
+            "reasoning_effort must be one of: {}",
+            SETTINGS.join(", ")
+        ))),
+        v => Ok(v),
+    }
 }
 
 /// Cache weights may be zero (an upstream that does not bill cache
@@ -402,6 +429,10 @@ pub async fn update_model(
         None => existing.max_output_tokens,
         Some(inner) => max_output_tokens(inner)?,
     };
+    let new_reasoning_effort: Option<String> = match req.reasoning_effort {
+        None => existing.reasoning_effort.clone(),
+        Some(inner) => reasoning_effort(inner)?,
+    };
     validate_routing_overrides(
         new_strategy.as_deref(),
         new_affinity_mode.as_deref(),
@@ -423,6 +454,7 @@ pub async fn update_model(
             affinity_ttl_secs: new_affinity_ttl,
             tags: new_tags.as_deref(),
             max_output_tokens: new_max_output_tokens,
+            reasoning_effort: new_reasoning_effort.as_deref(),
             cache_weights: cache,
         },
         req.enabled.unwrap_or(existing.enabled),
@@ -1648,5 +1680,28 @@ mod tests {
         let set: UpdateModelRequest =
             serde_json::from_value(serde_json::json!({"max_output_tokens": 4096})).unwrap();
         assert_eq!(set.max_output_tokens, Some(Some(4096)));
+
+        assert_eq!(absent.reasoning_effort, None);
+        let cleared: UpdateModelRequest =
+            serde_json::from_value(serde_json::json!({"reasoning_effort": null})).unwrap();
+        assert_eq!(cleared.reasoning_effort, Some(None));
+        let set: UpdateModelRequest =
+            serde_json::from_value(serde_json::json!({"reasoning_effort": "max"})).unwrap();
+        assert_eq!(set.reasoning_effort, Some(Some("max".into())));
+    }
+
+    #[test]
+    fn the_reasoning_setting_is_off_or_a_level() {
+        assert_eq!(reasoning_effort(None).unwrap(), None);
+        for ok in ["off", "low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(
+                reasoning_effort(Some(ok.into())).unwrap().as_deref(),
+                Some(ok)
+            );
+        }
+        for bad in ["minimal", "none", "on", "", "High"] {
+            let e = reasoning_effort(Some(bad.into())).unwrap_err();
+            assert!(e.to_string().contains("reasoning_effort"), "{bad}: {e}");
+        }
     }
 }

@@ -37,7 +37,20 @@ export interface ModelRow {
   /// gets it when it is within the model family's default (32,000 for
   /// Claude, 8,192 for others). null ⇒ no limit.
   max_output_tokens?: number | null;
+  /// Reasoning setting; null ⇒ requests go out as sent.
+  reasoning_effort?: ReasoningEffort | null;
 }
+
+/// `off` takes reasoning out of requests that have it on; a level
+/// changes the effort of requests whose reasoning is on. Mirrors
+/// `SETTINGS` in `crates/gateway/src/proxy/effort.rs`.
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export const REASONING_EFFORTS: ReasoningEffort[] = ['off', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+/// The five levels are shown as the APIs write them; only "off" is
+/// translated.
+export const REASONING_LEVELS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /// Upper bound the form accepts for `max_output_tokens` — the largest
 /// value a Postgres `INTEGER` column holds.
@@ -156,6 +169,8 @@ export interface ModelFormState {
   affinity_ttl_secs: string;
   /// Empty string ⇒ no limit (stored as NULL).
   max_output_tokens: string;
+  /// Empty string ⇒ unchanged (stored as NULL).
+  reasoning_effort: '' | ReasoningEffort;
 }
 
 export interface RouteFormState {
@@ -183,6 +198,7 @@ export const emptyModelForm: ModelFormState = {
   affinity_mode: '',
   affinity_ttl_secs: '',
   max_output_tokens: '',
+  reasoning_effort: '',
 };
 
 export const emptyRouteForm: RouteFormState = {
