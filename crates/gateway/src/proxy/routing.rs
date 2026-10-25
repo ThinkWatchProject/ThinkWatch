@@ -298,6 +298,10 @@ pub(crate) struct SelectionRecord {
     /// failure before this route answered (see `super::retry`). Said on
     /// the log row as `"retries"`.
     pub retries: u32,
+    /// The hop that answered sent a different reasoning effort than the
+    /// caller asked (see `super::effort`). Said on the log row as
+    /// `"effort"`.
+    pub effort: Option<super::effort::EffortChange>,
     /// The request's last attempt was already counted against the route:
     /// a stream whose client left while it waited to go out again.
     pub counted: bool,
@@ -475,6 +479,7 @@ pub(super) async fn select_route_with_failover<'a>(
                     outbound,
                     call_ctx,
                     &ctx.state.db,
+                    &ctx.state.redis,
                     upstream_model,
                 )
                 .await
@@ -486,7 +491,7 @@ pub(super) async fn select_route_with_failover<'a>(
                         outbound.input_estimate,
                     )
                     .await
-                    .map(|answer| (answer, wire.ledger)),
+                    .map(|answer| (answer, wire.ledger, wire.effort)),
                     Err(e) => Err(e),
                 }
             };
@@ -524,7 +529,7 @@ pub(super) async fn select_route_with_failover<'a>(
             };
 
             match result {
-                Ok((response, ledger)) => {
+                Ok((response, ledger, effort)) => {
                     set_affinity(
                         &ctx.state.redis,
                         ctx.user_id,
@@ -543,6 +548,7 @@ pub(super) async fn select_route_with_failover<'a>(
                             started_at,
                             picked_latency_ms: Some(attempt_latency_ms),
                             retries: budget.retries(),
+                            effort,
                             counted: false,
                         },
                     ));
@@ -654,6 +660,7 @@ pub(super) async fn select_route_for_stream<'a>(
                 // picked route's wall time for the streaming case.
                 picked_latency_ms: None,
                 retries: 0,
+                effort: None,
                 counted: false,
             },
         ));

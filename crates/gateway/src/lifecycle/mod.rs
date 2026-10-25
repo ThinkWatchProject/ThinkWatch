@@ -185,6 +185,9 @@ pub(crate) struct Sent {
     /// Waiting to go out again: the attempt that failed was counted
     /// against the route already, and nothing is under way.
     pub waiting: bool,
+    /// The attempt under way sent a different reasoning effort than the
+    /// caller asked (see `proxy::effort`).
+    pub effort: Option<crate::proxy::effort::EffortChange>,
 }
 
 /// Build the streaming pump: forward the upstream's bytes to the caller —
@@ -284,6 +287,7 @@ pub(crate) fn build_chat_pump(
         retries: 0,
         last_sent: std::time::Instant::now(),
         waiting: false,
+        effort: None,
     }));
     // Gemini clients get no keep-alive comments: the google-genai SDK reads
     // every SSE line as JSON.
@@ -314,7 +318,7 @@ pub(crate) fn build_chat_pump(
             }
             let sent_at = std::time::Instant::now();
             if let Ok(mut s) = sent.lock() {
-                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at, waiting: false };
+                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at, waiting: false, effort: None };
             }
             // What an attempt that failed had read is not this one's: its
             // usage is not billed, its error not the request's.
@@ -365,6 +369,9 @@ pub(crate) fn build_chat_pump(
                     return;
                 }
             };
+            if let Ok(mut s) = sent.lock() {
+                s.effort = wire.effort;
+            }
             if let Ok(mut r) = readers.lock() {
                 *r = Readers {
                     sniffer: Some(tw_dialect::usage::Sniffer::new()),
@@ -683,6 +690,7 @@ pub(crate) fn build_chat_pump(
             retries: 0,
             last_sent: started_at,
             waiting: false,
+            effort: None,
         });
         let invoked = Invoked {
             client_ip: identity.ip_address.clone(),
@@ -1099,6 +1107,7 @@ fn resending(
             retries: retry,
             last_sent: std::time::Instant::now(),
             waiting: true,
+            effort: None,
         };
     }
     tracing::info!(
@@ -1524,9 +1533,12 @@ impl Surface for ChatCompletionSurface {
             deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
             with_usage_detail(
-                retried_detail(
-                    pinned_detail(error_detail, deps.route.pinned),
-                    deps.route.sel_record.retries,
+                effort_detail(
+                    retried_detail(
+                        pinned_detail(error_detail, deps.route.pinned),
+                        deps.route.sel_record.retries,
+                    ),
+                    deps.route.sel_record.effort,
                 ),
                 &usage,
                 usage_estimated(&invoked.view),
@@ -1591,6 +1603,23 @@ fn retried_detail(detail: Option<serde_json::Value>, retries: u32) -> Option<ser
         _ => serde_json::Map::new(),
     };
     d.insert("retries".into(), retries.into());
+    Some(serde_json::Value::Object(d))
+}
+
+/// The audit detail, with `"effort"` when the hop that answered sent a
+/// different reasoning effort than the caller asked (see `proxy::effort`).
+fn effort_detail(
+    detail: Option<serde_json::Value>,
+    effort: Option<crate::proxy::effort::EffortChange>,
+) -> Option<serde_json::Value> {
+    let Some(effort) = effort else {
+        return detail;
+    };
+    let mut d = match detail {
+        Some(serde_json::Value::Object(d)) => d,
+        _ => serde_json::Map::new(),
+    };
+    d.insert("effort".into(), effort.detail());
     Some(serde_json::Value::Object(d))
 }
 
@@ -1822,6 +1851,7 @@ mod tests {
             retries: 0,
             last_sent: std::time::Instant::now(),
             waiting: false,
+            effort: None,
         });
         resending(
             "up",
@@ -1985,6 +2015,24 @@ mod tests {
         };
         r.feed(other.as_bytes());
         assert!(r.sealed_refusal().is_none());
+    }
+
+    #[test]
+    fn a_changed_reasoning_effort_is_said_on_the_log_row() {
+        use crate::proxy::effort::{EffortChange, Reason};
+        assert_eq!(effort_detail(None, None), None);
+        let change = EffortChange {
+            asked: "xhigh",
+            sent: Some("high"),
+            reason: Reason::Rejected,
+        };
+        assert_eq!(
+            effort_detail(Some(serde_json::json!({"retries": 1})), Some(change)),
+            Some(serde_json::json!({
+                "retries": 1,
+                "effort": {"asked": "xhigh", "sent": "high", "reason": "rejected"},
+            }))
+        );
     }
 
     #[test]

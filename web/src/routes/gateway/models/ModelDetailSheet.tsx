@@ -164,6 +164,16 @@ export function ModelDetailSheet({
                         </div>
                       </div>
                     </div>
+                    <div className="text-xs">
+                      <div className="text-muted-foreground">{t('models.field.reasoningEffort')}</div>
+                      <div className="font-mono">
+                        {model.reasoning_effort == null
+                          ? t('models.reasoning.keep')
+                          : model.reasoning_effort === 'off'
+                            ? t('models.reasoning.off')
+                            : model.reasoning_effort}
+                      </div>
+                    </div>
                     <div className="grid grid-cols-3 gap-2 text-xs">
                       {CACHE_WEIGHTS.map((k) => (
                         <div key={k}>

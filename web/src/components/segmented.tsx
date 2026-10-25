@@ -22,6 +22,7 @@ export function Segmented<T extends string>({
   label,
   disabled = false,
   size = 'default',
+  fill = false,
   className,
 }: {
   value: T;
@@ -31,6 +32,8 @@ export function Segmented<T extends string>({
   label: string;
   disabled?: boolean;
   size?: 'sm' | 'default';
+  /** Take the whole row, the options sharing it equally. */
+  fill?: boolean;
   className?: string;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -57,7 +60,8 @@ export function Segmented<T extends string>({
       aria-disabled={disabled || undefined}
       onKeyDown={onKeyDown}
       className={cn(
-        'inline-flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5',
+        fill ? 'flex w-full' : 'inline-flex',
+        'items-center gap-0.5 rounded-md border bg-muted/30 p-0.5',
         size === 'sm' ? 'text-xs' : 'text-sm',
         className,
       )}
@@ -77,7 +81,8 @@ export function Segmented<T extends string>({
             disabled={disabled || o.disabled}
             onClick={() => !checked && onChange(o.value)}
             className={cn(
-              'rounded px-2.5 font-medium whitespace-nowrap transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
+              fill ? 'flex-auto px-1.5' : 'px-2.5',
+              'rounded font-medium whitespace-nowrap transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
               size === 'sm' ? 'py-0.5' : 'py-1',
               checked
                 ? 'bg-background text-foreground shadow-sm'

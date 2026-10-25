@@ -1252,10 +1252,11 @@ pub(crate) async fn load_providers_into_router(
         affinity_mode: Option<String>,
         affinity_ttl_secs: Option<i32>,
         max_output_tokens: Option<i32>,
+        reasoning_effort: Option<String>,
     }
     let model_rows = sqlx::query_as::<_, ModelRow>(
         r#"SELECT model_id, routing_strategy, affinity_mode, affinity_ttl_secs,
-                  max_output_tokens
+                  max_output_tokens, reasoning_effort
              FROM models"#,
     )
     .fetch_all(&state.db)
@@ -1281,6 +1282,10 @@ pub(crate) async fn load_providers_into_router(
                 .max_output_tokens
                 .and_then(|v| u32::try_from(v).ok())
                 .filter(|v| *v > 0),
+            reasoning: m
+                .reasoning_effort
+                .as_deref()
+                .and_then(think_watch_gateway::proxy::effort::ReasoningSetting::parse),
         };
         // Skip storing the all-default config (saves a HashMap entry
         // per model that's just inheriting global defaults).
@@ -1288,6 +1293,7 @@ pub(crate) async fn load_providers_into_router(
             || cfg.affinity_mode.is_some()
             || cfg.affinity_ttl_secs.is_some()
             || cfg.max_output_tokens.is_some()
+            || cfg.reasoning.is_some()
         {
             router.set_model_config(&m.model_id, cfg);
         }

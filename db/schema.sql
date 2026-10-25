@@ -385,6 +385,13 @@ CREATE TABLE IF NOT EXISTS models (
     -- is lowered to it, and a request without one gets it. NULL ⇒ no
     -- limit. See crates/gateway/src/proxy/generate.rs.
     max_output_tokens INTEGER CHECK (max_output_tokens IS NULL OR max_output_tokens > 0),
+    -- The reasoning setting: 'off' takes reasoning out of requests that
+    -- have it on; a level changes the effort of requests whose reasoning
+    -- is on. NULL ⇒ requests go out as sent. See
+    -- crates/gateway/src/proxy/effort.rs.
+    reasoning_effort  TEXT
+        CHECK (reasoning_effort IS NULL
+               OR reasoning_effort IN ('off', 'low', 'medium', 'high', 'xhigh', 'max')),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -401,6 +408,9 @@ ALTER TABLE models ADD COLUMN IF NOT EXISTS cache_write_1h_weight
 -- after this file (crates/common/src/guard_policy/legacy.rs).
 ALTER TABLE models ADD COLUMN IF NOT EXISTS max_output_tokens
     INTEGER CHECK (max_output_tokens IS NULL OR max_output_tokens > 0);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS reasoning_effort
+    TEXT CHECK (reasoning_effort IS NULL
+                OR reasoning_effort IN ('off', 'low', 'medium', 'high', 'xhigh', 'max'));
 
 -- Platform-wide per-token pricing baseline. Single-row singleton
 -- (PK pinned to 1 via CHECK). `cost($) = tokens × weight × baseline`.
