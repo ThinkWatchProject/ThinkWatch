@@ -2019,12 +2019,11 @@ mod tests {
 
     #[test]
     fn a_changed_reasoning_effort_is_said_on_the_log_row() {
-        use crate::proxy::effort::{EffortChange, Reason, Sent};
-        use tw_dialect::ir::Effort;
+        use crate::proxy::effort::{EffortChange, Reason};
         assert_eq!(effort_detail(None, None), None);
         let change = EffortChange {
-            asked: Some(Effort::XHigh),
-            sent: Sent::Level(Effort::High),
+            asked: "xhigh",
+            sent: Some("high"),
             reason: Reason::Rejected,
         };
         assert_eq!(

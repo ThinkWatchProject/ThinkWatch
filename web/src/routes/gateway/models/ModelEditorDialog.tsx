@@ -346,6 +346,7 @@ export function ModelEditorDialog({
               <div>
                 <Segmented<'keep' | ReasoningEffort>
                   size="sm"
+                  fill
                   label={t('models.field.reasoningEffort')}
                   value={form.reasoning_effort === '' ? 'keep' : form.reasoning_effort}
                   options={[

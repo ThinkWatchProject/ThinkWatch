@@ -60,6 +60,8 @@ use super::routing::{
 use super::sealed::Conversation;
 use super::shaper::{StreamShaper, rewrite_model};
 use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
+use tw_dialect::params::WrittenEffort;
+use tw_dialect::think::EffortFix;
 
 use crate::cache::ResponseCache;
 use crate::guards::Caller;
@@ -250,9 +252,9 @@ pub(crate) struct Outbound {
     /// The model's output cap (`models.max_output_tokens`), applied to each
     /// hop as it is addressed (see [`Outbound::cap_output`]).
     pub max_output_tokens: Option<u32>,
-    /// The request's reasoning: what the caller asked, and what the model's
-    /// setting changed in `body` (see `super::effort`).
-    pub reasoning: effort::Applied,
+    /// The request's reasoning: the model's setting, applied to each hop
+    /// as it is addressed, and what the caller asked (see `super::effort`).
+    pub reasoning: effort::Asked,
 }
 
 /// The request as it goes out to one upstream, and what it takes to read
@@ -279,9 +281,14 @@ pub(crate) struct Wire {
     /// the caller marked none. An upstream that refuses them gets the
     /// request again without them (see `proxy::cache_marks`).
     pub auto_cache: bool,
-    /// This hop sends a different reasoning effort than the caller asked
-    /// for, and why (see `super::effort`).
+    /// This hop sends another reasoning effort than it would have, and why
+    /// (see `super::effort`).
     pub effort: Option<EffortChange>,
+    /// The effort written before the memory rewrote it: what a refusal of
+    /// the rewritten one is remembered under. `None`: not rewritten.
+    pub pre: Option<WrittenEffort>,
+    /// The memory rewrote the effort.
+    pub remembered: bool,
 }
 
 impl Wire {
@@ -300,44 +307,37 @@ impl Wire {
         }
     }
 
-    /// The reasoning effort this hop sends, as its own format writes it.
-    fn sent_effort(&self) -> Option<tw_dialect::ir::Effort> {
-        effort::sent_effort(self.dialect, &self.body)
+    /// The reasoning effort this hop writes, as its own format writes it.
+    fn written_effort(&self) -> Option<WrittenEffort> {
+        effort::written(self.dialect, &self.body)
     }
 
-    /// Send `to` for the reasoning effort instead (`None`: leave it out),
-    /// against what the caller `asked`. False when nothing changed.
-    fn resend_effort(
-        &mut self,
-        to: Option<tw_dialect::ir::Effort>,
-        asked: Option<tw_dialect::ir::Effort>,
-        reason: Reason,
-    ) -> bool {
-        if !effort::rewrite(self.dialect, &mut self.body, to) {
+    /// Rewrite the written effort as `fix` says, in place of `replaced`.
+    /// False when nothing changed.
+    fn fix_effort(&mut self, fix: EffortFix, replaced: WrittenEffort, reason: Reason) -> bool {
+        let Some(sent) = effort::apply_fix(self.dialect, &mut self.body, fix) else {
             return false;
-        }
+        };
         self.effort = Some(EffortChange {
-            asked,
-            sent: effort::Sent::of(self.sent_effort()),
+            asked: replaced.slug(),
+            sent,
             reason,
         });
         true
     }
 
     /// This hop with the effort `memory` says the upstream takes instead
-    /// of the one it would send.
-    fn remembered(
-        mut self,
-        memory: &effort::Memory,
-        asked: Option<tw_dialect::ir::Effort>,
-    ) -> Wire {
+    /// of the one it writes.
+    fn remembered(mut self, memory: &effort::Memory) -> Wire {
         if memory.is_empty() {
             return self;
         }
-        if let Some(sent) = self.sent_effort()
-            && let Some(instead) = memory.instead_of(sent, effort::now())
+        if let Some(written) = self.written_effort()
+            && let Some(fix) = memory.instead_of(written, effort::now())
+            && self.fix_effort(fix, written, Reason::Remembered)
         {
-            self.resend_effort(instead, asked, Reason::Remembered);
+            self.pre = Some(written);
+            self.remembered = true;
         }
         self
     }
@@ -463,10 +463,22 @@ impl Outbound {
                 .map_err(|r| GatewayError::TransformError(r.0))
         };
 
+        // The model's reasoning setting, for the model named upstream, on
+        // the caller's request in its own format.
+        let mut source = std::borrow::Cow::Borrowed(&self.body);
+        let mut setting_change = None;
+        if let Some(setting) = self.reasoning.setting {
+            let mut body = self.body.clone();
+            if setting.apply(client, &mut body, model) {
+                setting_change = self.reasoning.change(client, &body);
+                source = std::borrow::Cow::Owned(body);
+            }
+        }
+
         if protocol.dialect() == client {
             // Forwarded as sent. Only the model changes, and a Chat
             // stream always asks for its usage (see `hides_usage`).
-            let mut body = self.body.clone();
+            let mut body = source.into_owned();
             let (path, query) = if client == Dialect::Gemini {
                 // Gemini names the model in the path, and is always asked
                 // for SSE (see `GEMINI_SSE`).
@@ -522,11 +534,13 @@ impl Outbound {
                 collect,
                 ledger,
                 auto_cache: false,
-                effort: self.reasoning.change,
+                effort: setting_change,
+                pre: None,
+                remembered: false,
             });
         }
 
-        let mut decoded = decode(&self.body)?;
+        let mut decoded = decode(&source)?;
         decoded.request.model = model.to_string();
         let prepared = decoded.encode(&target(protocol.dialect()));
         if !prepared.dropped.is_empty() {
@@ -564,7 +578,9 @@ impl Outbound {
             collect: prepared.session,
             ledger,
             auto_cache,
-            effort: self.reasoning.change,
+            effort: setting_change,
+            pre: None,
+            remembered: false,
         })
     }
 }
@@ -596,22 +612,21 @@ pub(crate) async fn send(
 ) -> Result<(reqwest::Response, Wire), GatewayError> {
     let upstream = &entry.upstream;
     let official = upstream.is_official();
-    let asked = outbound.reasoning.asked;
-    // Only a request with reasoning on sends an effort to refuse.
-    let memory = if outbound.reasoning.on {
-        effort::recall(redis, entry.provider_id, model).await
+    let first = outbound
+        .address(entry.protocol, model, official)?
+        .for_upstream(upstream, model);
+    // Only a request that can carry an effort asks the memory.
+    let memory = if outbound.reasoning.any {
+        effort::recall(redis, entry.provider_id, first.dialect, model).await
     } else {
         effort::Memory::default()
     };
-    let first = outbound
-        .address(entry.protocol, model, official)?
-        .for_upstream(upstream, model)
-        .remembered(&memory, asked);
-    if let Some(change) = first.effort.filter(|c| c.reason == Reason::Remembered) {
+    let first = first.remembered(&memory);
+    if first.remembered {
         tracing::info!(
             provider = %entry.provider_name,
             model,
-            effort = %change.detail(),
+            effort = %first.effort.map(|c| c.detail()).unwrap_or_default(),
             "Sending the reasoning effort the upstream took before instead of one it refused"
         );
     }
@@ -639,32 +654,47 @@ pub(crate) async fn send(
         }
     }
 
-    // Read only off a 400: the body is parsed for it.
+    // Read only off a 400: the body is parsed for it. A budget is no
+    // written effort, and never refused as one.
     if matches!(last, GatewayError::ProviderHttpError { status: 400, .. })
-        && let Some(sent) = wire.sent_effort()
+        && let Some(sent) = wire.written_effort()
         && let Some(fix) = effort::rejection(&last, &upstream.label, sent)
     {
-        let instead = match fix {
-            tw_dialect::think::EffortFix::Use(e) => Some(e),
-            tw_dialect::think::EffortFix::Drop => None,
-        };
-        if wire.resend_effort(instead, asked, Reason::Rejected) {
+        // What is remembered is keyed on what was written before the
+        // memory rewrote it.
+        let pre = wire.pre.unwrap_or(sent);
+        let remembered = wire.remembered;
+        if wire.fix_effort(fix, pre, Reason::Rejected) {
             tracing::info!(
                 provider = %entry.provider_name,
                 model,
                 effort = %wire.effort.map(|c| c.detail()).unwrap_or_default(),
                 "Upstream refused the reasoning effort — sending again with one it takes"
             );
-            match wire.send_to(upstream, call_ctx).await {
+            let resent = wire.send_to(upstream, call_ctx).await;
+            // Answered: remembered, in place of a remembered fix that was
+            // refused itself. Refused again: that fix is forgotten.
+            let (redis, provider_id, dialect, model) = (
+                redis.clone(),
+                entry.provider_id,
+                wire.dialect,
+                model.to_string(),
+            );
+            match resent {
                 Ok(resp) => {
-                    let (redis, provider_id, model) =
-                        (redis.clone(), entry.provider_id, model.to_string());
                     tokio::spawn(async move {
-                        effort::remember(&redis, provider_id, &model, sent, instead).await;
+                        effort::remember(&redis, provider_id, dialect, &model, pre, fix).await;
                     });
                     return Ok((resp, wire));
                 }
-                Err(e) => last = e,
+                Err(e) => {
+                    if remembered {
+                        tokio::spawn(async move {
+                            effort::forget(&redis, provider_id, dialect, &model, pre).await;
+                        });
+                    }
+                    last = e;
+                }
             }
         }
     }
@@ -680,8 +710,13 @@ pub(crate) async fn send(
             );
             let wire = outbound
                 .address(*protocol, model, official)?
-                .for_upstream(upstream, model)
-                .remembered(&memory, asked);
+                .for_upstream(upstream, model);
+            let wire = if outbound.reasoning.any {
+                let memory = effort::recall(redis, entry.provider_id, wire.dialect, model).await;
+                wire.remembered(&memory)
+            } else {
+                wire
+            };
             wire_dialect = wire.dialect;
             match wire.send_to(upstream, call_ctx).await {
                 Ok(resp) => {
@@ -935,15 +970,13 @@ async fn run(
     //    is addressed (`Outbound::cap_output`): whether to fill one in
     //    depends on the upstream model, and the field on the upstream's
     //    format. The upstream stops there by itself; the answer is not
-    //    measured. The reasoning setting changes the caller's request here,
-    //    once, in its own format (see `super::effort`): a hop converted for
-    //    another format carries the changed effort the way that one writes
-    //    it.
+    //    measured. The reasoning setting is applied to each hop too, for
+    //    the model named upstream, on the caller's request in its own format
+    //    (see `super::effort`): a hop converted for another format carries
+    //    the changed effort the way that one writes it.
     let model_config = state.router.load().config_for(&mapped_model);
     let max_output_tokens = model_config.max_output_tokens;
-    let mut outbound_body = outbound_body;
-    let reasoning =
-        effort::Applied::apply(model_config.reasoning, surface.dialect, &mut outbound_body);
+    let reasoning = effort::Asked::of(model_config.reasoning, surface.dialect, &outbound_body);
 
     let call_ctx = CallCtx::new(
         Some(trace_id.clone()),
@@ -956,14 +989,15 @@ async fn run(
     //    otherwise repeating a cached prompt would get round every token
     //    limit.
     let cache_fingerprint = if surface.caches {
-        // The reasoning setting is already in the body: an answer made at
-        // one effort is not served for another, and a request the setting
-        // left alone shares its slot with the same request elsewhere.
         ResponseCache::fingerprint(&outbound_body).map(|mut fp| {
-            // The cap is applied after this, per hop: an answer made under
-            // one cap must not be served under another.
+            // The cap and the reasoning setting are applied after this, per
+            // hop: an answer made under one must not be served under
+            // another.
             if let Some(cap) = max_output_tokens {
                 fp.extend_from_slice(format!("\nmax_output_tokens={cap}").as_bytes());
+            }
+            if let Some(setting) = reasoning.setting {
+                fp.extend_from_slice(format!("\nreasoning_effort={}", setting.slug()).as_bytes());
             }
             fp
         })
@@ -1437,6 +1471,7 @@ fn json_response(body: Vec<u8>) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tw_dialect::ir::Effort;
 
     #[test]
     fn a_gemini_path_names_the_model_and_whether_to_stream() {
@@ -1469,23 +1504,22 @@ mod tests {
             redaction,
             ledger,
             max_output_tokens: cap,
-            reasoning: effort::Applied::default(),
+            reasoning: effort::Asked::default(),
         }
     }
 
     /// `body` from a `surface` caller, under the reasoning `setting`.
-    fn with_setting(
-        surface: ClientSurface,
-        path: &str,
-        mut body: Value,
-        setting: &str,
-    ) -> Outbound {
+    fn with_setting(surface: ClientSurface, path: &str, body: Value, setting: &str) -> Outbound {
         let setting = effort::ReasoningSetting::parse(setting);
-        let reasoning = effort::Applied::apply(setting, surface.dialect, &mut body);
+        let reasoning = effort::Asked::of(setting, surface.dialect, &body);
         Outbound {
             reasoning,
             ..outbound(surface, path, body, None)
         }
+    }
+
+    fn sent(wire: &Wire) -> Value {
+        serde_json::from_slice(&wire.body).unwrap()
     }
 
     #[test]
@@ -1494,17 +1528,14 @@ mod tests {
             "model": "gpt-5", "reasoning_effort": "xhigh",
             "messages": [{"role": "user", "content": "ping"}]
         });
-        let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "max");
-        assert_eq!(
-            outbound.reasoning.asked,
-            Some(tw_dialect::ir::Effort::XHigh)
-        );
+        let outbound = with_setting(CHAT, "/v1/chat/completions", ask.clone(), "max");
+        // The caller's request stays as sent: the setting is per hop.
+        assert_eq!(outbound.body, ask);
         // As sent, to a Chat upstream.
         let wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
             .unwrap();
-        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
-        assert_eq!(sent["reasoning_effort"], "max", "{sent}");
+        assert_eq!(sent(&wire)["reasoning_effort"], "max");
         assert_eq!(
             wire.effort.map(|c| c.detail()),
             Some(serde_json::json!({"asked": "xhigh", "sent": "max", "reason": "setting"}))
@@ -1513,93 +1544,93 @@ mod tests {
         let wire = outbound
             .address(UpstreamProtocol::OpenAiResponses, "gpt-5", false)
             .unwrap();
-        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
-        assert_eq!(sent["reasoning"]["effort"], "max", "{sent}");
+        assert_eq!(sent(&wire)["reasoning"]["effort"], "max");
 
-        // Off: no reasoning goes out at all.
+        // Off, for OpenAI's formats: `none`.
         let ask = serde_json::json!({
             "model": "gpt-5", "reasoning": {"effort": "high"}, "input": "ping"
         });
         let outbound = with_setting(RESPONSES, "/v1/responses", ask, "off");
-        assert!(!outbound.reasoning.on);
         let wire = outbound
-            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5", false)
             .unwrap();
-        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
-        assert!(sent.get("reasoning_effort").is_none(), "{sent}");
+        assert_eq!(sent(&wire)["reasoning"]["effort"], "none");
 
         // A request without reasoning goes out as without the setting.
         let ask = serde_json::json!({"model": "gpt-5", "messages": []});
         let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "max");
-        assert_eq!(outbound.reasoning, effort::Applied::default());
+        assert!(!outbound.reasoning.any);
         let wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
             .unwrap();
         assert_eq!(wire.effort, None);
-        let sent: Value = serde_json::from_slice(&wire.body).unwrap();
-        assert!(sent.get("reasoning_effort").is_none(), "{sent}");
+        assert!(sent(&wire).get("reasoning_effort").is_none());
     }
 
     #[test]
-    fn a_refused_effort_is_sent_again_as_what_the_upstream_took() {
-        use tw_dialect::ir::Effort;
+    fn a_refused_effort_is_sent_again_as_the_upstream_says() {
         let ask = serde_json::json!({
             "model": "gpt-5", "reasoning_effort": "xhigh",
             "messages": [{"role": "user", "content": "ping"}]
         });
         let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "");
-        assert_eq!(outbound.reasoning.change, None);
         let mut wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
             .unwrap();
         assert_eq!(wire.effort, None);
-        assert_eq!(wire.sent_effort(), Some(Effort::XHigh));
+        let xhigh = WrittenEffort::Level(Effort::XHigh);
+        assert_eq!(wire.written_effort(), Some(xhigh));
 
-        assert!(wire.resend_effort(
-            Some(Effort::High),
-            outbound.reasoning.asked,
-            Reason::Rejected
-        ));
-        assert_eq!(wire.sent_effort(), Some(Effort::High));
+        assert!(wire.fix_effort(EffortFix::Use(Effort::High), xhigh, Reason::Rejected));
+        assert_eq!(sent(&wire)["reasoning_effort"], "high");
         assert_eq!(
             wire.effort.map(|c| c.detail()),
             Some(serde_json::json!({"asked": "xhigh", "sent": "high", "reason": "rejected"}))
         );
         // Left out: the model's default.
-        assert!(wire.resend_effort(None, outbound.reasoning.asked, Reason::Rejected));
+        assert!(wire.fix_effort(EffortFix::Drop, xhigh, Reason::Rejected));
         assert_eq!(
             wire.effort.map(|c| c.detail()),
             Some(serde_json::json!({"asked": "xhigh", "sent": null, "reason": "rejected"}))
         );
+        // Nothing left to change.
+        assert!(!wire.fix_effort(EffortFix::Drop, xhigh, Reason::Rejected));
     }
 
     #[test]
     fn a_level_refused_before_goes_out_as_what_worked() {
-        use tw_dialect::ir::Effort;
         let ask = serde_json::json!({
             "model": "gpt-5", "reasoning_effort": "xhigh",
             "messages": [{"role": "user", "content": "ping"}]
         });
         let outbound = with_setting(CHAT, "/v1/chat/completions", ask, "");
+        let xhigh = WrittenEffort::Level(Effort::XHigh);
         let mut memory = effort::Memory::default();
-        memory.note(Effort::XHigh, Some(Effort::High), effort::now());
+        memory.note(xhigh, EffortFix::Use(Effort::High), effort::now());
         let wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
             .unwrap()
-            .remembered(&memory, outbound.reasoning.asked);
-        assert_eq!(wire.sent_effort(), Some(Effort::High));
+            .remembered(&memory);
+        assert_eq!(sent(&wire)["reasoning_effort"], "high");
+        assert!(wire.remembered);
+        assert_eq!(wire.pre, Some(xhigh));
         assert_eq!(
             wire.effort.map(|c| c.detail()),
             Some(serde_json::json!({"asked": "xhigh", "sent": "high", "reason": "remembered"}))
         );
         // Another level: as sent.
         let mut other = effort::Memory::default();
-        other.note(Effort::Max, None, effort::now());
+        other.note(
+            WrittenEffort::Level(Effort::Max),
+            EffortFix::Drop,
+            effort::now(),
+        );
         let wire = outbound
             .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
             .unwrap()
-            .remembered(&other, outbound.reasoning.asked);
-        assert_eq!(wire.sent_effort(), Some(Effort::XHigh));
+            .remembered(&other);
+        assert_eq!(wire.written_effort(), Some(xhigh));
+        assert!(!wire.remembered);
         assert_eq!(wire.effort, None);
     }
 

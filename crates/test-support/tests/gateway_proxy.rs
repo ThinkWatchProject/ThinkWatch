@@ -668,7 +668,7 @@ async fn an_upstream_that_refuses_added_cache_breakpoints_gets_the_request_witho
 
 /// A Chat upstream that takes reasoning efforts up to `high`: a request
 /// asking for more is refused with a 400 naming the ones it takes, the
-/// way OpenAI words it.
+/// way OpenAI words it. It does not take `none` either.
 async fn chat_upstream_up_to_high() -> MockProvider {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, Request, ResponseTemplate};
@@ -682,6 +682,12 @@ async fn chat_upstream_up_to_high() -> MockProvider {
                 .respond_with(|req: &Request| {
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
                     let effort = body["reasoning_effort"].as_str().unwrap_or("");
+                    if effort == "none" {
+                        return ResponseTemplate::new(400).set_body_json(json!({"error": {
+                            "message": "Invalid value for 'reasoning_effort': 'none'.",
+                            "type": "invalid_request_error",
+                        }}));
+                    }
                     if matches!(effort, "xhigh" | "max") {
                         return ResponseTemplate::new(400).set_body_json(json!({"error": {
                             "message": format!("Unsupported value: '{effort}' is not supported with this model. Supported values are: 'low', 'medium', and 'high'."),
@@ -798,9 +804,10 @@ async fn a_refused_reasoning_effort_is_resent_once_and_remembered() {
 
     // Remembered once the resend was answered (written in the background).
     let memory_key = format!("effort_memory:{{provider:{provider_id}}}");
+    let field = format!("openai-chat:{model}");
     let mut remembered: Option<String> = None;
     for _ in 0..50 {
-        remembered = app.state.redis.hget(&memory_key, model).await.unwrap();
+        remembered = app.state.redis.hget(&memory_key, &field).await.unwrap();
         if remembered.is_some() {
             break;
         }
@@ -831,8 +838,45 @@ async fn a_refused_reasoning_effort_is_resent_once_and_remembered() {
         .await
         .unwrap()
         .assert_ok();
-    let gone: Option<String> = app.state.redis.hget(&memory_key, model).await.unwrap();
+    let gone: Option<String> = app.state.redis.hget(&memory_key, &field).await.unwrap();
     assert_eq!(gone, None);
+
+    // A remembered fix the upstream refuses itself is replaced by the one
+    // that is answered next.
+    let now = chrono::Utc::now().timestamp();
+    let _: () = app
+        .state
+        .redis
+        .hset(
+            &memory_key,
+            (
+                field.as_str(),
+                json!({"xhigh": {"use": "max", "at": now}}).to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+    let before = upstream.received_requests().await.len();
+    gw.post("/v1/chat/completions", ask(false))
+        .await
+        .unwrap()
+        .assert_ok();
+    assert_eq!(
+        efforts_sent(&upstream).await[before..],
+        [Some("max".to_string()), Some("high".to_string())]
+    );
+    let mut replaced = Value::Null;
+    for _ in 0..50 {
+        let v: Option<String> = app.state.redis.hget(&memory_key, &field).await.unwrap();
+        replaced = v
+            .map(|v| serde_json::from_str(&v).unwrap())
+            .unwrap_or_default();
+        if replaced["xhigh"]["use"] == "high" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(replaced["xhigh"]["use"], "high", "{replaced}");
 }
 
 /// A refused effort refused again is the answer: one resend, no more.
@@ -873,7 +917,8 @@ async fn an_effort_refused_twice_is_the_answer() {
 }
 
 /// The model's setting: a level changes requests that have reasoning on
-/// and leaves the rest alone; `off` takes reasoning out.
+/// and leaves the rest alone; `off` writes OpenAI's `none`, and an upstream
+/// that does not take it gets the request without the field — remembered.
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn the_models_reasoning_setting_rewrites_requests_with_reasoning_on() {
@@ -899,13 +944,23 @@ async fn the_models_reasoning_setting_rewrites_requests_with_reasoning_on() {
     assert_eq!(efforts_sent(&upstream).await, [Some("medium".into()), None]);
 
     gw.set_bearer(&off_key);
-    gw.post(
-        "/v1/chat/completions",
-        json!({"model": "effort-off", "reasoning_effort": "high",
-               "messages": [{"role": "user", "content": "ping"}]}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    assert_eq!(efforts_sent(&upstream).await[2..], [None]);
+    for n in [1, 2] {
+        gw.post(
+            "/v1/chat/completions",
+            json!({"model": "effort-off", "reasoning_effort": "high",
+                   "temperature": 0.1 * f64::from(n),
+                   "messages": [{"role": "user", "content": "ping"}]}),
+        )
+        .await
+        .unwrap()
+        .assert_ok();
+        if n == 1 {
+            // Remembered in the background.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    assert_eq!(
+        efforts_sent(&upstream).await[2..],
+        [Some("none".into()), None, None]
+    );
 }
