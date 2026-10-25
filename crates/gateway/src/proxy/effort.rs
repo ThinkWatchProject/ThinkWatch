@@ -8,22 +8,27 @@
 //! on**; a request without it — a title, a summary, a client that never
 //! asked — goes out untouched: reasoning is never turned on for a caller.
 //! Unset: requests go out as sent. It applies to each hop as it is
-//! addressed, to the caller's request in its own format and for the model
-//! named upstream (Gemini's budgets are capped per model); a request
-//! converted for another format carries the changed effort the way that
-//! format writes it. What reasoning is on, and where each format writes the
-//! effort, is `tw_dialect::params`, shared with the desktop gateway.
+//! addressed, for the model named upstream (Gemini's budgets are capped
+//! per model). A level is applied to the caller's request in its own
+//! format; a request converted for another format carries the changed
+//! effort the way that format writes it. `off` on a converted hop is
+//! applied to the conversion instead ([`turn_off_converted`]): taking the
+//! caller's reasoning out first would leave the converted request with no
+//! effort at all, which OpenAI's models read as their default level. What
+//! reasoning is on, and where each format writes the effort, is
+//! `tw_dialect::params`, shared with the desktop gateway.
 //!
 //! # What an upstream refuses
 //!
 //! Not every model takes every level, and an upstream that does not says
 //! so with a 400 (`tw_dialect::think::effort_rejection`; for a `none` it
-//! does not take, `none_rejection`). Both are read against the effort the
+//! does not take, `none_fix`). Both are read against the effort the
 //! hop **wrote** (`tw_dialect::params::written_effort`), whether or not
 //! reasoning is on — Claude with thinking off still refuses `xhigh` — and a
 //! request that only carries a budget has none to refuse. The request then
-//! goes to the **same upstream** once more, with the level it named or,
-//! when it named none, without the effort (the model's default). That is
+//! goes to the **same upstream** once more, with the level it named (for a
+//! refused `none`, the lowest it named) or, when it named none, without the
+//! effort (the model's default). That is
 //! not a retry of a failure of the moment: it does not wait and does not
 //! count against `gateway.retry_wait_secs` (`super::retry`). A second
 //! refusal is the answer.
@@ -104,6 +109,30 @@ impl ReasoningSetting {
             Self::Level(e) => tw_dialect::params::set_reasoning_effort(dialect, body, e, model),
         }
     }
+}
+
+/// `off` on a hop converted for `target`, applied to the caller's decoded
+/// request `r` before it is encoded. Whether reasoning was on and is
+/// turned off; the caller's reasoning is read as for the same-format hop.
+///
+/// The reasoning configuration is taken out, except for Gemini, where it is
+/// marked off: Gemini 2.5 thinks without one, and the encoder writes a
+/// zero budget for the models that can stop (2.5 Flash) and reports the
+/// setting dropped for those that cannot. For OpenAI's formats the
+/// converted body then needs `none` written in it
+/// (`tw_dialect::params::write_reasoning_none`): without an effort their
+/// models reason at their default level.
+pub(crate) fn turn_off_converted(r: &mut tw_dialect::ir::Request, target: Dialect) -> bool {
+    if !r.reasoning.as_ref().is_some_and(|re| re.enabled) {
+        return false;
+    }
+    r.reasoning = (target == Dialect::Gemini).then_some(tw_dialect::ir::Reasoning {
+        enabled: false,
+        effort: None,
+        budget: None,
+        summary: false,
+    });
+    true
 }
 
 /// What the caller's request asks for reasoning, read once.
@@ -239,9 +268,7 @@ pub(crate) fn rejection(err: &GatewayError, label: &str, sent: WrittenEffort) ->
         .unwrap_or(message);
     match sent {
         WrittenEffort::Level(e) => tw_dialect::think::effort_rejection(*status, said, e),
-        WrittenEffort::Off => {
-            tw_dialect::think::none_rejection(*status, said).then_some(EffortFix::Drop)
-        }
+        WrittenEffort::Off => tw_dialect::think::none_fix(*status, said),
     }
 }
 
@@ -589,11 +616,23 @@ mod tests {
             rejection(&http(400, claude), "relay", L(Effort::XHigh)),
             Some(EffortFix::Use(Effort::High))
         );
-        // `none` not taken: left out.
+        // `none` not taken, no level named: left out.
         let none = r#"{"error":{"message":"Invalid value for reasoning_effort: 'none'"}}"#;
         assert_eq!(
             rejection(&http(400, none), "relay", WrittenEffort::Off),
             Some(EffortFix::Drop)
+        );
+        // `none` not taken, levels named: the lowest, not the model's
+        // default, which would reason more.
+        let listed = r#"{"error":{"message":"Unsupported value: 'none' is not supported with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'.","param":"reasoning_effort"}}"#;
+        assert_eq!(
+            rejection(&http(400, listed), "relay", WrittenEffort::Off),
+            Some(EffortFix::Use(Effort::Minimal))
+        );
+        let listed = r#"{"error":{"message":"Unsupported value: 'none' is not supported with this model. Supported values are: 'low', 'medium', and 'high'.","param":"reasoning.effort"}}"#;
+        assert_eq!(
+            rejection(&http(400, listed), "relay", WrittenEffort::Off),
+            Some(EffortFix::Use(Effort::Low))
         );
         // Not a 400: an upstream failing is not a refusal.
         assert_eq!(rejection(&http(500, said), "relay", L(Effort::XHigh)), None);

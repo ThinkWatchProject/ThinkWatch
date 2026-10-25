@@ -79,6 +79,28 @@ target.
   upstream's 500 (`ProviderHttpError`), as the same error answered with
   HTTP 500 is, instead of 502 (`ProviderError`).
 
+### Fixed
+
+- **A refused `none` is sent again with the lowest level, not without an
+  effort.** When an upstream answered 400 to the `none` that
+  `models.reasoning_effort: off` writes in OpenAI's formats (models that
+  take only `minimal`, `low`, `medium` or `high`), the request went out
+  again without the effort, so the model reasoned at its default level,
+  usually `medium`, and that was remembered for 7 days. It now goes out
+  with the lowest level the error names, and without the effort only when
+  the error names none (tw-dialect `think::none_fix`).
+- **`off` reaches an upstream of another format.** For a request converted
+  for another format, such as an Anthropic caller routed to an OpenAI
+  Chat or Responses upstream, `off` took the caller's thinking out before
+  the conversion, so the converted request carried no effort and the
+  upstream reasoned at its default, while the log row's `"effort"` said
+  it was off. The setting is now applied to the converted request: OpenAI
+  Chat and Responses upstreams receive `none`, Gemini 2.5 Flash a thinking
+  budget of 0, and Anthropic and Bedrock upstreams no thinking, as
+  before. Gemini models that cannot stop thinking (2.5 Pro, Gemini 3) get
+  no thinking configuration, as before. The `"effort"` entry of a
+  converted hop records what that hop sent.
+
 ## [3.9.1] — 2026-10-23
 
 A conversation whose history a provider encrypted, such as a Codex

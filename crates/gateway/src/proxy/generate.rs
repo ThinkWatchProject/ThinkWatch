@@ -464,18 +464,25 @@ impl Outbound {
         };
 
         // The model's reasoning setting, for the model named upstream, on
-        // the caller's request in its own format.
+        // the caller's request in its own format — except `off` on a hop
+        // converted for another format, which is applied to the conversion
+        // (see `effort::turn_off_converted`).
+        let converted = protocol.dialect() != client;
+        let off_converted =
+            converted && self.reasoning.setting == Some(effort::ReasoningSetting::Off);
         let mut source = std::borrow::Cow::Borrowed(&self.body);
         let mut setting_change = None;
-        if let Some(setting) = self.reasoning.setting {
+        let mut level_applied = false;
+        if let Some(setting) = self.reasoning.setting.filter(|_| !off_converted) {
             let mut body = self.body.clone();
             if setting.apply(client, &mut body, model) {
                 setting_change = self.reasoning.change(client, &body);
+                level_applied = true;
                 source = std::borrow::Cow::Owned(body);
             }
         }
 
-        if protocol.dialect() == client {
+        if !converted {
             // Forwarded as sent. Only the model changes, and a Chat
             // stream always asks for its usage (see `hides_usage`).
             let mut body = source.into_owned();
@@ -542,6 +549,8 @@ impl Outbound {
 
         let mut decoded = decode(&source)?;
         decoded.request.model = model.to_string();
+        let turned_off =
+            off_converted && effort::turn_off_converted(&mut decoded.request, protocol.dialect());
         let prepared = decoded.encode(&target(protocol.dialect()));
         if !prepared.dropped.is_empty() {
             tracing::info!(
@@ -552,10 +561,17 @@ impl Outbound {
             );
         }
         let mut body = prepared.body;
-        if self.max_output_tokens.is_some()
+        if (self.max_output_tokens.is_some() || turned_off || level_applied)
             && let Ok(mut v) = serde_json::from_slice::<Value>(&body)
         {
             self.cap_output(protocol.dialect(), &mut v, model, official);
+            if turned_off {
+                tw_dialect::params::write_reasoning_none(protocol.dialect(), &mut v);
+            }
+            // Said against what the converted request really carries.
+            if turned_off || level_applied {
+                setting_change = self.reasoning.change(protocol.dialect(), &v);
+            }
             body = serde_json::to_vec(&v).unwrap_or(body);
         }
         // The conversion moved the placeholders along with the text; one it
@@ -973,7 +989,8 @@ async fn run(
     //    measured. The reasoning setting is applied to each hop too, for
     //    the model named upstream, on the caller's request in its own format
     //    (see `super::effort`): a hop converted for another format carries
-    //    the changed effort the way that one writes it.
+    //    the changed effort the way that one writes it. `off` on such a hop
+    //    is applied to the conversion.
     let model_config = state.router.load().config_for(&mapped_model);
     let max_output_tokens = model_config.max_output_tokens;
     let reasoning = effort::Asked::of(model_config.reasoning, surface.dialect, &outbound_body);
@@ -1565,6 +1582,166 @@ mod tests {
             .unwrap();
         assert_eq!(wire.effort, None);
         assert!(sent(&wire).get("reasoning_effort").is_none());
+    }
+
+    /// `off` on a hop converted for another format: the converted request
+    /// says it the way the upstream's format does, and the log says what
+    /// it carries.
+    #[test]
+    fn off_reaches_a_hop_converted_for_another_format() {
+        let claude = serde_json::json!({
+            "model": "gpt-5", "max_tokens": 2000,
+            "thinking": {"type": "adaptive"}, "output_config": {"effort": "high"},
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(MESSAGES, "/v1/messages", claude.clone(), "off");
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        assert_eq!(sent(&wire)["reasoning_effort"], "none");
+        assert_eq!(wire.written_effort(), Some(WrittenEffort::Off));
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "high", "sent": "none", "reason": "setting"}))
+        );
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5", false)
+            .unwrap();
+        assert_eq!(sent(&wire)["reasoning"]["effort"], "none");
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "high", "sent": "none", "reason": "setting"}))
+        );
+        // The same format, as before: the switch and the effort taken out.
+        let wire = outbound
+            .address(UpstreamProtocol::AnthropicMessages, "gpt-5", false)
+            .unwrap();
+        assert!(sent(&wire).get("thinking").is_none(), "{}", sent(&wire));
+        assert!(sent(&wire).get("output_config").is_none());
+
+        // Adaptive with no effort named converts to no effort at all: off
+        // still says `none`, with no asked level to say it against.
+        let mut adaptive = claude.clone();
+        adaptive.as_object_mut().unwrap().remove("output_config");
+        let outbound = with_setting(MESSAGES, "/v1/messages", adaptive, "off");
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        assert_eq!(sent(&wire)["reasoning_effort"], "none");
+        assert_eq!(wire.effort, None);
+
+        // Gemini 2.5 Flash thinks without a thinking config: a zero budget.
+        let outbound = with_setting(MESSAGES, "/v1/messages", claude, "off");
+        let wire = outbound
+            .address(UpstreamProtocol::GoogleGenerate, "gemini-2.5-flash", false)
+            .unwrap();
+        assert_eq!(
+            sent(&wire)["generationConfig"]["thinkingConfig"],
+            serde_json::json!({"thinkingBudget": 0})
+        );
+
+        // A Chat caller to Anthropic: no thinking.
+        let chat = serde_json::json!({
+            "model": "claude-opus-4-6", "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(CHAT, "/v1/chat/completions", chat, "off");
+        let wire = outbound
+            .address(
+                UpstreamProtocol::AnthropicMessages,
+                "claude-opus-4-6",
+                false,
+            )
+            .unwrap();
+        assert!(sent(&wire).get("thinking").is_none(), "{}", sent(&wire));
+        assert!(sent(&wire).get("output_config").is_none());
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "high", "sent": null, "reason": "setting"}))
+        );
+
+        // No reasoning: nothing turned off, nothing written.
+        let plain = serde_json::json!({
+            "model": "gpt-5", "max_tokens": 50,
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(MESSAGES, "/v1/messages", plain, "off");
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        assert!(sent(&wire).get("reasoning_effort").is_none());
+        assert_eq!(wire.effort, None);
+    }
+
+    /// A level on a converted hop is written the way the upstream's format
+    /// does, and the log says what went out.
+    #[test]
+    fn a_level_on_a_converted_hop_is_said_as_sent() {
+        let claude = serde_json::json!({
+            "model": "gpt-5", "max_tokens": 2000,
+            "thinking": {"type": "adaptive"}, "output_config": {"effort": "low"},
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(MESSAGES, "/v1/messages", claude, "high");
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        assert_eq!(sent(&wire)["reasoning_effort"], "high");
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "low", "sent": "high", "reason": "setting"}))
+        );
+        let wire = outbound
+            .address(UpstreamProtocol::OpenAiResponses, "gpt-5", false)
+            .unwrap();
+        assert_eq!(sent(&wire)["reasoning"]["effort"], "high");
+        let chat = serde_json::json!({
+            "model": "claude-opus-4-6", "reasoning_effort": "low",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(CHAT, "/v1/chat/completions", chat, "high");
+        let wire = outbound
+            .address(
+                UpstreamProtocol::AnthropicMessages,
+                "claude-opus-4-6",
+                false,
+            )
+            .unwrap();
+        assert_eq!(sent(&wire)["output_config"]["effort"], "high");
+        assert_eq!(sent(&wire)["thinking"]["type"], "adaptive");
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "low", "sent": "high", "reason": "setting"}))
+        );
+    }
+
+    /// A converted `none` the upstream refuses goes out again with the
+    /// lowest level it named.
+    #[test]
+    fn a_refused_none_on_a_converted_hop_takes_the_lowest_level() {
+        let claude = serde_json::json!({
+            "model": "gpt-5", "max_tokens": 2000,
+            "thinking": {"type": "adaptive"}, "output_config": {"effort": "high"},
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        let outbound = with_setting(MESSAGES, "/v1/messages", claude, "off");
+        let mut wire = outbound
+            .address(UpstreamProtocol::OpenAiChat, "gpt-5", false)
+            .unwrap();
+        let refused = GatewayError::ProviderHttpError {
+            status: 400,
+            message: "relay: Unsupported value: 'none' is not supported with this model for reasoning_effort. Supported values are: 'minimal', 'low', 'medium', and 'high'.".into(),
+            retry_after: None,
+        };
+        let sent_effort = wire.written_effort().unwrap();
+        let fix = effort::rejection(&refused, "relay", sent_effort).unwrap();
+        assert_eq!(fix, EffortFix::Use(Effort::Minimal));
+        assert!(wire.fix_effort(fix, sent_effort, Reason::Rejected));
+        assert_eq!(sent(&wire)["reasoning_effort"], "minimal");
+        assert_eq!(
+            wire.effort.map(|c| c.detail()),
+            Some(serde_json::json!({"asked": "none", "sent": "minimal", "reason": "rejected"}))
+        );
     }
 
     #[test]

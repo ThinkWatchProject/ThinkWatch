@@ -668,7 +668,8 @@ async fn an_upstream_that_refuses_added_cache_breakpoints_gets_the_request_witho
 
 /// A Chat upstream that takes reasoning efforts up to `high`: a request
 /// asking for more is refused with a 400 naming the ones it takes, the
-/// way OpenAI words it. It does not take `none` either.
+/// way OpenAI words it. It does not take `none` either, and names the same
+/// ones.
 async fn chat_upstream_up_to_high() -> MockProvider {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, Request, ResponseTemplate};
@@ -682,13 +683,7 @@ async fn chat_upstream_up_to_high() -> MockProvider {
                 .respond_with(|req: &Request| {
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
                     let effort = body["reasoning_effort"].as_str().unwrap_or("");
-                    if effort == "none" {
-                        return ResponseTemplate::new(400).set_body_json(json!({"error": {
-                            "message": "Invalid value for 'reasoning_effort': 'none'.",
-                            "type": "invalid_request_error",
-                        }}));
-                    }
-                    if matches!(effort, "xhigh" | "max") {
+                    if matches!(effort, "none" | "xhigh" | "max") {
                         return ResponseTemplate::new(400).set_body_json(json!({"error": {
                             "message": format!("Unsupported value: '{effort}' is not supported with this model. Supported values are: 'low', 'medium', and 'high'."),
                             "type": "invalid_request_error",
@@ -918,7 +913,8 @@ async fn an_effort_refused_twice_is_the_answer() {
 
 /// The model's setting: a level changes requests that have reasoning on
 /// and leaves the rest alone; `off` writes OpenAI's `none`, and an upstream
-/// that does not take it gets the request without the field — remembered.
+/// that does not take it gets the request with the lowest level it names —
+/// remembered.
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn the_models_reasoning_setting_rewrites_requests_with_reasoning_on() {
@@ -961,6 +957,33 @@ async fn the_models_reasoning_setting_rewrites_requests_with_reasoning_on() {
     }
     assert_eq!(
         efforts_sent(&upstream).await[2..],
-        [Some("none".into()), None, None]
+        [Some("none".into()), Some("low".into()), Some("low".into())]
+    );
+}
+
+/// `off` on a request converted for an upstream of another format: an
+/// Anthropic caller's thinking reaches an OpenAI Chat upstream as `none`,
+/// not as no effort at all (the model's default), and a refused `none`
+/// goes out again with the lowest level the upstream names.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn off_reaches_an_upstream_of_another_format() {
+    let app = TestApp::spawn().await;
+    let upstream = chat_upstream_up_to_high().await;
+    let (_, key) = seed_reasoning(&app, &upstream.uri(), "effort-off-converted", Some("off")).await;
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    gw.post(
+        "/v1/messages",
+        json!({"model": "effort-off-converted", "max_tokens": 2000,
+               "thinking": {"type": "adaptive"}, "output_config": {"effort": "high"},
+               "messages": [{"role": "user", "content": "ping"}]}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    assert_eq!(
+        efforts_sent(&upstream).await,
+        [Some("none".into()), Some("low".into())]
     );
 }
