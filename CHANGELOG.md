@@ -11,8 +11,30 @@ target.
 
 ## [Unreleased]
 
+## [3.10.0] — 2026-10-25
+
+Upstreams that fail for the moment before any of the answer reached the
+client are now tried again instead of the error going straight back, and
+a model can set the reasoning effort its requests carry, with the
+gateway adapting when an upstream refuses a level. The thinkwatch-core
+crates move from v0.81.0 to v0.83.1.
+
+One new setting (`gateway.retry_wait_secs`), one new column
+(`models.reasoning_effort`, added on startup) and one new metric; no
+route or setting is removed.
+
 ### Read before upgrading
 
+- **`models` gains a nullable column, `reasoning_effort`.** The schema
+  applied at startup adds it (`ADD COLUMN IF NOT EXISTS`); existing
+  models keep it empty and their requests go out unchanged.
+- **A reasoning level an upstream refuses is changed and sent again, for
+  every model.** This applies whether or not the model has a reasoning
+  setting and cannot be turned off: when an upstream answers 400 because
+  of the reasoning level a request carries, the request goes out once
+  more with a level the upstream accepts, or without one, and the change
+  is remembered for that provider and model for 7 days. The level sent
+  can differ from the one the caller asked for, in either direction.
 - **A request whose upstreams fail for the moment can take up to two
   minutes to fail.** When every route of a model failed with an overload
   or a server error, or could not be reached, before any of the answer
@@ -42,6 +64,29 @@ target.
 
 ### Added
 
+- **A model can set its reasoning** (`models.reasoning_effort`, the
+  Reasoning control in the model editor): `off` takes reasoning out of
+  requests that have it on, and a level (`low`, `medium`, `high`,
+  `xhigh`, `max`) changes the effort of requests whose reasoning is on.
+  Requests without reasoning, such as title generation, go out
+  unchanged. The setting is written the way each hop's upstream format
+  writes it: with `off`, OpenAI Chat and Responses upstreams receive
+  `none`, Gemini 2.5 Flash a thinking budget of 0, and Anthropic and
+  Bedrock upstreams no thinking; Gemini models that cannot stop thinking
+  (2.5 Pro, Gemini 3) get no thinking configuration. The response cache
+  keys on the request together with the setting.
+- **A reasoning level the upstream refuses is sent again once with one it
+  accepts.** On a 400 about the reasoning level, the request goes once
+  more to the same route with the level the error names (the lowest one
+  it lists when `none` was refused), or without one when it names none.
+  This is not counted as a retry, though its time falls within the retry
+  window. When that is answered, the choice is remembered in Redis per
+  provider, upstream model and request format for 7 days, so later
+  requests send what worked straight away; a provider's memory is
+  cleared when its URL or credentials change, a route relearns its
+  protocol, or the provider is deleted. A hop whose reasoning level was
+  changed records `"effort": {asked, sent, reason}` on its
+  `gateway_logs` row.
 - **Transient upstream failures are retried.** When every candidate route
   has been tried and the last one failed for the moment — 500, 502, 503,
   504 or 529, a connection that could not be made or broke before the
@@ -78,28 +123,6 @@ target.
 - An error a stream reports as OpenAI's `server_error` is logged as the
   upstream's 500 (`ProviderHttpError`), as the same error answered with
   HTTP 500 is, instead of 502 (`ProviderError`).
-
-### Fixed
-
-- **A refused `none` is sent again with the lowest level, not without an
-  effort.** When an upstream answered 400 to the `none` that
-  `models.reasoning_effort: off` writes in OpenAI's formats (models that
-  take only `minimal`, `low`, `medium` or `high`), the request went out
-  again without the effort, so the model reasoned at its default level,
-  usually `medium`, and that was remembered for 7 days. It now goes out
-  with the lowest level the error names, and without the effort only when
-  the error names none (tw-dialect `think::none_fix`).
-- **`off` reaches an upstream of another format.** For a request converted
-  for another format, such as an Anthropic caller routed to an OpenAI
-  Chat or Responses upstream, `off` took the caller's thinking out before
-  the conversion, so the converted request carried no effort and the
-  upstream reasoned at its default, while the log row's `"effort"` said
-  it was off. The setting is now applied to the converted request: OpenAI
-  Chat and Responses upstreams receive `none`, Gemini 2.5 Flash a thinking
-  budget of 0, and Anthropic and Bedrock upstreams no thinking, as
-  before. Gemini models that cannot stop thinking (2.5 Pro, Gemini 3) get
-  no thinking configuration, as before. The `"effort"` entry of a
-  converted hop records what that hop sent.
 
 ## [3.9.1] — 2026-10-23
 
@@ -2671,7 +2694,9 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.9.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.10.0...HEAD
+[3.10.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.10.0
+[3.9.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.1
 [3.9.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.0
 [3.8.3]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.3
 [3.8.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.8.2
