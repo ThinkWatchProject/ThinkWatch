@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Segmented } from '@/components/segmented';
 import {
   Select,
   SelectContent,
@@ -28,6 +29,7 @@ import {
   AFFINITY_MODES,
   CACHE_WEIGHTS,
   MAX_OUTPUT_TOKENS_CEILING,
+  REASONING_LEVELS,
   ROUTING_STRATEGIES,
   derivedCacheWeight,
   emptyModelForm,
@@ -37,6 +39,7 @@ import {
   type ModelFormState,
   type ModelRow,
   type PlatformPricing,
+  type ReasoningEffort,
   type RoutingStrategy,
 } from './types';
 
@@ -89,6 +92,7 @@ export function ModelEditorDialog({
         affinity_mode: (model.affinity_mode ?? '') as ModelFormState['affinity_mode'],
         affinity_ttl_secs: model.affinity_ttl_secs == null ? '' : String(model.affinity_ttl_secs),
         max_output_tokens: model.max_output_tokens == null ? '' : String(model.max_output_tokens),
+        reasoning_effort: model.reasoning_effort ?? '',
       });
     } else {
       setForm(emptyModelForm);
@@ -143,6 +147,7 @@ export function ModelEditorDialog({
       affinity_mode: form.affinity_mode === '' ? null : form.affinity_mode,
       affinity_ttl_secs: ttlNum,
       max_output_tokens: maxOutputTokens,
+      reasoning_effort: form.reasoning_effort === '' ? null : form.reasoning_effort,
     };
     setSaving(true);
     try {
@@ -335,6 +340,24 @@ export function ModelEditorDialog({
                 inputMode="numeric"
               />
               <p className="text-xs text-muted-foreground">{t('models.maxOutputTokensHint')}</p>
+            </div>
+            <div className="space-y-2 border-t pt-4">
+              <Label>{t('models.field.reasoningEffort')}</Label>
+              <div>
+                <Segmented<'keep' | ReasoningEffort>
+                  size="sm"
+                  fill
+                  label={t('models.field.reasoningEffort')}
+                  value={form.reasoning_effort === '' ? 'keep' : form.reasoning_effort}
+                  options={[
+                    { value: 'keep', label: t('models.reasoning.keep') },
+                    { value: 'off', label: t('models.reasoning.off') },
+                    ...REASONING_LEVELS.map((l) => ({ value: l, label: l })),
+                  ]}
+                  onChange={(v) => setForm({ ...form, reasoning_effort: v === 'keep' ? '' : v })}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">{t('models.reasoningEffortHint')}</p>
             </div>
             {error && (
               <Alert variant="destructive">

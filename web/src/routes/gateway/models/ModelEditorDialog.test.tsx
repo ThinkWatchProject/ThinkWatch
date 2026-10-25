@@ -86,3 +86,39 @@ describe('ModelEditorDialog max output tokens', () => {
     expect(apiPatch).not.toHaveBeenCalled()
   })
 })
+
+describe('ModelEditorDialog reasoning', () => {
+  it('leaves requests unchanged by default and sends a chosen level', async () => {
+    const user = userEvent.setup()
+    renderEditor(model)
+
+    const group = screen.getByRole('radiogroup', { name: 'Reasoning' })
+    expect(screen.getByRole('radio', { name: 'Unchanged' })).toHaveAttribute('aria-checked', 'true')
+    expect(group).toBeInTheDocument()
+    await user.click(screen.getByRole('radio', { name: 'max' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(apiPatch).toHaveBeenCalledWith(
+        '/api/admin/models/m-1',
+        expect.objectContaining({ reasoning_effort: 'max' }),
+      ),
+    )
+  })
+
+  it('shows the stored setting and clears it back to unchanged', async () => {
+    const user = userEvent.setup()
+    renderEditor({ ...model, reasoning_effort: 'off' })
+
+    expect(screen.getByRole('radio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true')
+    await user.click(screen.getByRole('radio', { name: 'Unchanged' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(apiPatch).toHaveBeenCalledWith(
+        '/api/admin/models/m-1',
+        expect.objectContaining({ reasoning_effort: null }),
+      ),
+    )
+  })
+})

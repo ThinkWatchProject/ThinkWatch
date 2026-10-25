@@ -40,3 +40,4 @@ rust_decimal = { workspace = true }
 
 [dev-dependencies]
 http_1x = { package = "http", version = "1" }
+tokio = { workspace = true, features = ["test-util"] }

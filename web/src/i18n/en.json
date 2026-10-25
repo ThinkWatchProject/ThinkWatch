@@ -864,13 +864,19 @@
       "cacheReadWeight": "Cache read weight",
       "cacheWriteWeight": "Cache write weight",
       "cacheWrite1hWeight": "1-hour cache write weight",
-      "maxOutputTokens": "Max output tokens"
+      "maxOutputTokens": "Max output tokens",
+      "reasoningEffort": "Reasoning"
     },
     "useGlobalDefault": "Use global default",
     "unlimited": "Unlimited",
     "routingOverrideTitle": "Routing overrides",
     "routingOverrideHint": "Override the gateway-wide defaults for this model. Leave blank to inherit from Settings → Gateway.",
     "maxOutputTokensHint": "The most output tokens a request to this model can ask for. A request that sets a limit gets the smaller of the two; one that sets none gets this value if it is within the model family's default (32,000 for Claude, 8,192 for others), and the model's own default otherwise. Leave blank for no limit.",
+    "reasoningEffortHint": "A level applies only to requests that already have reasoning on; requests without reasoning (such as title generation) are left unchanged.",
+    "reasoning": {
+      "keep": "Unchanged",
+      "off": "Off"
+    },
     "strategy": {
       "weighted": "Weighted random",
       "latency": "Latency-first",
@@ -1816,6 +1822,8 @@
     "defaultAffinityTtlHint": "How long an affinity assignment lasts. 0 disables affinity entirely.",
     "latencyStrategyK": "Latency aggressiveness (k)",
     "latencyStrategyKHint": "Exponent in 1/latency^k. Higher = more aggressive bias toward fast routes. Default 2.0 (aggressive). Range 0.5–8.0.",
+    "retryWaitSecs": "Retry window (seconds)",
+    "retryWaitSecsHint": "When every route failed for the moment (overloaded, a server error, a broken connection) before any of the answer reached the client, the request is sent again after a short wait, for up to this long after it arrived. 0 disables retries. Range 0–600.",
     "strategy": {
       "weighted": "Weighted random",
       "latency": "Latency-first",

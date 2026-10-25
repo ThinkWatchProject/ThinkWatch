@@ -34,9 +34,10 @@ use tw_dialect::ir::Dialect;
 
 use crate::guards::Guards;
 use crate::proxy::generate::{Wire, priced, tokens};
+use crate::proxy::retry::{KEEP_ALIVE, KEEP_ALIVE_FRAME};
 use crate::proxy::shaper::{StreamShaper, rewrite_model};
 use crate::proxy::{
-    GatewayRequestIdentity, GatewayState, SelectionRecord, emit_gateway_log_with_extra,
+    GatewayRequestIdentity, GatewayState, Resend, SelectionRecord, emit_gateway_log_with_extra,
     finalize_health, post_flight_account, prepare_body_capture,
 };
 
@@ -158,10 +159,36 @@ pub(crate) struct ChatPostInvokeDeps {
     pub cache_enabled: bool,
 }
 
-/// The upstream call a stream makes, not yet started.
-pub(crate) type OpenUpstream = Pin<
-    Box<dyn std::future::Future<Output = Result<(reqwest::Response, Wire), GatewayError>> + Send>,
+/// The upstream call a stream makes, not yet started: each call starts
+/// one attempt.
+pub(crate) type OpenUpstream = Box<
+    dyn FnMut() -> Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(reqwest::Response, Wire), GatewayError>>
+                    + Send,
+            >,
+        > + Send,
 >;
+
+/// What a stream's tail resolves to once the stream ends: what the hooks
+/// read, and how the stream reached its upstream.
+pub(crate) type StreamTail =
+    Pin<Box<dyn std::future::Future<Output = (Invoked<ChatCompletionSurface>, Sent)> + Send>>;
+
+/// How a stream reached its upstream, for the tail: how many times it went
+/// out again after a transient failure, and when the attempt that ended it
+/// went out.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Sent {
+    pub retries: u32,
+    pub last_sent: std::time::Instant,
+    /// Waiting to go out again: the attempt that failed was counted
+    /// against the route already, and nothing is under way.
+    pub waiting: bool,
+    /// The attempt under way sent a different reasoning effort than the
+    /// caller asked (see `proxy::effort`).
+    pub effort: Option<crate::proxy::effort::EffortChange>,
+}
 
 /// Build the streaming pump: forward the upstream's bytes to the caller —
 /// converted if the route speaks another format, shaped either way — and
@@ -176,8 +203,19 @@ pub(crate) type OpenUpstream = Pin<
 /// rejected dialect is still retried inside `open`, before any byte
 /// reaches the caller.
 ///
-/// Nothing is buffered. Usage is sniffed and the whole answer assembled
-/// alongside the bytes, not by holding them back.
+/// Nothing of the answer is buffered. Usage is sniffed and the whole
+/// answer assembled alongside the bytes, not by holding them back.
+///
+/// **A transient failure before any of the answer went out goes out
+/// again** to the same route (see `proxy::retry`; `resend` decides): the
+/// upstream could not be reached, answered 5xx, broke off, or reported an
+/// overload or a server error before any content. While a failure could
+/// still be sent again, what the upstream sends ahead of its content is
+/// held back (see [`Opening`]), so that a retry's opening is not the
+/// client's second one. While it is held, and while the gateway waits to
+/// send again, the client gets an SSE keep-alive comment after every
+/// [`KEEP_ALIVE`] of silence. The status is 200 from the start, as it
+/// always was: a failure that is the answer is said in the stream.
 ///
 /// **A dropped stream is a cancelled request.** When the client goes,
 /// hyper drops the body, and with it the sender the tail is waiting on;
@@ -205,6 +243,7 @@ pub(crate) type OpenUpstream = Pin<
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_chat_pump(
     open: OpenUpstream,
+    resend: Resend,
     mut shaper: StreamShaper,
     client: Dialect,
     client_sse: bool,
@@ -212,10 +251,7 @@ pub(crate) fn build_chat_pump(
     guards: &Guards,
     request: &ChatRequestSnapshot,
     provider: &str,
-) -> (
-    axum::response::Response,
-    Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
-) {
+) -> (axum::response::Response, StreamTail) {
     let readers = Arc::new(Mutex::new(Readers::default()));
     let readers_for_tail = Arc::clone(&readers);
 
@@ -247,148 +283,304 @@ pub(crate) fn build_chat_pump(
     let mut last_frame = LastFrame::new(client, client_sse);
     let provider_for_tail = provider.to_string();
     let provider = provider.to_string();
+    let sent = Arc::new(Mutex::new(Sent {
+        retries: 0,
+        last_sent: std::time::Instant::now(),
+        waiting: false,
+        effort: None,
+    }));
+    // Gemini clients get no keep-alive comments: the google-genai SDK reads
+    // every SSE line as JSON.
+    let keep_alive = keeps_alive(client);
+    let sent_for_tail = Arc::clone(&sent);
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
+        let mut open = open;
+        let mut resend = resend;
+        // When the client last received something: a keep-alive is due
+        // `KEEP_ALIVE` after it while the gateway holds the stream back.
+        let mut quiet_since = tokio::time::Instant::now();
+        // The wait before the next attempt, after a transient failure.
+        let mut backoff: Option<std::time::Duration> = None;
 
-        let (upstream, wire) = match open.await {
-            Ok(opened) => opened,
-            Err(e) => {
-                // Headers already went out as 200, so the refusal is said
-                // in the stream — and logged with the upstream's own status,
-                // so a throttled upstream stays 429 on the audit row.
-                let mut out = shaper.process(&error_frame(client, e.status_code(), &e.to_string()));
-                out.extend(shaper.finish());
-                tell(&mut done_tx, StreamOutcome::UpstreamError {
-                    error_type: e.error_tag().to_string(),
-                    message: e.to_string(),
-                    status_code: e.status_code(),
-                });
-                yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(out));
-                return;
+        'attempt: loop {
+            if let Some(wait) = backoff.take() {
+                let until = tokio::time::Instant::now() + wait;
+                if keep_alive {
+                    let mut ticks = std::pin::pin!(keep_alives(quiet_since, until));
+                    while ticks.next().await.is_some() {
+                        quiet_since = tokio::time::Instant::now();
+                        yield Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(KEEP_ALIVE_FRAME));
+                    }
+                } else {
+                    tokio::time::sleep_until(until).await;
+                }
             }
-        };
-        if let Ok(mut r) = readers.lock() {
-            r.sniffer = Some(tw_dialect::usage::Sniffer::new());
-            r.collector = Some(wire.collect.collector());
-            r.errors = Some(ErrorWatch::new(wire.dialect));
-            r.ledger = Some(wire.ledger.clone());
-        }
-        // The hop that answered can have numbered a value of its own.
-        shaper.restore_with(&wire.ledger);
-        let mut convert = wire.convert.as_ref().map(|s| s.stream());
-        // Bedrock streams AWS eventstream frames, not SSE. Unframe them at
-        // the door, so the sniffer, the collector and the converter all
-        // read the same SSE they read from every other upstream.
-        let mut unframe = (wire.dialect == Dialect::Bedrock)
-            .then(tw_bedrock::eventstream::Transcoder::new);
-        let mut source = upstream.bytes_stream();
-        while let Some(item) = source.next().await {
-            let item = match item {
-                Ok(raw) => match unframe.as_mut() {
-                    None => Ok(raw),
-                    Some(t) => t
-                        .feed(&raw)
-                        .map(Bytes::from)
-                        .map_err(|e| bedrock_ended(&provider, e)),
-                },
-                Err(e) => Err(broke_off(format!("The upstream stream broke off: {e}"))),
-            };
-            match item {
-                Ok(chunk) => {
-                    let sealed = match readers.lock() {
-                        Ok(mut r) => {
-                            r.feed(&chunk);
-                            r.sealed_refusal()
-                        }
-                        Err(_) => None,
-                    };
-                    // The upstream cannot read the conversation's encrypted
-                    // history: the client is told why in plain words, in
-                    // place of the upstream's own error.
-                    if let Some(said) = sealed {
-                        let err = sealed_refused(&provider, &said);
-                        tracing::warn!(
-                            provider = %provider,
-                            message = %said.message,
-                            "upstream refused the conversation's encrypted history"
-                        );
-                        let out = cut(&shaper, convert.as_mut(), client, &[], &err);
-                        tell(&mut done_tx, StreamOutcome::UpstreamError {
-                            error_type: err.error_tag().to_string(),
-                            message: err.to_string(),
-                            status_code: err.status_code(),
-                        });
-                        yield Ok(Bytes::from(out));
-                        return;
-                    }
-                    let client_bytes = match convert.as_mut() {
-                        Some(c) => c.process(&chunk),
-                        None => chunk.to_vec(),
-                    };
-                    let out = shaper.process(&client_bytes);
-                    // A tool call the inspection stops: what came before
-                    // still goes out, then the refusal.
-                    let stop = inspector.as_mut().and_then(|i| i.check(&out));
-                    if let Some((err, safe)) = stop {
-                        let out = cut(&shaper, convert.as_mut(), client, &out[..safe], &err);
-                        tell(&mut done_tx, StreamOutcome::UpstreamError {
-                            error_type: err.error_tag().to_string(),
-                            message: err.to_string(),
-                            status_code: err.status_code(),
-                        });
-                        yield Ok(Bytes::from(out));
-                        return;
-                    }
-                    if !out.is_empty() {
-                        if last_frame.is_in(&out) {
-                            delivered.store(true, Ordering::Release);
-                        }
-                        yield Ok(Bytes::from(out));
+            let sent_at = std::time::Instant::now();
+            if let Ok(mut s) = sent.lock() {
+                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at, waiting: false, effort: None };
+            }
+            // What an attempt that failed had read is not this one's: its
+            // usage is not billed, its error not the request's.
+            if let Ok(mut r) = readers.lock() {
+                *r = Readers::default();
+            }
+            // A retry's upstream says nothing until it answers: the client
+            // hears keep-alives meanwhile.
+            let resent = resend.budget.retries() > 0;
+            let mut opening = open();
+            let opened = loop {
+                let tick = tokio::time::sleep_until(quiet_since + KEEP_ALIVE);
+                let next = tokio::select! {
+                    opened = &mut opening => Some(opened),
+                    _ = tick, if resent && keep_alive => None,
+                };
+                match next {
+                    Some(opened) => break opened,
+                    None => {
+                        quiet_since = tokio::time::Instant::now();
+                        yield Ok(Bytes::from_static(KEEP_ALIVE_FRAME));
                     }
                 }
-                Err((message, outcome)) => {
-                    // Headers are gone; the only way left to say it is in
-                    // the stream, in the caller's own format.
-                    let tail = match convert.as_mut() {
-                        Some(c) => c.fail(&message),
-                        None => error_frame(client, 502, &message),
-                    };
-                    let mut out = shaper.process(&tail);
+            };
+            let (upstream, wire) = match opened {
+                Ok(opened) => opened,
+                Err(e) => {
+                    // Nothing of the answer went out: one that failed for
+                    // the moment goes out again after a wait.
+                    if let Some(wait) = resend.budget.wait_after(&e)
+                        && resend.admit(elapsed_ms(sent_at)).await
+                    {
+                        resending(&provider, resend.budget.retries(), wait, e.error_tag(), &readers, &sent);
+                        backoff = Some(wait);
+                        continue 'attempt;
+                    }
+                    // Headers already went out as 200, so the refusal is said
+                    // in the stream — and logged with the upstream's own status,
+                    // so a throttled upstream stays 429 on the audit row.
+                    let mut out = shaper.process(&error_frame(client, e.status_code(), &e.to_string()));
                     out.extend(shaper.finish());
-                    tell(&mut done_tx, outcome);
+                    tell(&mut done_tx, StreamOutcome::UpstreamError {
+                        error_type: e.error_tag().to_string(),
+                        message: e.to_string(),
+                        status_code: e.status_code(),
+                    });
                     yield Ok(Bytes::from(out));
                     return;
                 }
+            };
+            if let Ok(mut s) = sent.lock() {
+                s.effort = wire.effort;
             }
-        }
-        let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
-        let mut out = shaper.process(&tail);
-        out.extend(shaper.finish());
-        // The converter's last bytes can complete a tool call (the block's
-        // stop), so they are inspected too.
-        // A Chat call with no `finish_reason` or `[DONE]` completes only
-        // as the stream closes; one that stops it keeps the tail back.
-        let stop = inspector.as_mut().and_then(|i| {
-            i.check(&out)
-                .or_else(|| i.finish().map(|err| (err, 0)))
-        });
-        if let Some((err, safe)) = stop {
-            let out = cut(&shaper, None, client, &out[..safe], &err);
-            tell(&mut done_tx, StreamOutcome::UpstreamError {
-                error_type: err.error_tag().to_string(),
-                message: err.to_string(),
-                status_code: err.status_code(),
+            if let Ok(mut r) = readers.lock() {
+                *r = Readers {
+                    sniffer: Some(tw_dialect::usage::Sniffer::new()),
+                    collector: Some(wire.collect.collector()),
+                    errors: Some(ErrorWatch::new(wire.dialect)),
+                    ledger: Some(wire.ledger.clone()),
+                    said: None,
+                };
+            }
+            // The hop that answered can have numbered a value of its own.
+            shaper.restore_with(&wire.ledger);
+            let mut convert = wire.convert.as_ref().map(|s| s.stream());
+            // Bedrock streams AWS eventstream frames, not SSE. Unframe them at
+            // the door, so the sniffer, the collector and the converter all
+            // read the same SSE they read from every other upstream.
+            let mut unframe = (wire.dialect == Dialect::Bedrock)
+                .then(tw_bedrock::eventstream::Transcoder::new);
+            // While a failure could still be sent again, the upstream's
+            // opening is held back until its first content (see `Opening`).
+            let mut hold = resend.budget.open().then(|| Opening::new(wire.dialect));
+            let mut source = upstream.bytes_stream();
+            loop {
+                let next = tokio::select! {
+                    item = source.next() => Some(item),
+                    _ = tokio::time::sleep_until(quiet_since + KEEP_ALIVE), if hold.is_some() && keep_alive => None,
+                };
+                let Some(item) = next else {
+                    quiet_since = tokio::time::Instant::now();
+                    yield Ok(Bytes::from_static(KEEP_ALIVE_FRAME));
+                    continue;
+                };
+                let Some(item) = item else {
+                    // The upstream's stream ended. One whose opening is still
+                    // held ended without content: an error it reported that
+                    // is transient goes out again; anything else goes to the
+                    // client as it would have.
+                    if let Some(h) = hold.take() {
+                        let said = readers.lock().ok().and_then(|mut r| r.reported(true));
+                        if let Some(said) = said
+                            && let Some(wait) = retry_after_said(&resend, &provider, &said)
+                            && resend.admit(elapsed_ms(sent_at)).await
+                        {
+                            resending(&provider, resend.budget.retries(), wait, "in-stream error", &readers, &sent);
+                            backoff = Some(wait);
+                            continue 'attempt;
+                        }
+                        match deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client) {
+                            Ok(out) => {
+                                if !out.is_empty() {
+                                    if last_frame.is_in(&out) {
+                                        delivered.store(true, Ordering::Release);
+                                    }
+                                    yield Ok(Bytes::from(out));
+                                }
+                            }
+                            Err((out, outcome)) => {
+                                tell(&mut done_tx, outcome);
+                                yield Ok(Bytes::from(out));
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                };
+                let item = match item {
+                    Ok(raw) => match unframe.as_mut() {
+                        None => Ok(raw),
+                        Some(t) => t
+                            .feed(&raw)
+                            .map(Bytes::from)
+                            .map_err(|e| bedrock_ended(&provider, e)),
+                    },
+                    Err(e) => Err(broke_off(format!("The upstream stream broke off: {e}"))),
+                };
+                match item {
+                    Ok(chunk) => {
+                        let (sealed, said) = match readers.lock() {
+                            Ok(mut r) => {
+                                r.feed(&chunk);
+                                (r.sealed_refusal(), r.reported(false))
+                            }
+                            Err(_) => (None, None),
+                        };
+                        // The upstream cannot read the conversation's encrypted
+                        // history: the client is told why in plain words, in
+                        // place of the upstream's own error.
+                        if let Some(said) = sealed {
+                            let err = sealed_refused(&provider, &said);
+                            tracing::warn!(
+                                provider = %provider,
+                                message = %said.message,
+                                "upstream refused the conversation's encrypted history"
+                            );
+                            let out = cut(&shaper, convert.as_mut(), client, &[], &err);
+                            tell(&mut done_tx, StreamOutcome::UpstreamError {
+                                error_type: err.error_tag().to_string(),
+                                message: err.to_string(),
+                                status_code: err.status_code(),
+                            });
+                            yield Ok(Bytes::from(out));
+                            return;
+                        }
+                        let chunk = match hold.as_mut() {
+                            None => chunk.to_vec(),
+                            Some(h) => {
+                                // An error before any content: one that is
+                                // transient goes out again. Anything else is
+                                // the answer, and goes out with the opening.
+                                if !h.feed(&chunk) {
+                                    let Some(said) = &said else { continue };
+                                    if let Some(wait) = retry_after_said(&resend, &provider, said)
+                                        && resend.admit(elapsed_ms(sent_at)).await
+                                    {
+                                        resending(&provider, resend.budget.retries(), wait, "in-stream error", &readers, &sent);
+                                        backoff = Some(wait);
+                                        continue 'attempt;
+                                    }
+                                }
+                                hold.take().map(Opening::release).unwrap_or_default()
+                            }
+                        };
+                        match deliver(&chunk, &mut convert, &mut shaper, inspector.as_mut(), client) {
+                            Ok(out) => {
+                                if !out.is_empty() {
+                                    if last_frame.is_in(&out) {
+                                        delivered.store(true, Ordering::Release);
+                                    }
+                                    yield Ok(Bytes::from(out));
+                                }
+                            }
+                            // A tool call the inspection stops: what came
+                            // before still goes out, then the refusal.
+                            Err((out, outcome)) => {
+                                tell(&mut done_tx, outcome);
+                                yield Ok(Bytes::from(out));
+                                return;
+                            }
+                        }
+                    }
+                    Err((message, outcome)) => {
+                        // Broken off before any content: the upstream's
+                        // failure, which goes out again.
+                        if let Some(h) = hold.take() {
+                            if let StreamOutcome::UpstreamError { error_type, status_code, .. } = &outcome
+                                && let Some(wait) = resend.budget.wait_after_outcome(error_type, *status_code)
+                                && resend.admit(elapsed_ms(sent_at)).await
+                            {
+                                resending(&provider, resend.budget.retries(), wait, error_type, &readers, &sent);
+                                backoff = Some(wait);
+                                continue 'attempt;
+                            }
+                            // The opening it sent goes out before the error.
+                            match deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client) {
+                                Ok(out) => {
+                                    if !out.is_empty() {
+                                        yield Ok(Bytes::from(out));
+                                    }
+                                }
+                                Err((out, outcome)) => {
+                                    tell(&mut done_tx, outcome);
+                                    yield Ok(Bytes::from(out));
+                                    return;
+                                }
+                            }
+                        }
+                        // Headers are gone; the only way left to say it is in
+                        // the stream, in the caller's own format.
+                        let tail = match convert.as_mut() {
+                            Some(c) => c.fail(&message),
+                            None => error_frame(client, 502, &message),
+                        };
+                        let mut out = shaper.process(&tail);
+                        out.extend(shaper.finish());
+                        tell(&mut done_tx, outcome);
+                        yield Ok(Bytes::from(out));
+                        return;
+                    }
+                }
+            }
+            let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
+            let mut out = shaper.process(&tail);
+            out.extend(shaper.finish());
+            // The converter's last bytes can complete a tool call (the block's
+            // stop), so they are inspected too.
+            // A Chat call with no `finish_reason` or `[DONE]` completes only
+            // as the stream closes; one that stops it keeps the tail back.
+            let stop = inspector.as_mut().and_then(|i| {
+                i.check(&out)
+                    .or_else(|| i.finish().map(|err| (err, 0)))
             });
-            yield Ok(Bytes::from(out));
+            if let Some((err, safe)) = stop {
+                let out = cut(&shaper, None, client, &out[..safe], &err);
+                tell(&mut done_tx, StreamOutcome::UpstreamError {
+                    error_type: err.error_tag().to_string(),
+                    message: err.to_string(),
+                    status_code: err.status_code(),
+                });
+                yield Ok(Bytes::from(out));
+                return;
+            }
+            let outcome = match readers.lock().ok().and_then(|mut r| r.upstream_error()) {
+                Some(said) => failed_partway(&provider, &said),
+                None => StreamOutcome::Natural,
+            };
+            tell(&mut done_tx, outcome);
+            if !out.is_empty() {
+                yield Ok(Bytes::from(out));
+            }
             return;
-        }
-        let outcome = match readers.lock().ok().and_then(|mut r| r.upstream_error()) {
-            Some(said) => failed_partway(&provider, &said),
-            None => StreamOutcome::Natural,
-        };
-        tell(&mut done_tx, outcome);
-        if !out.is_empty() {
-            yield Ok(Bytes::from(out));
         }
     };
 
@@ -494,7 +686,13 @@ pub(crate) fn build_chat_pump(
             assembled,
             logged,
         };
-        Invoked {
+        let sent = sent_for_tail.lock().map(|s| *s).unwrap_or(Sent {
+            retries: 0,
+            last_sent: started_at,
+            waiting: false,
+            effort: None,
+        });
+        let invoked = Invoked {
             client_ip: identity.ip_address.clone(),
             identity,
             trace_id,
@@ -504,7 +702,8 @@ pub(crate) fn build_chat_pump(
             },
             access_candidate: mapped_model,
             view: CapturedView::Streaming { outcome, captured },
-        }
+        };
+        (invoked, sent)
     });
     (response, tail)
 }
@@ -564,6 +763,20 @@ impl Readers {
     /// its stream has said it. Left in place for the tail.
     fn sealed_refusal(&self) -> Option<Said> {
         self.said.as_ref().filter(|s| s.sealed).cloned()
+    }
+
+    /// The error the upstream reported in its stream so far, left in place
+    /// for the tail. `ended`: the stream ended, so a last frame without a
+    /// blank line after it is read too.
+    fn reported(&mut self, ended: bool) -> Option<Said> {
+        if ended
+            && self.said.is_none()
+            && let Some(said) = self.errors.as_mut().and_then(ErrorWatch::flush)
+        {
+            self.said = Some(said);
+            self.errors = None;
+        }
+        self.said.clone()
     }
 
     /// The error the upstream reported in its stream, if it did — read to
@@ -723,7 +936,7 @@ fn status_named(name: &str) -> Option<u16> {
         | "insufficient_quota"
         | "usage_limit_reached"
         | "RESOURCE_EXHAUSTED" => 429,
-        "api_error" => 500,
+        "api_error" | "server_error" => 500,
         "server_is_overloaded" | "slow_down" | "UNAVAILABLE" => 503,
         "timeout_error" | "DEADLINE_EXCEEDED" => 504,
         "overloaded_error" => 529,
@@ -749,6 +962,11 @@ fn failed_partway(provider: &str, said: &Said) -> StreamOutcome {
         message = %said.message,
         "upstream reported an error partway through a stream"
     );
+    outcome_of(provider, said)
+}
+
+/// [`failed_partway`], without the log line.
+fn outcome_of(provider: &str, said: &Said) -> StreamOutcome {
     let words: String = said.message.chars().take(500).collect();
     if said.sealed {
         let e = sealed_refused(provider, said);
@@ -845,6 +1063,165 @@ fn bedrock_status(kind: &str) -> u16 {
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(kind))
         .map_or(500, |(_, status)| *status)
+}
+
+/// The wait before sending again after an error the upstream reported
+/// in its stream before any content, when it is transient (see
+/// `proxy::retry`) and the wait fits.
+fn retry_after_said(resend: &Resend, provider: &str, said: &Said) -> Option<std::time::Duration> {
+    match outcome_of(provider, said) {
+        StreamOutcome::UpstreamError {
+            error_type,
+            status_code,
+            ..
+        } => resend.budget.wait_after_outcome(&error_type, status_code),
+        _ => None,
+    }
+}
+
+/// Whether the client may be sent keep-alive comments while the gateway
+/// holds its stream back. Not a Gemini client: the google-genai SDK reads
+/// every SSE line as JSON, and a JSON-array stream has no place for them.
+fn keeps_alive(client: Dialect) -> bool {
+    client != Dialect::Gemini
+}
+
+/// A stream goes out again after `wait`: what the failed attempt left for
+/// the tail is cleared — a client that leaves during the wait left a
+/// request whose failed attempt is already counted against the route
+/// (see `routing::Resend::admit`), with nothing to bill — and the log
+/// line written.
+fn resending(
+    provider: &str,
+    retry: u32,
+    wait: std::time::Duration,
+    error: &str,
+    readers: &Mutex<Readers>,
+    sent: &Mutex<Sent>,
+) {
+    if let Ok(mut r) = readers.lock() {
+        *r = Readers::default();
+    }
+    if let Ok(mut s) = sent.lock() {
+        *s = Sent {
+            retries: retry,
+            last_sent: std::time::Instant::now(),
+            waiting: true,
+            effort: None,
+        };
+    }
+    tracing::info!(
+        provider,
+        retry,
+        wait_ms = wait.as_millis() as u64,
+        error,
+        "Upstream failed for the moment before any of the answer went out, sending again after a wait"
+    );
+}
+
+fn elapsed_ms(since: std::time::Instant) -> u32 {
+    since.elapsed().as_millis().min(u32::MAX as u128) as u32
+}
+
+/// A tick each time the client is due a keep-alive while the gateway waits
+/// until `until`: [`KEEP_ALIVE`] after `quiet_since`, then every
+/// [`KEEP_ALIVE`]. Ends at `until`.
+fn keep_alives(
+    quiet_since: tokio::time::Instant,
+    until: tokio::time::Instant,
+) -> impl futures::Stream<Item = ()> {
+    async_stream::stream! {
+        let mut due = quiet_since + KEEP_ALIVE;
+        while due < until {
+            tokio::time::sleep_until(due).await;
+            yield ();
+            due += KEEP_ALIVE;
+        }
+        tokio::time::sleep_until(until).await;
+    }
+}
+
+/// What the client gets for `chunk` of the upstream's bytes: converted if
+/// the route speaks another format, shaped, and inspected for tool calls.
+/// `Err`: a tool call the inspection stops — what came before it, then
+/// the refusal — and the stream's outcome.
+fn deliver(
+    chunk: &[u8],
+    convert: &mut Option<tw_dialect::convert::StreamConverter>,
+    shaper: &mut StreamShaper,
+    inspector: Option<&mut crate::tool_inspection::StreamInspector>,
+    client: Dialect,
+) -> Result<Vec<u8>, (Vec<u8>, StreamOutcome)> {
+    let client_bytes = match convert.as_mut() {
+        Some(c) => c.process(chunk),
+        None => chunk.to_vec(),
+    };
+    let out = shaper.process(&client_bytes);
+    match inspector.and_then(|i| i.check(&out)) {
+        Some((err, safe)) => {
+            let out = cut(shaper, convert.as_mut(), client, &out[..safe], &err);
+            Err((
+                out,
+                StreamOutcome::UpstreamError {
+                    error_type: err.error_tag().to_string(),
+                    message: err.to_string(),
+                    status_code: err.status_code(),
+                },
+            ))
+        }
+        None => Ok(out),
+    }
+}
+
+/// A stream's opening, held back from the client while a failure could
+/// still be sent again (see `proxy::retry`): what an upstream sends as
+/// soon as it takes the request — Anthropic's `message_start` and `ping`,
+/// Responses' `response.created` and `response.in_progress`, a Chat chunk
+/// with only the role, Bedrock's `messageStart` — is not yet the answer.
+/// Sent ahead of a failure, it could not be taken back, and a retry would
+/// send it twice. It goes out with the first content, or with an error
+/// that is the answer.
+///
+/// Read on the upstream's bytes in its own format, as
+/// `tw_dialect::convert::Reader` reads them: anything past the start and
+/// the usage is content. An opening that grows past [`Opening::MAX`]
+/// without any is let through: a broken upstream must not make it grow
+/// without end.
+struct Opening {
+    reader: tw_dialect::convert::Reader,
+    held: Vec<u8>,
+}
+
+impl Opening {
+    const MAX: usize = 1024 * 1024;
+
+    fn new(upstream: Dialect) -> Self {
+        Self {
+            reader: tw_dialect::convert::Reader::new(upstream),
+            held: Vec::new(),
+        }
+    }
+
+    /// Hold `chunk` back. True once it carries content ahead of any error,
+    /// and with it what was held can go out: an error after content is
+    /// one after the answer began, whatever piece of the upstream's bytes
+    /// it came in.
+    fn feed(&mut self, chunk: &[u8]) -> bool {
+        use tw_dialect::ir::Event;
+        self.held.extend_from_slice(chunk);
+        let content = self
+            .reader
+            .feed(chunk)
+            .iter()
+            .take_while(|e| !matches!(e, Event::Error { .. }))
+            .any(|e| !matches!(e, Event::Start { .. } | Event::Usage(_)));
+        content || self.held.len() > Self::MAX
+    }
+
+    /// What was held back, to go out.
+    fn release(self) -> Vec<u8> {
+        self.held
+    }
 }
 
 /// Tell the tail how the stream ended. Only the first outcome counts.
@@ -1156,7 +1533,13 @@ impl Surface for ChatCompletionSurface {
             deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
             with_usage_detail(
-                pinned_detail(error_detail, deps.route.pinned),
+                effort_detail(
+                    retried_detail(
+                        pinned_detail(error_detail, deps.route.pinned),
+                        deps.route.sel_record.retries,
+                    ),
+                    deps.route.sel_record.effort,
+                ),
                 &usage,
                 usage_estimated(&invoked.view),
             ),
@@ -1209,6 +1592,37 @@ fn pinned_detail(detail: Option<serde_json::Value>, pinned: bool) -> Option<serd
     Some(serde_json::Value::Object(d))
 }
 
+/// The audit detail, with `"retries": n` when the request went out again
+/// `n` times after a transient failure (see `proxy::retry`).
+fn retried_detail(detail: Option<serde_json::Value>, retries: u32) -> Option<serde_json::Value> {
+    if retries == 0 {
+        return detail;
+    }
+    let mut d = match detail {
+        Some(serde_json::Value::Object(d)) => d,
+        _ => serde_json::Map::new(),
+    };
+    d.insert("retries".into(), retries.into());
+    Some(serde_json::Value::Object(d))
+}
+
+/// The audit detail, with `"effort"` when the hop that answered sent a
+/// different reasoning effort than the caller asked (see `proxy::effort`).
+fn effort_detail(
+    detail: Option<serde_json::Value>,
+    effort: Option<crate::proxy::effort::EffortChange>,
+) -> Option<serde_json::Value> {
+    let Some(effort) = effort else {
+        return detail;
+    };
+    let mut d = match detail {
+        Some(serde_json::Value::Object(d)) => d,
+        _ => serde_json::Map::new(),
+    };
+    d.insert("effort".into(), effort.detail());
+    Some(serde_json::Value::Object(d))
+}
+
 /// The usage a captured view bills — shared by `record_usage` and
 /// `emit_audit` so the budget and the audit row can never disagree.
 fn extract_usage(view: &CapturedView<ChatCompletionSurface>) -> tw_dialect::usage::Usage {
@@ -1232,6 +1646,243 @@ fn usage_estimated(view: &CapturedView<ChatCompletionSurface>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(kind: &str, v: serde_json::Value) -> String {
+        format!("event: {kind}\ndata: {v}\n\n")
+    }
+
+    /// What an upstream sends as soon as it takes the request is held;
+    /// the first content lets it all through.
+    #[test]
+    fn a_streams_opening_is_held_until_its_first_content() {
+        use serde_json::json;
+
+        let start = frame(
+            "message_start",
+            json!({"type": "message_start", "message": {"id": "msg_1", "model": "m",
+                   "usage": {"input_tokens": 3, "output_tokens": 1}}}),
+        );
+        let ping = frame("ping", json!({"type": "ping"}));
+        let block = frame(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}),
+        );
+        let mut o = Opening::new(Dialect::Anthropic);
+        assert!(!o.feed(start.as_bytes()));
+        assert!(!o.feed(ping.as_bytes()));
+        assert!(o.feed(block.as_bytes()));
+        assert_eq!(o.release(), [start, ping, block].concat().into_bytes());
+
+        let mut o = Opening::new(Dialect::Responses);
+        let created = json!({"response": {"id": "resp_1", "model": "m"}});
+        assert!(!o.feed(frame("response.created", created.clone()).as_bytes()));
+        assert!(!o.feed(frame("response.in_progress", created).as_bytes()));
+        assert!(
+            o.feed(
+                frame(
+                    "response.output_text.delta",
+                    json!({"type": "response.output_text.delta", "output_index": 0,
+                       "content_index": 0, "delta": "Hi"}),
+                )
+                .as_bytes()
+            )
+        );
+
+        let chunk = |delta: serde_json::Value| {
+            format!(
+                "data: {}\n\n",
+                json!({"id": "c", "model": "m", "choices": [{"index": 0, "delta": delta}]})
+            )
+        };
+        let mut o = Opening::new(Dialect::Chat);
+        assert!(!o.feed(chunk(json!({"role": "assistant", "content": ""})).as_bytes()));
+        assert!(o.feed(chunk(json!({"content": "Hi"})).as_bytes()));
+    }
+
+    /// An error is not content: whether it goes out again is decided
+    /// with the opening still held. Content ahead of it in the same piece
+    /// of bytes began the answer.
+    #[test]
+    fn an_error_in_the_opening_is_not_content() {
+        use serde_json::json;
+
+        let start = frame(
+            "message_start",
+            json!({"type": "message_start", "message": {"id": "msg_1", "model": "m"}}),
+        );
+        let overload = frame(
+            "error",
+            json!({"type": "error",
+                   "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+        );
+        let text = frame(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}),
+        );
+        let mut o = Opening::new(Dialect::Anthropic);
+        assert!(!o.feed([start.as_str(), overload.as_str()].concat().as_bytes()));
+
+        let mut o = Opening::new(Dialect::Anthropic);
+        assert!(o.feed([start, text, overload].concat().as_bytes()));
+    }
+
+    /// An opening that grows without any content is let through.
+    #[test]
+    fn an_opening_does_not_grow_without_end() {
+        let mut o = Opening::new(Dialect::Chat);
+        let comment = format!(": {}\n\n", "x".repeat(64 * 1024));
+        let fed = (0..32)
+            .map(|_| o.feed(comment.as_bytes()))
+            .collect::<Vec<_>>();
+        assert!(!fed[0]);
+        assert!(fed.last().copied().unwrap_or(false));
+    }
+
+    /// Which errors an upstream reports in its stream are worth sending
+    /// again for: an overload or a server error, not a refusal.
+    #[test]
+    fn an_overload_or_a_server_error_in_a_stream_is_transient() {
+        let cases = [
+            (
+                Dialect::Anthropic,
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+                true,
+            ),
+            (
+                Dialect::Anthropic,
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal\"}}\n\n",
+                true,
+            ),
+            (
+                Dialect::Chat,
+                "data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\"}}\n\n",
+                true,
+            ),
+            (
+                Dialect::Responses,
+                "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"busy\"}}}\n\n",
+                true,
+            ),
+            (
+                Dialect::Gemini,
+                "data: {\"error\":{\"code\":503,\"message\":\"busy\",\"status\":\"UNAVAILABLE\"}}\n\n",
+                true,
+            ),
+            (
+                Dialect::Anthropic,
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"too long\"}}\n\n",
+                false,
+            ),
+            (
+                Dialect::Anthropic,
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}\n\n",
+                false,
+            ),
+            // Nothing recognisable: not sent again on a guess.
+            (
+                Dialect::Chat,
+                "data: {\"error\":{\"message\":\"odd\",\"code\":\"upstream_wobble\"}}\n\n",
+                false,
+            ),
+        ];
+        for (dialect, frames, transient) in cases {
+            let mut r = Readers {
+                errors: Some(ErrorWatch::new(dialect)),
+                ..Default::default()
+            };
+            r.feed(frames.as_bytes());
+            let said = r.reported(false).unwrap_or_else(|| panic!("{frames}"));
+            let StreamOutcome::UpstreamError {
+                error_type,
+                status_code,
+                ..
+            } = outcome_of("up", &said)
+            else {
+                panic!("not a failure");
+            };
+            assert_eq!(
+                crate::proxy::retry::transient(&error_type, status_code),
+                transient,
+                "{frames}"
+            );
+            // Left in place for the tail.
+            assert_eq!(r.upstream_error(), Some(said));
+        }
+    }
+
+    /// A last error frame without a blank line after it is read once the
+    /// stream ends.
+    #[test]
+    fn an_error_in_the_last_frame_is_reported_at_the_end() {
+        let mut r = Readers {
+            errors: Some(ErrorWatch::new(Dialect::Chat)),
+            ..Default::default()
+        };
+        r.feed(b"data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\"}}");
+        assert_eq!(r.reported(false), None);
+        let said = r.reported(true).unwrap();
+        assert_eq!(said.status, Some(500));
+    }
+
+    /// A Gemini client, SSE or JSON array, never gets a keep-alive comment.
+    #[test]
+    fn only_non_gemini_clients_get_keep_alives() {
+        assert!(!keeps_alive(Dialect::Gemini));
+        for client in [Dialect::Chat, Dialect::Anthropic, Dialect::Responses] {
+            assert!(keeps_alive(client));
+        }
+    }
+
+    /// A retry clears what the failed attempt left for the tail, and says
+    /// the stream is waiting.
+    #[test]
+    fn deciding_a_retry_clears_the_failed_attempt() {
+        let readers = Mutex::new(Readers {
+            errors: Some(ErrorWatch::new(Dialect::Anthropic)),
+            sniffer: Some(tw_dialect::usage::Sniffer::new()),
+            ..Default::default()
+        });
+        readers.lock().unwrap().feed(
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"x\"}}\n\n",
+        );
+        let sent = Mutex::new(Sent {
+            retries: 0,
+            last_sent: std::time::Instant::now(),
+            waiting: false,
+            effort: None,
+        });
+        resending(
+            "up",
+            1,
+            std::time::Duration::from_secs(2),
+            "x",
+            &readers,
+            &sent,
+        );
+        let mut r = readers.lock().unwrap();
+        assert!(r.sniffer.is_none() && r.upstream_error().is_none());
+        let s = *sent.lock().unwrap();
+        assert_eq!((s.retries, s.waiting), (1, true));
+    }
+
+    /// While the gateway waits, the client hears a keep-alive every 15
+    /// seconds of silence, and the wait ends on time.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_sends_a_keep_alive_every_fifteen_seconds() {
+        let start = tokio::time::Instant::now();
+        let quiet_since = start - std::time::Duration::from_secs(5);
+        let until = start + std::time::Duration::from_secs(40);
+        let ticks = keep_alives(quiet_since, until);
+        let mut ticks = std::pin::pin!(ticks);
+        let mut at = Vec::new();
+        while ticks.next().await.is_some() {
+            at.push((tokio::time::Instant::now() - start).as_secs());
+        }
+        assert_eq!(at, [10, 25]);
+        assert_eq!((tokio::time::Instant::now() - start).as_secs(), 40);
+    }
 
     #[test]
     fn the_last_frame_is_seen_in_the_chunk_that_completes_it() {
@@ -1367,6 +2018,24 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_reasoning_effort_is_said_on_the_log_row() {
+        use crate::proxy::effort::{EffortChange, Reason};
+        assert_eq!(effort_detail(None, None), None);
+        let change = EffortChange {
+            asked: "xhigh",
+            sent: Some("high"),
+            reason: Reason::Rejected,
+        };
+        assert_eq!(
+            effort_detail(Some(serde_json::json!({"retries": 1})), Some(change)),
+            Some(serde_json::json!({
+                "retries": 1,
+                "effort": {"asked": "xhigh", "sent": "high", "reason": "rejected"},
+            }))
+        );
+    }
+
+    #[test]
     fn a_pinned_route_is_said_on_the_log_row() {
         assert_eq!(pinned_detail(None, false), None);
         assert_eq!(
@@ -1451,7 +2120,7 @@ mod tests {
     /// the chunk's text, which can be the model's answer.
     #[test]
     fn an_error_that_names_no_status_is_the_upstreams_failure() {
-        let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"the secret plan\"}}],\"error\":{\"code\":\"server_error\"}}\n\n";
+        let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"the secret plan\"}}],\"error\":{\"code\":\"upstream_wobble\"}}\n\n";
         let (error_type, status, message, counted) = recorded(Dialect::Chat, chat).unwrap();
         assert_eq!((error_type.as_str(), status), ("ProviderError", 502));
         assert!(counted);
@@ -1483,11 +2152,12 @@ mod tests {
         let gemini = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}],\"error\":null}\n\n";
         assert_eq!(recorded(Dialect::Gemini, gemini), None);
 
-        // And an error after such chunks is still seen.
+        // And an error after such chunks is still seen: OpenAI's
+        // `server_error` is its 500.
         let then = format!(
             "{chat}data: {{\"error\":{{\"message\":\"boom\",\"type\":\"server_error\"}}}}\n\n"
         );
-        assert_eq!(recorded(Dialect::Chat, &then).unwrap().1, 502);
+        assert_eq!(recorded(Dialect::Chat, &then).unwrap().1, 500);
     }
 
     /// Cut to 500 characters, as a refusal's body is.

@@ -52,6 +52,8 @@ pub struct ModelRow {
     /// The most output tokens a request to this model may ask for.
     /// `None` ⇒ no limit.
     pub max_output_tokens: Option<i32>,
+    /// The reasoning setting (`off`, `low` … `max`). `None` ⇒ unchanged.
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
@@ -92,7 +94,7 @@ pub struct ModelRouteRow {
 const MODEL_COLUMNS: &str = "id, model_id, display_name, input_weight, output_weight, \
      cache_read_weight, cache_write_weight, cache_write_1h_weight, \
      routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled, \
-     max_output_tokens";
+     max_output_tokens, reasoning_effort";
 
 /// One page of the catalog, and the total matching `search` / `status`.
 ///
@@ -144,7 +146,7 @@ pub async fn list(
                   m.enabled,
                   COALESCE(rc.providers, '{{}}'::text[]) AS providers,
                   m.routing_strategy, m.affinity_mode, m.affinity_ttl_secs,
-                  m.max_output_tokens
+                  m.max_output_tokens, m.reasoning_effort
            FROM models m
            LEFT JOIN LATERAL (
              SELECT COUNT(*)                                 AS route_count,
@@ -186,6 +188,7 @@ pub struct ModelFields<'a> {
     pub affinity_ttl_secs: Option<i32>,
     pub tags: Option<&'a [String]>,
     pub max_output_tokens: Option<i32>,
+    pub reasoning_effort: Option<&'a str>,
     /// Read, 5-minute write, 1-hour write.
     pub cache_weights: [Option<Decimal>; 3],
 }
@@ -196,8 +199,9 @@ pub async fn insert(pool: &PgPool, model_id: &str, f: &ModelFields<'_>) -> Resul
               (model_id, display_name, input_weight, output_weight,
                routing_strategy, affinity_mode, affinity_ttl_secs, tags,
                max_output_tokens,
-               cache_read_weight, cache_write_weight, cache_write_1h_weight)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+               cache_read_weight, cache_write_weight, cache_write_1h_weight,
+               reasoning_effort)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            RETURNING {MODEL_COLUMNS}"#
     );
     Ok(sqlx::query_as::<_, Model>(AssertSqlSafe(sql))
@@ -213,6 +217,7 @@ pub async fn insert(pool: &PgPool, model_id: &str, f: &ModelFields<'_>) -> Resul
         .bind(f.cache_weights[0])
         .bind(f.cache_weights[1])
         .bind(f.cache_weights[2])
+        .bind(f.reasoning_effort)
         .fetch_one(pool)
         .await?)
 }
@@ -245,7 +250,8 @@ pub async fn update(
               max_output_tokens = $10,
               cache_read_weight     = $11,
               cache_write_weight    = $12,
-              cache_write_1h_weight = $13
+              cache_write_1h_weight = $13,
+              reasoning_effort      = $14
            WHERE id = $1
            RETURNING {MODEL_COLUMNS}"#
     );
@@ -263,6 +269,7 @@ pub async fn update(
         .bind(f.cache_weights[0])
         .bind(f.cache_weights[1])
         .bind(f.cache_weights[2])
+        .bind(f.reasoning_effort)
         .fetch_one(pool)
         .await?)
 }

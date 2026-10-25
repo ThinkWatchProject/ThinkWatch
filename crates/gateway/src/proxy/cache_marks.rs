@@ -73,6 +73,7 @@ pub fn is_refusal(err: &GatewayError, label: &str) -> bool {
     let GatewayError::ProviderHttpError {
         status: 400,
         message,
+        ..
     } = err
     else {
         return false;
@@ -102,6 +103,7 @@ mod tests {
         GatewayError::ProviderHttpError {
             status,
             message: format!("relay: {said}"),
+            retry_after: None,
         }
     }
 
@@ -134,6 +136,7 @@ mod tests {
             &GatewayError::ProviderHttpError {
                 status: 400,
                 message: "prompt caching proxy: max_tokens: Field required".into(),
+                retry_after: None,
             },
             "prompt caching proxy"
         ));

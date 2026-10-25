@@ -386,6 +386,9 @@ pub async fn update_provider(
         // path back for an operator who fixed access upstream and
         // re-saved their credentials.
         let forgotten = crate::protocol_probe::clear_for_provider(&state.db, id).await;
+        // And for the reasoning efforts it refused: another upstream may
+        // take them.
+        think_watch_gateway::proxy::effort::forget_provider(&state.redis, id).await;
         if cleared > 0 || forgotten > 0 {
             tracing::info!(
                 provider = %existing.name,
@@ -464,6 +467,7 @@ pub async fn delete_provider(
         .await?;
     let name = repo::name_of(&state.db, id).await?;
     let routes_deleted = repo::soft_delete(&state.db, id).await?;
+    think_watch_gateway::proxy::effort::forget_provider(&state.redis, id).await;
 
     state.audit.log(
         auth_user

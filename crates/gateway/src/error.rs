@@ -12,9 +12,17 @@ pub enum GatewayError {
     /// Upstream returned a non-2xx, non-429, non-401 status. The
     /// status is kept structured so error-classifier metrics stay
     /// readable and the gateway can classify retry-eligible 5xx
-    /// versus poison 4xx without parsing the message.
+    /// versus poison 4xx without parsing the message. `retry_after` is
+    /// when the upstream said to try again (`retry-after-ms` or
+    /// `Retry-After`), which an overloaded upstream can send with a 503:
+    /// the gateway waits that long before sending to it again (see
+    /// `proxy::retry`).
     #[error("Provider HTTP {status}: {message}")]
-    ProviderHttpError { status: u16, message: String },
+    ProviderHttpError {
+        status: u16,
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
     /// Upstream took longer than the configured timeout. Distinct
     /// from a network drop because the request reached the upstream
     /// — only the response was missing in time.

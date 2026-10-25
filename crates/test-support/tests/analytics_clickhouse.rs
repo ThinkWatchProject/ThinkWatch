@@ -648,7 +648,7 @@ async fn an_error_the_upstream_reports_in_its_stream_fails_the_request() {
         assert_failed_partway(
             status,
             &detail,
-            (502, "ProviderError"),
+            (500, "ProviderHttpError"),
             "The model crashed.",
         );
     }
@@ -790,7 +790,7 @@ async fn a_caller_that_leaves_after_response_failed_saw_the_request_fail() {
     assert_failed_partway(
         rows[0].0,
         &rows[0].1,
-        (502, "ProviderError"),
+        (500, "ProviderHttpError"),
         "The model crashed.",
     );
 }
@@ -956,4 +956,92 @@ async fn v1_usage_reports_the_cost_this_month_from_the_request_log() {
         (b - 2.0 * one_call).abs() < 1e-9,
         "b={b} one call={one_call}"
     );
+}
+
+/// A request that went out again after a transient failure says how many
+/// times on its log row — whole answer and stream alike.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn a_retried_request_says_so_on_its_log_row() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let app = TestApp::spawn_with_clickhouse().await;
+    app.set_setting("gateway.retry_wait_secs", json!(30)).await;
+    let model = "gpt-retried";
+    let upstream = MockServer::start().await;
+    // Every request is overloaded once, then answered.
+    let overloaded = || {
+        ResponseTemplate::new(503)
+            .insert_header("retry-after-ms", "250")
+            .set_body_json(json!({"error": {"message": "overloaded"}}))
+    };
+    let chunk = |delta: Value, finish: Value| {
+        format!(
+            "data: {}\n\n",
+            json!({"id": "c", "object": "chat.completion.chunk", "created": 1, "model": model,
+                   "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                   "usage": null})
+        )
+    };
+    let stream = [
+        chunk(json!({"content": "hi"}), Value::Null),
+        chunk(json!({}), json!("stop")),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(overloaded())
+        .up_to_n_times(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-retried", "object": "chat.completion", "created": 1, "model": model,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        })))
+        .up_to_n_times(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(overloaded())
+        .up_to_n_times(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(stream, "text/event-stream"))
+        .mount(&upstream)
+        .await;
+    let (key, user_id) = seed_upstream(&app, &upstream.uri(), "openai", model).await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&key);
+    // Two prompts: the second must not be the first one's cache hit.
+    for (stream, prompt) in [(false, "hi"), (true, "hello")] {
+        let resp = gw
+            .post(
+                "/v1/chat/completions",
+                json!({"model": model, "stream": stream,
+                       "messages": [{"role": "user", "content": prompt}]}),
+            )
+            .await
+            .unwrap();
+        resp.assert_ok();
+    }
+    assert_eq!(
+        upstream.received_requests().await.unwrap_or_default().len(),
+        4
+    );
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse client");
+    for (status, detail) in gateway_rows(ch, user_id, 2).await {
+        assert_eq!(status, 200, "{detail}");
+        assert_eq!(detail["retries"], 1, "{detail}");
+    }
 }

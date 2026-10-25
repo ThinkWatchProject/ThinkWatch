@@ -105,6 +105,7 @@ export function SettingsPage() {
   const [defaultAffinityMode, setDefaultAffinityMode] = useState('provider');
   const [defaultAffinityTtlSecs, setDefaultAffinityTtlSecs] = useState(300);
   const [latencyStrategyK, setLatencyStrategyK] = useState(2.0);
+  const [retryWaitSecs, setRetryWaitSecs] = useState(120);
   const [cbEnabled, setCbEnabled] = useState(true);
   const [cbErrorPct, setCbErrorPct] = useState(50);
   const [cbMinSamples, setCbMinSamples] = useState(10);
@@ -162,6 +163,7 @@ export function SettingsPage() {
     setDefaultAffinityMode(str(getSettingValue(data, 'gateway', 'default_affinity_mode'), 'provider'));
     setDefaultAffinityTtlSecs(num(getSettingValue(data, 'gateway', 'default_affinity_ttl_secs'), 300));
     setLatencyStrategyK(Number(getSettingValue(data, 'gateway', 'latency_strategy_k')) || 2.0);
+    setRetryWaitSecs(num(getSettingValue(data, 'gateway', 'retry_wait_secs'), 120));
     setCbEnabled(getSettingValue(data, 'gateway', 'cb_enabled') !== false);
     setCbErrorPct(num(getSettingValue(data, 'gateway', 'cb_error_pct'), 50));
     setCbMinSamples(num(getSettingValue(data, 'gateway', 'cb_min_samples'), 10));
@@ -258,6 +260,7 @@ export function SettingsPage() {
   const defaultAffinityModeSave = useFieldAutosave({ value: defaultAffinityMode, isLoaded, persist: (v) => patchOne('gateway.default_affinity_mode', v), debounceMs: 0 });
   const defaultAffinityTtlSave = useFieldAutosave({ value: defaultAffinityTtlSecs, isLoaded, persist: (v) => patchOne('gateway.default_affinity_ttl_secs', v) });
   const latencyStrategyKSave = useFieldAutosave({ value: latencyStrategyK, isLoaded, persist: (v) => patchOne('gateway.latency_strategy_k', v) });
+  const retryWaitSecsSave = useFieldAutosave({ value: retryWaitSecs, isLoaded, persist: (v) => patchOne('gateway.retry_wait_secs', v) });
   const cbEnabledSave = useFieldAutosave({ value: cbEnabled, isLoaded, persist: (v) => patchOne('gateway.cb_enabled', v), debounceMs: 0 });
   const cbErrorPctSave = useFieldAutosave({ value: cbErrorPct, isLoaded, persist: (v) => patchOne('gateway.cb_error_pct', v) });
   const cbMinSamplesSave = useFieldAutosave({ value: cbMinSamples, isLoaded, persist: (v) => patchOne('gateway.cb_min_samples', v) });
@@ -662,6 +665,15 @@ export function SettingsPage() {
                   />
                   <p className="text-xs text-muted-foreground">{t('settings.latencyStrategyKHint')}</p>
                 </div>
+                <NumberField
+                  label={t('settings.retryWaitSecs')}
+                  value={retryWaitSecs}
+                  onChange={setRetryWaitSecs}
+                  min={0}
+                  max={600}
+                  hint={t('settings.retryWaitSecsHint')}
+                  indicator={<SaveIndicator state={retryWaitSecsSave.state} error={retryWaitSecsSave.error} />}
+                />
               </div>
             </CardContent>
           </Card>
