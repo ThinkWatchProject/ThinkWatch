@@ -63,6 +63,13 @@ export interface CardNetwork {
   lengths: number[];
 }
 
+/** One prefix of a `prefixes` matcher and what must follow it: any token characters, hex digits, or letters and digits. */
+export interface PrefixView {
+  prefix: string;
+  min_tail: number;
+  tail: 'any' | 'hex' | 'alnum';
+}
+
 /**
  * What a rule matches, for display. Built-in rules use the specific kinds;
  * custom rules are `regex`, `contains` or `codepoints`. `case_sensitive`
@@ -71,11 +78,17 @@ export interface CardNetwork {
  * `codepoints.ranges` is the canonical spelling (`U+200B`,
  * `U+E0000–U+E007F`); a custom rule's is the items as written, so joining
  * them with `, ` gives back what is stored. `builtin` is a check
- * implemented in code, with nothing to show but its stable name. A kind
- * the console does not know yet is shown with a generic description.
+ * implemented in code, with nothing to show but its stable name: a
+ * tool-call check's name, or the id of a redaction rule that checks digits,
+ * word lists or where a value sits. A kind the console does not know yet is
+ * shown with a generic description.
  */
 export type Matcher =
   | { kind: 'prefix'; prefix: string; min_tail: number }
+  | { kind: 'prefixes'; prefixes: PrefixView[] }
+  | { kind: 'saved' }
+  | { kind: 'assignment'; suffixes: string[] }
+  | { kind: 'labeled'; names: string[] }
   | { kind: 'openai-legacy'; min_len: number }
   | { kind: 'pem' }
   | { kind: 'jwt' }
@@ -101,9 +114,13 @@ export interface SecurityRuleView {
   /** Why the rule is worth a look (English). Absent where the name says it, and on custom rules. */
   why?: string;
   /**
-   * Group. Redaction: `api-keys` `private-keys` `jwt` `conn-strings`
-   * `personal` `internal`; tool calls: `command`; content: `invisible`
-   * `injection` `persona` `chinese`. Custom rules: `custom`.
+   * Group, in the order the server lists them. Redaction: `saved`
+   * `ai-services` `dev-platforms` `cloud` `business` `private-keys` `jwt`
+   * `conn-strings` `in-context` `crypto` (credentials), `id-documents`
+   * `foreign-ids` `financial` `contact` `location` `vehicle` `device`
+   * `labeled-personal` (personal information), `internal`; tool calls:
+   * `command`; content: `invisible` `injection` `persona` `chinese`.
+   * Custom rules: `custom`.
    */
   kind: string;
   matcher: Matcher;

@@ -19,7 +19,7 @@ import { Segmented } from '@/components/segmented';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { GUARDS, type Guard } from '@/lib/security-types';
-import { GUARD_ACTIONS, guardOf, outcomeOf, partOf, type GuardEvent } from './log-events';
+import { GUARD_ACTIONS, guardOf, outcomeOf, partOf, sourcesOf, type GuardEvent } from './log-events';
 import { actionTone, guardName, ruleName } from './names';
 
 const PAGE_SIZE = 50;
@@ -160,12 +160,13 @@ export function LogPanel() {
 }
 
 function EventRow({ e }: { e: GuardEvent }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const guard = guardOf(e.action);
   const d = e.detail ?? {};
   if (!guard) return null;
   const outcome = outcomeOf(t, e.action, d);
   const rule = d.rule ? ruleName(t, guard, d.rule, d.custom === true, d.rule_name) : '—';
+  const sources = new Intl.ListFormat(i18n.language, { type: 'conjunction' }).format(sourcesOf(t, d));
   const when = new Date(e.created_at);
   return (
     <TableRow>
@@ -175,6 +176,11 @@ function EventRow({ e }: { e: GuardEvent }) {
       <TableCell className="truncate">{guardName(t, guard)}</TableCell>
       <TableCell className="truncate" title={rule}>
         {rule}
+        {sources && (
+          <div className="truncate text-xs text-muted-foreground" title={sources}>
+            {sources}
+          </div>
+        )}
         {d.model && <div className="truncate text-xs text-muted-foreground">{d.model}</div>}
       </TableCell>
       <TableCell className="truncate text-muted-foreground">{partOf(t, guard, d)}</TableCell>

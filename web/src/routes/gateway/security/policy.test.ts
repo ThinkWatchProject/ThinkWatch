@@ -297,7 +297,7 @@ describe('the restructured guards', () => {
     const d: GuardDetail = {
       mode: 'enforce',
       rules: [
-        builtin({ id: 'email', kind: 'personal', matcher: { kind: 'email' }, action: 'record', default_action: 'placeholder' }),
+        builtin({ id: 'email', kind: 'contact', matcher: { kind: 'email' }, action: 'record', default_action: 'placeholder' }),
         builtin({ id: 'jwt', kind: 'jwt', matcher: { kind: 'jwt' }, action: 'placeholder', default_action: 'placeholder' }),
       ],
     }

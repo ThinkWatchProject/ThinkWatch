@@ -51,6 +51,44 @@ const REDACT_RULE_IDS = [
   'digitalocean-token', 'sendgrid-key', 'private-key', 'jwt',
   'conn-string-password', 'cn-resident-id', 'bank-card', 'email',
   'cn-mobile-phone', 'internal-ip', 'internal-domain',
+  // The expanded catalog: credentials …
+  'thinkwatch-saved-secret', 'openai-service-key', 'openrouter-key', 'xai-key',
+  'groq-key', 'huggingface-token', 'replicate-token', 'perplexity-key',
+  'bedrock-api-key', 'fireworks-key', 'cerebras-key', 'langsmith-key',
+  'langfuse-secret-key', 'pinecone-key', 'tavily-key', 'minimax-key',
+  'zhipu-api-key', 'qianfan-api-key', 'sk-compat-key', 'github-refresh-token',
+  'gitlab-other-token', 'pypi-token', 'rubygems-token', 'clojars-token',
+  'docker-hub-token', 'artifactory-key', 'databricks-token', 'sentry-token',
+  'grafana-token', 'postman-key', 'aws-other-key-id', 'alibaba-access-key-id',
+  'tencent-secret-id', 'volcengine-access-key-id', 'azure-ad-client-secret',
+  'digitalocean-other-token', 'cloudflare-origin-ca-key', 'vault-token',
+  'terraform-token', 'doppler-token', 'pulumi-token', 'heroku-key',
+  'flyio-token', 'supabase-key', 'age-secret-key', 'onepassword-token',
+  'stripe-webhook-secret', 'shopify-token', 'twilio-api-key', 'brevo-key',
+  'slack-other-token', 'linear-key', 'notion-token', 'atlassian-token',
+  'auth-header-credential', 'command-line-password', 'url-token', 'bot-webhook',
+  'telegram-bot-token', 'config-assignment', 'crypto-mnemonic',
+  'crypto-wif-key', 'crypto-extended-key',
+  // … and personal information.
+  'cn-resident-id-15', 'passport-mrz', 'cn-passport', 'hk-macau-taiwan-id',
+  'mainland-travel-permit', 'us-ssn', 'uk-nino', 'sg-nric', 'kr-rrn',
+  'jp-my-number', 'in-aadhaar', 'br-cpf', 'iban', 'cn-landline', 'intl-phone',
+  'cn-address', 'geo-coordinates', 'cn-license-plate', 'vin', 'imei',
+  'mac-address', 'public-ip', 'labeled-name', 'labeled-address',
+  'labeled-birth-date', 'labeled-account', 'labeled-health',
+];
+// Redaction rules whose matcher is a check implemented in code
+// (`{ kind: 'builtin', check: <rule id> }`): digits, word lists, or where
+// the value sits.
+const REDACT_CHECK_IDS = [
+  'zhipu-api-key', 'qianfan-api-key', 'sk-compat-key', 'azure-ad-client-secret',
+  'terraform-token', 'auth-header-credential', 'command-line-password',
+  'url-token', 'bot-webhook', 'telegram-bot-token', 'crypto-mnemonic',
+  'crypto-wif-key', 'crypto-extended-key', 'cn-resident-id-15', 'passport-mrz',
+  'cn-passport', 'hk-macau-taiwan-id', 'mainland-travel-permit', 'us-ssn',
+  'uk-nino', 'sg-nric', 'kr-rrn', 'jp-my-number', 'in-aadhaar', 'br-cpf',
+  'iban', 'cn-landline', 'intl-phone', 'cn-address', 'geo-coordinates',
+  'cn-license-plate', 'vin', 'imei', 'mac-address', 'public-ip',
 ];
 const TOOL_RULE_IDS = [
   'curl-pipe-sh', 'base64-decode-exec', 'exfil-env', 'exfil-credentials',
@@ -76,7 +114,11 @@ const DYNAMIC_ENUMS = {
   ),
   'contentSecurity.summary.${_}': ['enforce', 'observe', 'off'],
   'contentSecurity.kind.${_}': [
-    'api-keys', 'private-keys', 'jwt', 'conn-strings', 'personal', 'internal',
+    // Redaction, in thinkwatch-core's order (`tw_guard::redact::rules::Kind`).
+    'saved', 'ai-services', 'dev-platforms', 'cloud', 'business',
+    'private-keys', 'jwt', 'conn-strings', 'in-context', 'crypto',
+    'id-documents', 'foreign-ids', 'financial', 'contact', 'location',
+    'vehicle', 'device', 'labeled-personal', 'internal',
     'command', 'injection', 'persona', 'chinese', 'invisible', 'custom',
   ],
   'contentSecurity.ruleAction.${_}': RULE_ACTIONS,
@@ -92,8 +134,14 @@ const DYNAMIC_ENUMS = {
   'contentSecurity.contentRule.${_}': CONTENT_RULE_IDS,
   'contentSecurity.contentWhy.${_}': INVISIBLE_RULE_IDS,
   'contentSecurity.cardNetwork.${_}': ['UnionPay'],
-  // Tool-call checks implemented in code (`{ kind: 'builtin', check }`).
-  'contentSecurity.check.${_}': ['credential-to-network', 'file-to-network', 'thinkwatch-data'],
+  // Checks implemented in code (`{ kind: 'builtin', check }`): tool-call
+  // checks, and redaction rules by id.
+  'contentSecurity.check.${_}': [
+    'credential-to-network', 'file-to-network', 'thinkwatch-data', ...REDACT_CHECK_IDS,
+  ],
+  'contentSecurity.matcher.prefixes.${_}': ['any', 'hex', 'alnum'],
+  // Where a saved secret came from (`sources[].kind` of a redaction event).
+  'contentSecurity.log.source.${_}': ['upstream-key'],
   'contentSecurity.dialog.match.${_}': ['contains', 'regex', 'codepoints'],
   'contentSecurity.dialog.regexHint.${_}': GUARD_IDS,
   'contentSecurity.dialog.actionWhat.${_}': RULE_ACTIONS,

@@ -508,11 +508,13 @@ pub fn redact(patterns: Option<&Value>) -> RedactPolicy {
             }
         }
     }
-    // Personal data is redacted only where the list asked for it. The
-    // credential rules are not personal data and stay on.
+    // The personal data the old list could express (the seeded patterns'
+    // rules) is redacted only where the list asked for it. Credential
+    // rules are not personal data and stay on; personal rules the old
+    // list never knew run as they ship.
     for b in tw_guard::redact::rules::BUILTINS
         .iter()
-        .filter(|b| b.kind == tw_guard::redact::rules::Kind::Personal)
+        .filter(|b| b.kind.is_personal() && SEEDED_PII.iter().any(|(_, _, id)| *id == b.id))
     {
         match (covered.contains(b.id), b.on_by_default) {
             (true, false) => policy.enable.push(b.id.to_string()),

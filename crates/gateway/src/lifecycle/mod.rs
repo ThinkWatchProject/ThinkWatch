@@ -2316,11 +2316,14 @@ mod tests {
             ContentAction, ContentMatch, ContentPolicy, ContentScope, CustomContentRule, Mode,
             RedactPolicy,
         };
-        let redaction = crate::redaction::Redaction::new(&RedactPolicy {
-            mode: Mode::Enforce,
-            enable: vec!["email".into()],
-            ..Default::default()
-        });
+        let redaction = crate::redaction::Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                enable: vec!["email".into()],
+                ..Default::default()
+            },
+            Default::default(),
+        );
         let request = serde_json::json!({"messages": [
             {"role": "user", "content": "my email is alice@corp.example.org"}
         ]})

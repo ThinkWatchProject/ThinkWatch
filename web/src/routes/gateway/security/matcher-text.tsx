@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { Matcher } from '@/lib/security-types';
+import type { Matcher, PrefixView } from '@/lib/security-types';
 import { cn } from '@/lib/utils';
 
 /**
@@ -53,6 +53,21 @@ export function Codepoints({ ranges }: { ranges: string[] }) {
   );
 }
 
+/**
+ * A `prefixes` matcher's prefixes, grouped by what must follow them, in
+ * the order they first appear: `sk-svcacct-` and `sk-admin-` both take 58
+ * characters and read as one clause.
+ */
+function prefixGroups(list: PrefixView[]): { tail: PrefixView['tail']; n: number; prefixes: string[] }[] {
+  const out: { tail: PrefixView['tail']; n: number; prefixes: string[] }[] = [];
+  for (const p of list) {
+    const g = out.find((o) => o.tail === p.tail && o.n === p.min_tail);
+    if (g) g.prefixes.push(p.prefix);
+    else out.push({ tail: p.tail, n: p.min_tail, prefixes: [p.prefix] });
+  }
+  return out;
+}
+
 /** What a rule matches, as one sentence. */
 export function MatcherText({ m }: { m: Matcher }) {
   const { t, i18n } = useTranslation();
@@ -62,6 +77,42 @@ export function MatcherText({ m }: { m: Matcher }) {
       return fill(t('contentSecurity.matcher.prefix', RAW), {
         prefix: <Code>{m.prefix}</Code>,
         n: m.min_tail,
+      });
+    case 'prefixes': {
+      const sep = t('contentSecurity.matcher.groupSep');
+      return fill(t('contentSecurity.matcher.prefixesAll', RAW), {
+        groups: prefixGroups(m.prefixes).map((g, i) => (
+          <Fragment key={`${g.tail}:${g.n}`}>
+            {i > 0 && sep}
+            {fill(t(`contentSecurity.matcher.prefixes.${g.tail}`, RAW), {
+              prefixes: joined(
+                lang,
+                g.prefixes.map((p) => <Code key={p}>{p}</Code>),
+                'disjunction',
+              ),
+              n: g.n,
+            })}
+          </Fragment>
+        )),
+      });
+    }
+    case 'saved':
+      return t('contentSecurity.matcher.saved');
+    case 'assignment':
+      return fill(t('contentSecurity.matcher.assignment', RAW), {
+        suffixes: joined(
+          lang,
+          m.suffixes.map((s) => <Code key={s}>{s}</Code>),
+          'disjunction',
+        ),
+      });
+    case 'labeled':
+      return fill(t('contentSecurity.matcher.labeled', RAW), {
+        names: joined(
+          lang,
+          m.names.map((n) => <Code key={n}>{n}</Code>),
+          'disjunction',
+        ),
       });
     case 'openai-legacy':
       return fill(t('contentSecurity.matcher.openaiLegacy', RAW), {
@@ -82,9 +133,10 @@ export function MatcherText({ m }: { m: Matcher }) {
       return fill(t('contentSecurity.matcher.privateIp', RAW), {
         ranges: joined(
           lang,
-          ['10.', '172.16–31.', '192.168.'].map((p) => <Code key={p}>{p}</Code>),
+          ['10.', '172.16–31.', '192.168.', '100.64–127.'].map((p) => <Code key={p}>{p}</Code>),
           'disjunction',
         ),
+        ula: <Code>fc00::/7</Code>,
         loopback: <Code>127.0.0.1</Code>,
       });
     case 'domain-suffix':
@@ -127,7 +179,8 @@ export function MatcherText({ m }: { m: Matcher }) {
         ranges: <Codepoints ranges={m.ranges} />,
       });
     case 'builtin':
-      // A check implemented in code: say what it looks for, not how.
+      // A check implemented in code — a tool-call check, or a redaction
+      // rule by its id: say what it looks for, not how.
       return t(`contentSecurity.check.${m.check}`, { defaultValue: t('contentSecurity.matcher.other') });
     default:
       // A kind this console does not know yet.

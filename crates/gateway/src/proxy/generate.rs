@@ -969,7 +969,7 @@ async fn run(
     //    redaction setting applies on top).
     let shape = Shape::Generate(surface.dialect);
     let (findings, ledger) = guards.redaction.look(&body, shape);
-    crate::redaction::record(&state.audit, &caller, &guards.redaction, &findings);
+    crate::redaction::record(&state.audit, &caller, &guards.redaction, &findings, &body);
     let request_for_audit = body.to_vec();
     let outbound_body = if ledger.is_empty() {
         raw
@@ -1506,10 +1506,13 @@ mod tests {
     }
 
     fn outbound(surface: ClientSurface, path: &str, body: Value, cap: Option<u32>) -> Outbound {
-        let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
-            mode: tw_guard::policy::Mode::Off,
-            ..Default::default()
-        });
+        let redaction = Redaction::new(
+            &tw_guard::policy::RedactPolicy {
+                mode: tw_guard::policy::Mode::Off,
+                ..Default::default()
+            },
+            Default::default(),
+        );
         let (_, ledger) = redaction.look(b"{}", Shape::Generate(surface.dialect));
         Outbound {
             surface,

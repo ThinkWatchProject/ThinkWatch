@@ -289,15 +289,36 @@ export function groupState(rules: readonly SecurityRuleView[]): boolean | 'indet
   return on === 0 ? false : on === rules.length ? true : 'indeterminate';
 }
 
+/** The literals a built-in matcher shows: prefixes, name endings, field names, domain suffixes. */
+function literalsOf(m: Matcher): string[] {
+  switch (m.kind) {
+    case 'prefix':
+      return [m.prefix];
+    case 'prefixes':
+      return m.prefixes.map((p) => p.prefix);
+    case 'assignment':
+      return m.suffixes;
+    case 'labeled':
+      return m.names;
+    case 'domain-suffix':
+      return m.suffixes;
+    default:
+      return [];
+  }
+}
+
 /**
  * Whether a rule matches a search: its name (as shown, or its id) or what it
- * matches, ignoring case. An empty search matches every rule.
+ * matches — a custom rule's pattern, a built-in rule's prefixes or field
+ * names — ignoring case. An empty search matches every rule.
  */
 export function matchesSearch(r: SecurityRuleView, shownName: string, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   const pattern = patternOf(r)?.pattern ?? '';
-  return [shownName, r.id, r.name, pattern].some((s) => s.toLowerCase().includes(q));
+  return [shownName, r.id, r.name, pattern, ...literalsOf(r.matcher)].some((s) =>
+    s.toLowerCase().includes(q),
+  );
 }
 
 /**

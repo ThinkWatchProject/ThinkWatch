@@ -23,10 +23,22 @@ const detail = (): SecurityDetail => ({
     mode: 'observe',
     rules: [
       {
+        id: 'thinkwatch-saved-secret',
+        custom: false,
+        name: 'Saved key',
+        kind: 'saved',
+        matcher: { kind: 'saved' },
+        enabled: true,
+        on_by_default: true,
+        action: 'placeholder',
+        default_action: 'placeholder',
+        label: 'SECRET',
+      },
+      {
         id: 'anthropic-api-key',
         custom: false,
         name: 'Anthropic API key',
-        kind: 'api-keys',
+        kind: 'ai-services',
         matcher: { kind: 'prefix', prefix: 'sk-ant-', min_tail: 20 },
         enabled: true,
         on_by_default: true,
@@ -38,7 +50,7 @@ const detail = (): SecurityDetail => ({
         id: 'email',
         custom: false,
         name: 'Email address',
-        kind: 'personal',
+        kind: 'contact',
         matcher: { kind: 'email' },
         enabled: false,
         on_by_default: false,
@@ -98,7 +110,7 @@ const detail = (): SecurityDetail => ({
 })
 
 const events = {
-  total: 2,
+  total: 3,
   items: [
     {
       id: 'e1',
@@ -123,6 +135,20 @@ const events = {
       created_at: '2026-10-12T07:00:00Z',
       detail: { trace_id: 't2', rule: 'anthropic-api-key', custom: false, outcome: 'recorded', mode: 'observe' },
     },
+    {
+      id: 'e3',
+      action: 'gateway.redaction_replaced',
+      api_key_id: 'k1',
+      created_at: '2026-10-12T06:00:00Z',
+      detail: {
+        trace_id: 't3',
+        rule: 'thinkwatch-saved-secret',
+        custom: false,
+        outcome: 'replaced',
+        mode: 'enforce',
+        sources: [{ kind: 'upstream-key', name: 'DeepSeek' }],
+      },
+    },
   ],
 }
 
@@ -145,16 +171,22 @@ describe('GatewaySecurityPage', () => {
 
     await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
     expect(await screen.findByText('Anthropic API key')).toBeInTheDocument()
-    expect(screen.getByText('API keys')).toBeInTheDocument()
-    expect(screen.getByText('Personal information')).toBeInTheDocument()
+    // Groups in the server's order, saved keys first.
+    const groups = ['Keys saved in ThinkWatch', 'AI services', 'Contact details']
+    expect(groups.map((g) => screen.getByText(g).compareDocumentPosition(screen.getByText('Anthropic API key')))).toEqual([
+      Node.DOCUMENT_POSITION_FOLLOWING,
+      Node.DOCUMENT_POSITION_FOLLOWING,
+      Node.DOCUMENT_POSITION_PRECEDING,
+    ])
+    expect(screen.getByText('The provider API keys saved in ThinkWatch, by value, whatever their format')).toBeInTheDocument()
     expect(screen.getByText('<<TW_EMAIL_1>>')).toBeInTheDocument()
     // The same three states on every guard.
     const modes = screen.getByRole('radiogroup', { name: 'Secrets & privacy mode' })
     expect(within(modes).getAllByRole('radio').map((r) => r.textContent)).toEqual(['On', 'Monitor', 'Off'])
     expect(within(modes).getByRole('radio', { name: 'Monitor' })).toBeChecked()
-    expect(screen.getByText('1 of 2 rules on.')).toBeInTheDocument()
+    expect(screen.getByText('2 of 3 rules on.')).toBeInTheDocument()
     // Monitoring: the action stays as set, and says that only recording happens.
-    expect(screen.getAllByText('Monitoring')).toHaveLength(1)
+    expect(screen.getAllByText('Monitoring')).toHaveLength(2)
   })
 
   it('opens on the log, which reads the guard events from the audit log', async () => {
@@ -166,6 +198,9 @@ describe('GatewaySecurityPage', () => {
     // A built-in rule is named; a monitor-mode hit says so.
     expect(screen.getByText('Anthropic API key')).toBeInTheDocument()
     expect(screen.getByText('Monitoring')).toBeInTheDocument()
+    // A saved key is named by where it came from, never by its value.
+    expect(screen.getByText('Key saved in ThinkWatch')).toBeInTheDocument()
+    expect(screen.getByText('API key of provider DeepSeek')).toBeInTheDocument()
     const call = vi.mocked(api).mock.calls.find(([url]) => String(url).startsWith('/api/audit/logs?'))
     const params = new URLSearchParams(String(call?.[0]).split('?')[1])
     expect(params.get('action')?.split(',')).toContain('gateway.content_replaced')
@@ -185,7 +220,7 @@ describe('GatewaySecurityPage', () => {
     renderWithQueryClient(<GatewaySecurityPage />)
 
     await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
-    await user.click(await screen.findByRole('checkbox', { name: 'Turn every rule in "Personal information" on or off' }))
+    await user.click(await screen.findByRole('checkbox', { name: 'Turn every rule in "Contact details" on or off' }))
     await waitFor(() =>
       expect(apiPatch).toHaveBeenCalledWith('/api/admin/settings', {
         settings: { 'security.redact': { mode: 'observe', enable: ['email'] } },
@@ -473,7 +508,7 @@ describe('GatewaySecurityPage', () => {
     expect(await screen.findByRole('switch', { name: 'Turn on "Email address"' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'New rule' })).toBeDisabled()
     expect(screen.getByRole('radio', { name: 'On' })).toBeDisabled()
-    expect(screen.getByRole('checkbox', { name: 'Turn every rule in "API keys" on or off' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Turn every rule in "AI services" on or off' })).toBeDisabled()
     // The action is said, not offered.
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Test…' })).toBeEnabled()

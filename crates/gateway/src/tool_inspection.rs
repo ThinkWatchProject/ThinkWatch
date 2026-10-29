@@ -460,7 +460,10 @@ mod tests {
             .find(|v| v.rule == "curl-pipe-sh")
             .expect("curl-pipe-sh fires");
         assert!(curl.excerpt.contains(key), "the engine quotes it as it is");
-        let mask = Redaction::new(&tw_guard::policy::RedactPolicy::default());
+        let mask = Redaction::new(
+            &tw_guard::policy::RedactPolicy::default(),
+            Default::default(),
+        );
         let shown = mask.mask(&curl.excerpt);
         assert!(!shown.contains(key), "{shown}");
     }
