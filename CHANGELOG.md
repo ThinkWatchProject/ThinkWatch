@@ -11,6 +11,74 @@ target.
 
 ## [Unreleased]
 
+Secrets and privacy recognises far more: the built-in redaction catalog
+grows from 30 rules to 120 in 20 groups, and the API keys saved
+for the providers are recognised by value, whatever their format. The
+console shows the rules' names and descriptions as thinkwatch-core
+writes them, in both languages. The thinkwatch-core crates move from
+v0.83.1 to v0.85.0.
+
+No new setting, column or route; the redaction policy's shape is
+unchanged.
+
+### Read before upgrading
+
+- **New credential rules ship on.** Under the On state of Secrets and
+  privacy (`security.redact` mode `enforce`), values they find start
+  being replaced with placeholders: among them credentials in request
+  headers, command lines, URLs and bot webhooks, and secrets assigned in
+  `.env`-style configuration (`DB_PASSWORD=…`). Under Monitor, the
+  factory state, they are only recorded. A rule that gets in the way can
+  be switched off on its own in the console.
+- **Some keys are reported under a rule of their own.** `sk-or-v1-`
+  (OpenRouter), `sk-lf-` (Langfuse), `sk-svcacct-`, `sk-admin-` and
+  `sk-api-` keys were reported as `openai-api-key`; they now have their
+  own rule ids, and so do audit events and the
+  `gateway_redaction_found_total` metric's `kind` label, which follows
+  the new groups (`ai-services`, `dev-platforms`, `cloud`, …) instead of
+  `api-keys` and `personal`.
+
+### Added
+
+- **Expanded redaction rules** (thinkwatch-core v0.85.0): about 50 more
+  prefixed credentials (AI services, code hosting, cloud, payments and
+  collaboration), credentials by position (request headers, command
+  lines, URL parameters, bot webhooks, configuration assignments),
+  cryptocurrency recovery phrases and private keys, and personal
+  information: identity documents, foreign ID numbers, IBAN, phone
+  numbers, addresses and coordinates, vehicles, device identifiers and
+  values by field name. Of the new personal-information rules only the
+  two that can be checked digit by digit ship on (passport
+  machine-readable zone, IBAN), alongside the resident ID and bank card
+  numbers as before.
+- **Saved upstream keys are recognised by value.** The API keys in each
+  provider's credential headers (the `Bearer` scheme left out) and a
+  Bedrock provider's secret access key are matched wherever they appear
+  in a request, as written or JSON-escaped; values shorter than 12
+  characters are not. The list follows the providers: it is rebuilt when
+  they load, when one is created, changed or deleted, and on the other
+  instances through the router reload. The same keys count as
+  credentials for the dangerous-commands rule "credential sent to an
+  unknown host", each allowed to its own provider's host, and the
+  console's trial recognises them too.
+- **A saved key's audit event names its provider, never the value.** The
+  `gateway.redaction_*` event of the rule `thinkwatch-saved-secret`
+  carries `sources` (`[{"kind": "upstream-key", "name": <provider>}]`)
+  and no masked values; the security log shows it as the provider's API
+  key.
+
+### Changed
+
+- **Rule names and descriptions come from thinkwatch-core.** The security
+  page shows each built-in rule's name, reason and description and each
+  group's name as the rule view gives them, in English or Chinese; the
+  console no longer keeps its own name tables. Security-log rows and
+  trial hits name the rule by looking its id up in the rule view. The
+  rule search also matches prefixes, field names and descriptions.
+- **The conversion of the old PII pattern list** switches on or off only
+  the four personal-information rules that list could express; the new
+  personal-information rules keep their factory setting.
+
 ## [3.10.0] — 2026-10-25
 
 Upstreams that fail for the moment before any of the answer reached the
