@@ -25,8 +25,15 @@ import {
 } from '@/components/ui/table';
 import { Segmented } from '@/components/segmented';
 import { cn } from '@/lib/utils';
-import type { Guard, GuardDetail, GuardMode, RuleAction, SecurityRuleView } from '@/lib/security-types';
-import { Code, Codepoints, MatcherText } from './matcher-text';
+import type {
+  Guard,
+  GuardDetail,
+  GuardMode,
+  RuleAction,
+  SecurityKindView,
+  SecurityRuleView,
+} from '@/lib/security-types';
+import { About, Code, Codepoints, MatcherText } from './matcher-text';
 import {
   actionName,
   actionTone,
@@ -34,6 +41,7 @@ import {
   kindName,
   modeDot,
   modeName,
+  ruleAbout,
   ruleWhy,
   scopeName,
   viewName,
@@ -124,6 +132,7 @@ export function GuardPanel({
             guard={guard}
             mode={detail.mode}
             rules={detail.rules}
+            kinds={detail.kinds}
             query={query}
             canWrite={canWrite}
             actions={actions}
@@ -216,6 +225,7 @@ function RuleTable({
   guard,
   mode,
   rules,
+  kinds,
   query,
   canWrite,
   actions,
@@ -223,17 +233,17 @@ function RuleTable({
   guard: Guard;
   mode: GuardMode;
   rules: SecurityRuleView[];
+  kinds: SecurityKindView[];
   query: string;
   canWrite: boolean;
   actions: RuleActions;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const content = guard === 'content';
-  const groupKey = (r: SecurityRuleView) =>
-    r.custom ? 'custom' : guard === 'inspect_tools' ? 'builtin' : r.kind;
-  const groupTitle = (key: string) =>
-    key === 'builtin' ? t('contentSecurity.builtinGroup') : kindName(t, key);
-  const shown = rules.filter((r) => matchesSearch(r, viewName(t, guard, r), query));
+  const groupKey = (r: SecurityRuleView) => (r.custom ? 'custom' : r.kind);
+  const groupTitle = (key: string) => kindName(lang, kinds, key);
+  const shown = rules.filter((r) => matchesSearch(r, viewName(lang, r), query));
   const columns = content ? 6 : 5;
 
   return (
@@ -305,7 +315,11 @@ function RuleTable({
 }
 
 function MatchCell({ guard, r }: { guard: Guard; r: SecurityRuleView }) {
+  const { i18n } = useTranslation();
   const m = r.matcher;
+  // A built-in redaction rule says what it finds in its own words.
+  const about = ruleAbout(i18n.language, r);
+  if (about) return <About text={about} />;
   if (guard === 'redact') return <MatcherText m={m} />;
   // Tool and content rules show the pattern itself (how it treats case is
   // said in the rule's dialog); a check implemented in code says what it
@@ -336,8 +350,8 @@ function ActionCell({
   canWrite: boolean;
   onAct: (action: RuleAction) => void;
 }) {
-  const { t } = useTranslation();
-  const name = viewName(t, guard, r);
+  const { t, i18n } = useTranslation();
+  const name = viewName(i18n.language, r);
   const action = r.action ?? 'record';
   const scope = ruleScope(r);
   const label = (a: RuleAction) =>
@@ -386,10 +400,11 @@ function RuleRow({
   canWrite: boolean;
   actions: RuleActions;
 }) {
-  const { t } = useTranslation();
-  const name = viewName(t, guard, r);
-  const why = ruleWhy(t, guard, r);
+  const { t, i18n } = useTranslation();
+  const name = viewName(i18n.language, r);
+  const why = ruleWhy(i18n.language, r);
   const pattern = patternOf(r)?.pattern;
+  const about = ruleAbout(i18n.language, r).replaceAll('`', '');
   const open = () => actions.open(r);
   const onKeyDown = (e: KeyboardEvent<HTMLTableRowElement>) => {
     if (e.target !== e.currentTarget) return;
@@ -428,7 +443,7 @@ function RuleRow({
           )
         )}
       </TableCell>
-      <TableCell className="truncate text-muted-foreground" title={pattern}>
+      <TableCell className="truncate text-muted-foreground" title={pattern ?? (about || undefined)}>
         <MatchCell guard={guard} r={r} />
       </TableCell>
       {guard === 'content' && (

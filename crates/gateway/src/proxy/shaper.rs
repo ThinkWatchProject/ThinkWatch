@@ -337,7 +337,7 @@ mod tests {
                 enable: vec!["email".into()],
                 ..Default::default()
             },
-            Default::default(),
+            &Default::default(),
         );
         let body = serde_json::json!({"messages": [
             {"role": "user", "content": email.unwrap_or("")}
@@ -561,7 +561,7 @@ mod tests {
                 mode: tw_guard::policy::Mode::Enforce,
                 ..Default::default()
             },
-            Default::default(),
+            &Default::default(),
         );
         let body = serde_json::json!({"messages": [{"role": "user", "content": PEM}]}).to_string();
         let ledger = r.look(body.as_bytes(), CHAT).1;

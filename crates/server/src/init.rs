@@ -70,7 +70,7 @@ pub async fn init_state(
         think_watch_common::guard_policy::saved::SavedSecrets::default(),
     ));
     let guards = Arc::new(arc_swap::ArcSwap::from_pointee(
-        app::load_guards(&dynamic_config, saved_secrets.load_full()).await,
+        app::load_guards(&dynamic_config, &saved_secrets.load()).await,
     ));
     let blob_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(
         app::load_blob_redactor(&dynamic_config, &saved_secrets.load()).await,
@@ -303,9 +303,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                 tracing::warn!("Failed to reload dynamic config: {e}");
                 return;
             }
-            guards.store(Arc::new(
-                app::load_guards(dc, saved_clone.load_full()).await,
-            ));
+            guards.store(Arc::new(app::load_guards(dc, &saved_clone.load()).await));
             // Same policy, swapped alongside — the MCP gateway's at-rest
             // redactor must stay in lockstep with the AI gateway's, or
             // operators get the surprise "I added a rule in the console

@@ -367,7 +367,7 @@ mod tests {
     }
 
     fn mask() -> Redaction {
-        Redaction::new(&RedactPolicy::default(), Default::default())
+        Redaction::new(&RedactPolicy::default(), &Default::default())
     }
 
     #[test]

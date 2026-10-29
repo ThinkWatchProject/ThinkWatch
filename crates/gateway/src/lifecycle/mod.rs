@@ -2322,7 +2322,7 @@ mod tests {
                 enable: vec!["email".into()],
                 ..Default::default()
             },
-            Default::default(),
+            &Default::default(),
         );
         let request = serde_json::json!({"messages": [
             {"role": "user", "content": "my email is alice@corp.example.org"}

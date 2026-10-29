@@ -121,7 +121,7 @@ pub struct AppState {
 /// factory one, loudly.
 pub async fn load_guards(
     dc: &DynamicConfig,
-    saved: Arc<SavedSecrets>,
+    saved: &SavedSecrets,
 ) -> think_watch_gateway::guards::Guards {
     let policy = think_watch_common::guard_policy::read(dc).await;
     think_watch_gateway::guards::Guards::new(&policy, saved)
@@ -142,9 +142,9 @@ pub async fn load_blob_redactor(
 /// Call after the config was reloaded or the providers were.
 pub async fn reload_guards(state: &AppState) {
     let saved = state.saved_secrets.load_full();
-    state.guards.store(Arc::new(
-        load_guards(&state.dynamic_config, saved.clone()).await,
-    ));
+    state
+        .guards
+        .store(Arc::new(load_guards(&state.dynamic_config, &saved).await));
     state.blob_redactor.store(Arc::new(
         load_blob_redactor(&state.dynamic_config, &saved).await,
     ));

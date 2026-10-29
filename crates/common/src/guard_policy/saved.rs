@@ -13,12 +13,15 @@
 //! guards are recompiled with it; see `think_watch_server::app`.
 
 use std::fmt;
+use std::sync::Arc;
 
-use tw_guard::redact::rules::RuleSet;
+use tw_guard::redact::rules::{
+    RuleSet, SAVED_MIN_CHARS, Saved, SavedSecret, SavedSource, SavedSourceKind,
+};
 
 /// Values shorter than this are not matched: a short value is too likely
-/// to occur by chance. The same floor thinkwatch-core applies.
-pub const MIN_LEN: usize = 12;
+/// to occur by chance. thinkwatch-core's floor.
+pub const MIN_LEN: usize = SAVED_MIN_CHARS;
 
 /// Header names whose value is a credential: `authorization`, `x-api-key`,
 /// `api-key`, `x-goog-api-key`, and any custom header that says it carries
@@ -83,10 +86,31 @@ pub struct ProviderCredentials<'a> {
     pub aws_secret_access_key: Option<&'a str>,
 }
 
-/// Every provider credential, each value once.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Every provider credential, each value once, and the same list compiled
+/// for matching (thinkwatch-core's [`Saved`]), shared by outbound
+/// redaction, the at-rest redactor, dangerous commands and the console's
+/// trial.
+#[derive(Clone, Default)]
 pub struct SavedSecrets {
     list: Vec<UpstreamSecret>,
+    compiled: Option<Arc<Saved>>,
+}
+
+impl PartialEq for SavedSecrets {
+    /// The same credentials: the compiled form follows from the list.
+    fn eq(&self, other: &Self) -> bool {
+        self.list == other.list
+    }
+}
+
+impl Eq for SavedSecrets {}
+
+impl fmt::Debug for SavedSecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedSecrets")
+            .field("list", &self.list)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SavedSecrets {
@@ -116,7 +140,25 @@ impl SavedSecrets {
                 });
             }
         }
-        Self { list }
+        let compiled = Saved::new(
+            list.iter()
+                .map(|s| SavedSecret {
+                    value: s.value.clone(),
+                    source: SavedSource {
+                        kind: SavedSourceKind::UpstreamKey,
+                        name: s.provider.clone(),
+                    },
+                    hosts: s.host.iter().cloned().collect(),
+                })
+                .collect(),
+        )
+        .map(Arc::new);
+        Self { list, compiled }
+    }
+
+    /// The list compiled for matching; `None` when there is none.
+    pub fn compiled(&self) -> Option<Arc<Saved>> {
+        self.compiled.clone()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -130,50 +172,13 @@ impl SavedSecrets {
     pub fn iter(&self) -> impl Iterator<Item = &UpstreamSecret> {
         self.list.iter()
     }
-
-    /// The providers whose credential appears in `text`, as written or
-    /// JSON-escaped, each name once, in list order. For the security log
-    /// of a request the saved-secret rule matched in: which credential it
-    /// was, named by its provider.
-    pub fn providers_in(&self, text: &str) -> Vec<&str> {
-        let mut out: Vec<&str> = Vec::new();
-        for s in &self.list {
-            if out.contains(&s.provider.as_str()) {
-                continue;
-            }
-            let escaped = serde_json::to_string(&s.value).unwrap_or_default();
-            let escaped = escaped
-                .strip_prefix('"')
-                .and_then(|e| e.strip_suffix('"'))
-                .unwrap_or_default();
-            if text.contains(s.value.as_str()) || (escaped != s.value && text.contains(escaped)) {
-                out.push(&s.provider);
-            }
-        }
-        out
-    }
 }
 
 /// `rules` with the saved secrets added, recognised by value. **The one
-/// place the saved secrets reach the rule set.**
+/// place the saved secrets reach the rule set.** Every rule set gets the
+/// same compiled list rather than compiling its own.
 pub fn with_saved(rules: RuleSet, saved: &SavedSecrets) -> RuleSet {
-    if saved.is_empty() {
-        return rules;
-    }
-    // TODO(thinkwatch-core `RuleSet::with_saved`, branch feat/redact-secrets):
-    // hand the list over once core has it, then re-pin core to the release:
-    //
-    //     rules.with_saved(
-    //         saved
-    //             .iter()
-    //             .map(|s| SavedSecret {
-    //                 value: s.value.clone(),
-    //                 source: SavedSource { kind: SavedSourceKind::UpstreamKey, name: s.provider.clone() },
-    //                 hosts: s.host.iter().cloned().collect(),
-    //             })
-    //             .collect(),
-    //     )
-    rules
+    rules.with_saved_set(saved.compiled())
 }
 
 #[cfg(test)]
@@ -281,18 +286,33 @@ mod tests {
     }
 
     #[test]
-    fn providers_in_names_whose_credential_a_text_carries() {
+    fn the_rules_find_a_saved_key_and_name_its_provider() {
         let a = [h("x-api-key", "test-alpha-key-0123456789")];
         let b = [h("x-api-key", "test\"beta\\key-0123456789")];
-        let c = [h("x-api-key", "test-gamma-key-0123456789")];
         let s = SavedSecrets::collect([
             provider("alpha", "https://a.example.com", &a),
             provider("beta", "https://b.example.com", &b),
-            provider("gamma", "https://c.example.com", &c),
         ]);
-        let body = r#"{"content":"use test-alpha-key-0123456789 and test\"beta\\key-0123456789"}"#;
-        assert_eq!(s.providers_in(body), ["alpha", "beta"]);
-        assert!(s.providers_in("nothing here").is_empty());
+        let rules = with_saved(RuleSet::only(&["thinkwatch-saved-secret"]), &s);
+        // As written, and JSON-escaped in a request body.
+        let text = r#"{"content":"use test-alpha-key-0123456789 and test\"beta\\key-0123456789"}"#;
+        let hits = tw_guard::redact::rules::scan(text, &rules);
+        let found = tw_guard::redact::rules::findings_in(text, &hits, &rules);
+        let named: Vec<(&str, &str)> = found
+            .iter()
+            .map(|f| {
+                let src = f.source.as_ref().expect("a saved key names its source");
+                (f.rule.id(), src.name.as_str())
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("thinkwatch-saved-secret", "alpha"),
+                ("thinkwatch-saved-secret", "beta")
+            ]
+        );
+        assert!(found.iter().all(|f| f.masked.is_empty()), "{found:?}");
     }
 
     #[test]

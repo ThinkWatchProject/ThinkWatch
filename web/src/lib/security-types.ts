@@ -109,18 +109,23 @@ export interface SecurityRuleView {
   /** A built-in rule's id, or a custom rule's name. */
   id: string;
   custom: boolean;
-  /** English name; the console looks the id up first. A custom rule's name. */
+  /** English name. A custom rule's name, in no particular language. */
   name: string;
+  /** Chinese name: every built-in rule has one; custom rules do not. */
+  name_zh?: string;
   /** Why the rule is worth a look (English). Absent where the name says it, and on custom rules. */
   why?: string;
+  /** The same, in Chinese. */
+  why_zh?: string;
   /**
-   * Group, in the order the server lists them. Redaction: `saved`
-   * `ai-services` `dev-platforms` `cloud` `business` `private-keys` `jwt`
-   * `conn-strings` `in-context` `crypto` (credentials), `id-documents`
-   * `foreign-ids` `financial` `contact` `location` `vehicle` `device`
-   * `labeled-personal` (personal information), `internal`; tool calls:
-   * `command`; content: `invisible` `injection` `persona` `chinese`.
-   * Custom rules: `custom`.
+   * What a built-in redaction rule finds, as a sentence (English); text in
+   * backticks is code. Absent on the other guards and on custom rules.
+   */
+  about?: string;
+  /** The same, in Chinese. */
+  about_zh?: string;
+  /**
+   * Group: the `slug` of one of the guard's `kinds`. Custom rules: `custom`.
    */
   kind: string;
   matcher: Matcher;
@@ -139,10 +144,20 @@ export interface SecurityRuleView {
   replacement?: string | null;
 }
 
+/** A group of a guard's rule table, named in both languages. */
+export interface SecurityKindView {
+  /** What a rule's `kind` says. */
+  slug: string;
+  name: string;
+  name_zh: string;
+}
+
 export interface GuardDetail {
   mode: GuardMode;
   /** In display order: built-in groups first, custom rules last. */
   rules: SecurityRuleView[];
+  /** The groups, in display order; every rule's `kind` is one of them, `custom` last. */
+  kinds: SecurityKindView[];
 }
 
 /** `GET /api/admin/security`. */

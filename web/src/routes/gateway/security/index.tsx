@@ -90,7 +90,7 @@ function message(err: unknown, fallback: string): string {
  * flight the view is read back from the server.
  */
 export function GatewaySecurityPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>(() => (mayReadLog() ? 'log' : 'redact'));
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -156,7 +156,7 @@ export function GatewaySecurityPage() {
   function toggle(guard: Guard, rule: SecurityRuleView, enabled: boolean, undoable = true) {
     const d = current(guard);
     if (!d) return;
-    const name = viewName(t, guard, rule);
+    const name = viewName(i18n.language, rule);
     write(guard, withEnabled(d, rule, enabled), true).then(
       () =>
         toast.success(
@@ -199,7 +199,7 @@ export function GatewaySecurityPage() {
     if (!d) return;
     const before = d.rules.find((r) => r.custom === rule.custom && r.id === rule.id)?.action ?? 'record';
     if (before === action) return;
-    const name = viewName(t, guard, rule);
+    const name = viewName(i18n.language, rule);
     write(guard, withAction(d, rule, action), true).then(
       () =>
         toast.success(
@@ -230,7 +230,7 @@ export function GatewaySecurityPage() {
     if (!d) return;
     await write(guard, withAction(d, rule, action), false);
     setDialog(null);
-    toast.success(t('contentSecurity.toast.ruleSaved', { name: viewName(t, guard, rule) }));
+    toast.success(t('contentSecurity.toast.ruleSaved', { name: viewName(i18n.language, rule) }));
   }
 
   async function removeCustom(guard: Guard, rule: SecurityRuleView) {
@@ -257,7 +257,7 @@ export function GatewaySecurityPage() {
       guard,
       editing: null,
       seed: {
-        name: viewName(t, guard, rule),
+        name: viewName(i18n.language, rule),
         pattern: written.pattern,
         match: written.match,
         action: rule.action ?? null,
@@ -342,7 +342,7 @@ export function GatewaySecurityPage() {
           </TabsList>
           {mayReadLog() && (
             <TabsContent value="log" className="pt-2">
-              <LogPanel />
+              <LogPanel detail={detail} />
             </TabsContent>
           )}
           {GUARDS.map((g) => (
@@ -378,6 +378,7 @@ export function GatewaySecurityPage() {
           guard={dialog.guard}
           mode={detail?.[dialog.guard].mode ?? 'observe'}
           rule={dialog.rule}
+          kinds={detail?.[dialog.guard].kinds ?? []}
           canWrite={mayWrite(dialog.guard)}
           onClose={() => setDialog(null)}
           onCopy={
@@ -388,7 +389,7 @@ export function GatewaySecurityPage() {
           onSaveAction={(a) => saveAction(dialog.guard, dialog.rule, a)}
         />
       )}
-      {dialog?.kind === 'test' && <TestDialog guard={dialog.guard} onClose={() => setDialog(null)} />}
+      {dialog?.kind === 'test' && <TestDialog guard={dialog.guard} detail={detail?.[dialog.guard]} onClose={() => setDialog(null)} />}
       <ConfirmDialog
         open={dialog?.kind === 'delete'}
         onOpenChange={(o) => !o && !deleting && setDialog(null)}

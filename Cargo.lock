@@ -2944,7 +2944,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2983,7 +2983,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4838,7 +4838,7 @@ dependencies = [
 [[package]]
 name = "tw-bedrock"
 version = "0.84.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-rules-expand#ab5824120e4bab57b4e4e39ffd2e90cb91d7e48d"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-catalog#bab1dabd65e2dd51a9170c275eeecb5334a27d4d"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4853,7 +4853,7 @@ dependencies = [
 [[package]]
 name = "tw-breaker"
 version = "0.84.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-rules-expand#ab5824120e4bab57b4e4e39ffd2e90cb91d7e48d"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-catalog#bab1dabd65e2dd51a9170c275eeecb5334a27d4d"
 dependencies = [
  "serde",
 ]
@@ -4861,7 +4861,7 @@ dependencies = [
 [[package]]
 name = "tw-dialect"
 version = "0.84.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-rules-expand#ab5824120e4bab57b4e4e39ffd2e90cb91d7e48d"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-catalog#bab1dabd65e2dd51a9170c275eeecb5334a27d4d"
 dependencies = [
  "memchr",
  "serde",
@@ -4871,7 +4871,7 @@ dependencies = [
 [[package]]
 name = "tw-guard"
 version = "0.84.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-rules-expand#ab5824120e4bab57b4e4e39ffd2e90cb91d7e48d"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=feat%2Fredact-catalog#bab1dabd65e2dd51a9170c275eeecb5334a27d4d"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -4882,6 +4882,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "tw-dialect",
 ]

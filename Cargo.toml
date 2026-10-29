@@ -70,10 +70,10 @@ opt-level = 3
 # never re-exported through a local shim. And the reverse: something only
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-rules-expand" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-rules-expand" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-rules-expand" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-rules-expand" }
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-catalog" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-catalog" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-catalog" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", branch = "feat/redact-catalog" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }

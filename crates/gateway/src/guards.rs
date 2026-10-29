@@ -52,15 +52,16 @@ pub struct Guards {
 }
 
 impl Guards {
-    /// Compile the policies, outbound redaction with the providers'
-    /// credentials (`saved`) to recognise by value. A custom rule that does
+    /// Compile the policies, with the providers' credentials (`saved`):
+    /// outbound redaction recognises them by value, and dangerous
+    /// commands counts them as credentials, each with its provider's host. A custom rule that does
     /// not compile is left out, loudly, and the rest still run (see
     /// `think_watch_common::guard_policy::content_rules`).
-    pub fn new(policy: &Security, saved: Arc<SavedSecrets>) -> Self {
+    pub fn new(policy: &Security, saved: &SavedSecrets) -> Self {
         Self {
             redaction: Redaction::new(&policy.redact, saved),
             content: ContentFilter::new(&policy.content),
-            tools: Arc::new(ToolInspection::new(&policy.inspect_tools)),
+            tools: Arc::new(ToolInspection::new(&policy.inspect_tools, saved)),
         }
     }
 }
@@ -68,7 +69,7 @@ impl Guards {
 impl Default for Guards {
     /// The factory policies: every guard observing.
     fn default() -> Self {
-        Self::new(&Security::default(), Default::default())
+        Self::new(&Security::default(), &SavedSecrets::default())
     }
 }
 

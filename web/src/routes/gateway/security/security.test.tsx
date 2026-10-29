@@ -25,7 +25,10 @@ const detail = (): SecurityDetail => ({
       {
         id: 'thinkwatch-saved-secret',
         custom: false,
-        name: 'Saved key',
+        name: 'Key saved in ThinkWatch',
+        name_zh: 'ThinkWatch 中保存的密钥',
+        about: 'The provider API keys saved in ThinkWatch, by value, whatever their format',
+        about_zh: '按值识别 ThinkWatch 中保存的供应商 API 密钥，与格式无关',
         kind: 'saved',
         matcher: { kind: 'saved' },
         enabled: true,
@@ -38,6 +41,8 @@ const detail = (): SecurityDetail => ({
         id: 'anthropic-api-key',
         custom: false,
         name: 'Anthropic API key',
+        name_zh: 'Anthropic API 密钥',
+        about: 'Starts with `sk-ant-`, followed by at least 20 characters',
         kind: 'ai-services',
         matcher: { kind: 'prefix', prefix: 'sk-ant-', min_tail: 20 },
         enabled: true,
@@ -50,6 +55,8 @@ const detail = (): SecurityDetail => ({
         id: 'email',
         custom: false,
         name: 'Email address',
+        name_zh: '邮箱地址',
+        about: 'Email addresses, such as `name@example.com`',
         kind: 'contact',
         matcher: { kind: 'email' },
         enabled: false,
@@ -58,6 +65,12 @@ const detail = (): SecurityDetail => ({
         default_action: 'placeholder',
         label: 'EMAIL',
       },
+    ],
+    kinds: [
+      { slug: 'saved', name: 'Keys saved in ThinkWatch', name_zh: 'ThinkWatch 中保存的密钥' },
+      { slug: 'ai-services', name: 'AI services', name_zh: 'AI 服务' },
+      { slug: 'contact', name: 'Contact details', name_zh: '联系方式' },
+      { slug: 'custom', name: 'Custom', name_zh: '自定义' },
     ],
   },
   inspect_tools: {
@@ -80,6 +93,7 @@ const detail = (): SecurityDetail => ({
         custom: false,
         name: 'Send a credential to an unknown host',
         why: "Sends a credential to a host that is neither local nor the credential's own provider",
+        why_zh: '将凭据发往既非本机、也不是该凭据服务商的主机',
         kind: 'command',
         matcher: { kind: 'builtin', check: 'credential-to-network' },
         enabled: true,
@@ -87,6 +101,10 @@ const detail = (): SecurityDetail => ({
         action: 'cut',
         default_action: 'cut',
       },
+    ],
+    kinds: [
+      { slug: 'command', name: 'Built-in', name_zh: '内置' },
+      { slug: 'custom', name: 'Custom', name_zh: '自定义' },
     ],
   },
   content: {
@@ -105,6 +123,10 @@ const detail = (): SecurityDetail => ({
         default_action: 'strip',
         scope: ['request'],
       },
+    ],
+    kinds: [
+      { slug: 'invisible', name: 'Hidden characters', name_zh: '隐藏字符' },
+      { slug: 'custom', name: 'Custom', name_zh: '自定义' },
     ],
   },
 })
@@ -384,12 +406,15 @@ describe('GatewaySecurityPage', () => {
     renderWithQueryClient(<GatewaySecurityPage />)
 
     await user.click(await screen.findByRole('tab', { name: /Dangerous commands/ }))
-    const check = "A credential sent to a host other than this machine and the credential's own provider"
-    expect(await screen.findByText(check)).toBeInTheDocument()
+    // What it is for is the rule's reason; what it matches, a built-in check.
+    const why = "Sends a credential to a host that is neither local nor the credential's own provider"
+    expect(await screen.findByText(why)).toBeInTheDocument()
+    expect(screen.getAllByText('Built-in check').length).toBeGreaterThan(0)
 
     await user.click(screen.getByText('Send a credential to an unknown host'))
     const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText(check)).toBeInTheDocument()
+    expect(within(dialog).getByText(why)).toBeInTheDocument()
+    expect(within(dialog).getByText('Built-in check')).toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: 'Copy as a custom rule' })).not.toBeInTheDocument()
     await user.keyboard('{Escape}')
 
