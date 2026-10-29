@@ -106,7 +106,10 @@ pub async fn test_security(
         .require_global_permission(&state.db, read_permission(guard))
         .await?;
     let policy = think_watch_common::guard_policy::read(&state.dynamic_config).await;
-    tw_guard::trial::run(guard, &policy, &req)
+    // With the providers' credentials, as the gateway runs: a pasted
+    // provider key is reported (by provider, never by value).
+    let saved = state.saved_secrets.load().compiled();
+    tw_guard::trial::run_with(guard, &policy, &req, saved)
         .map(Json)
         .map_err(|e| AppError::BadRequest(e.to_string()))
 }

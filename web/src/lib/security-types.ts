@@ -63,6 +63,13 @@ export interface CardNetwork {
   lengths: number[];
 }
 
+/** One prefix of a `prefixes` matcher and what must follow it: any token characters, hex digits, or letters and digits. */
+export interface PrefixView {
+  prefix: string;
+  min_tail: number;
+  tail: 'any' | 'hex' | 'alnum';
+}
+
 /**
  * What a rule matches, for display. Built-in rules use the specific kinds;
  * custom rules are `regex`, `contains` or `codepoints`. `case_sensitive`
@@ -71,11 +78,17 @@ export interface CardNetwork {
  * `codepoints.ranges` is the canonical spelling (`U+200B`,
  * `U+E0000–U+E007F`); a custom rule's is the items as written, so joining
  * them with `, ` gives back what is stored. `builtin` is a check
- * implemented in code, with nothing to show but its stable name. A kind
- * the console does not know yet is shown with a generic description.
+ * implemented in code, with nothing to show but its stable name: a
+ * tool-call check's name, or the id of a redaction rule that checks digits,
+ * word lists or where a value sits. A kind the console does not know yet is
+ * shown with a generic description.
  */
 export type Matcher =
   | { kind: 'prefix'; prefix: string; min_tail: number }
+  | { kind: 'prefixes'; prefixes: PrefixView[] }
+  | { kind: 'saved' }
+  | { kind: 'assignment'; suffixes: string[] }
+  | { kind: 'labeled'; names: string[] }
   | { kind: 'openai-legacy'; min_len: number }
   | { kind: 'pem' }
   | { kind: 'jwt' }
@@ -96,14 +109,23 @@ export interface SecurityRuleView {
   /** A built-in rule's id, or a custom rule's name. */
   id: string;
   custom: boolean;
-  /** English name; the console looks the id up first. A custom rule's name. */
+  /** English name. A custom rule's name, in no particular language. */
   name: string;
+  /** Chinese name: every built-in rule has one; custom rules do not. */
+  name_zh?: string;
   /** Why the rule is worth a look (English). Absent where the name says it, and on custom rules. */
   why?: string;
+  /** The same, in Chinese. */
+  why_zh?: string;
   /**
-   * Group. Redaction: `api-keys` `private-keys` `jwt` `conn-strings`
-   * `personal` `internal`; tool calls: `command`; content: `invisible`
-   * `injection` `persona` `chinese`. Custom rules: `custom`.
+   * What a built-in redaction rule finds, as a sentence (English); text in
+   * backticks is code. Absent on the other guards and on custom rules.
+   */
+  about?: string;
+  /** The same, in Chinese. */
+  about_zh?: string;
+  /**
+   * Group: the `slug` of one of the guard's `kinds`. Custom rules: `custom`.
    */
   kind: string;
   matcher: Matcher;
@@ -122,10 +144,20 @@ export interface SecurityRuleView {
   replacement?: string | null;
 }
 
+/** A group of a guard's rule table, named in both languages. */
+export interface SecurityKindView {
+  /** What a rule's `kind` says. */
+  slug: string;
+  name: string;
+  name_zh: string;
+}
+
 export interface GuardDetail {
   mode: GuardMode;
   /** In display order: built-in groups first, custom rules last. */
   rules: SecurityRuleView[];
+  /** The groups, in display order; every rule's `kind` is one of them, `custom` last. */
+  kinds: SecurityKindView[];
 }
 
 /** `GET /api/admin/security`. */

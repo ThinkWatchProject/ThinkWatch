@@ -2944,7 +2944,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2983,7 +2983,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4837,8 +4837,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.83.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.83.1#0a34ac1ad9d1a6691cb98e38b3a9b7e4a1803bb9"
+version = "0.85.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4852,16 +4852,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.83.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.83.1#0a34ac1ad9d1a6691cb98e38b3a9b7e4a1803bb9"
+version = "0.85.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.83.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.83.1#0a34ac1ad9d1a6691cb98e38b3a9b7e4a1803bb9"
+version = "0.85.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
 dependencies = [
  "memchr",
  "serde",
@@ -4870,8 +4870,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.83.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.83.1#0a34ac1ad9d1a6691cb98e38b3a9b7e4a1803bb9"
+version = "0.85.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -4882,6 +4882,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "tw-dialect",
 ]

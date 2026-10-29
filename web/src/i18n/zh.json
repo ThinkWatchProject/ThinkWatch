@@ -188,20 +188,6 @@
       "action": "动作",
       "enabled": "启用"
     },
-    "kind": {
-      "api-keys": "API 密钥",
-      "private-keys": "私钥",
-      "jwt": "JWT",
-      "conn-strings": "连接串",
-      "personal": "个人信息",
-      "internal": "内网地址",
-      "command": "内置",
-      "injection": "指令覆盖",
-      "persona": "身份与提示词",
-      "chinese": "中文说法",
-      "invisible": "隐藏字符",
-      "custom": "自定义"
-    },
     "scope": {
       "request": "请求",
       "response": "回答"
@@ -346,155 +332,18 @@
         "answerText": "回答 · 正文",
         "toolCall": "回答 · 工具调用",
         "toolCallNamed": "回答 · 工具调用 {{tool}}"
+      },
+      "source": {
+        "upstream-key": "供应商「{{name}}」的 API 密钥"
       }
     },
     "matcher": {
-      "prefix": "{{prefix}} 开头，其后至少 {{n}} 个字符",
-      "openaiLegacy": "{{prefix}} 开头，全长至少 {{n}} 个字符，同时含字母和数字",
-      "pem": "{{begin}} 至对应的 END，整段",
-      "jwt": "三段 base64url，首段解码后含 {{alg}}",
-      "connString": "{{uri}} 中的口令，只换口令",
-      "connStringShape": "协议://用户:口令@主机",
-      "privateIp": "{{ranges}} 开头的地址，不含 {{loopback}}",
-      "domainSuffix": "以 {{suffixes}} 结尾的域名",
-      "cnResidentId": "18 位居民身份证号：地区码、{{year}} 年以来的出生日期和校验码都对得上",
-      "bankCard": "{{networks}} 的卡号：号段、位数对得上并通过 Luhn 校验；公开的测试卡号除外",
-      "email": "邮箱地址，如 {{example}}",
-      "cnMobilePhone": "11 位手机号，以 13–19 开头，前后不紧挨其他数字",
       "regex": "正则 {{pattern}}，不区分大小写",
       "regexCaseSensitive": "正则 {{pattern}}，区分大小写",
       "contains": "包含 {{text}}，不区分大小写",
       "containsCaseSensitive": "包含 {{text}}，区分大小写",
       "codepoints": "码位 {{ranges}}",
       "other": "内置判据"
-    },
-    "check": {
-      "credential-to-network": "凭据发往本机和其服务商以外的主机",
-      "thinkwatch-data": "路径或命令指向 ThinkWatch 的数据目录；只是提到不算",
-      "file-to-network": "本地文件上传到外部主机"
-    },
-    "cardNetwork": {
-      "UnionPay": "银联"
-    },
-    "redactRule": {
-      "anthropic-api-key": "Anthropic API 密钥",
-      "openai-project-key": "OpenAI 项目密钥",
-      "openai-api-key": "OpenAI API 密钥",
-      "github-personal-token": "GitHub 个人令牌",
-      "github-oauth-token": "GitHub OAuth 令牌",
-      "github-server-token": "GitHub 服务器令牌",
-      "github-user-token": "GitHub 用户令牌",
-      "github-fine-grained-token": "GitHub 细粒度令牌",
-      "slack-bot-token": "Slack 机器人令牌",
-      "slack-user-token": "Slack 用户令牌",
-      "slack-app-token": "Slack 应用令牌",
-      "aws-access-key-id": "AWS 访问密钥 ID",
-      "aws-temporary-key-id": "AWS 临时访问密钥 ID",
-      "google-api-key": "Google API 密钥",
-      "google-oauth-token": "Google OAuth 令牌",
-      "gitlab-token": "GitLab 令牌",
-      "stripe-live-key": "Stripe 生产密钥",
-      "stripe-restricted-key": "Stripe 受限密钥",
-      "npm-token": "npm 令牌",
-      "digitalocean-token": "DigitalOcean 令牌",
-      "sendgrid-key": "SendGrid 密钥",
-      "private-key": "私钥",
-      "jwt": "JWT",
-      "conn-string-password": "连接串口令",
-      "cn-resident-id": "居民身份证号",
-      "bank-card": "银行卡号",
-      "email": "邮箱地址",
-      "cn-mobile-phone": "中国大陆手机号",
-      "internal-ip": "内网地址",
-      "internal-domain": "内部域名"
-    },
-    "contentRule": {
-      "unicode-tags": "Unicode 标签字符",
-      "bidi-controls": "双向控制符",
-      "zero-width": "零宽字符",
-      "private-use": "私用区字符",
-      "ignore-previous-instructions": "要求忽略先前的指令",
-      "ignore-all-previous": "要求忽略之前的全部内容",
-      "disregard-your-instructions": "要求无视指令",
-      "jailbreak": "越狱",
-      "dan": "DAN",
-      "developer-mode": "开发者模式",
-      "you-are-now": "重新设定身份",
-      "new-persona": "新的人设",
-      "act-as": "要求扮演角色",
-      "pretend-to-be": "要求假装身份",
-      "system-prompt": "索取系统提示词",
-      "reveal-your-instructions": "要求透露指令",
-      "what-are-your-rules": "询问规则",
-      "base64-wall": "长串 Base64",
-      "zh-ignore-previous": "要求忽略先前的指令（中文）",
-      "zh-forget-your": "要求忘记指令（中文）",
-      "zh-do-not-follow": "要求不要遵循（中文）",
-      "zh-you-are-now": "重新设定身份（中文）",
-      "zh-role-play": "要求扮演角色（中文）",
-      "zh-reveal-your": "要求透露指令（中文）",
-      "zh-system-prompt": "系统提示词（中文）",
-      "zh-jailbreak": "越狱（中文）"
-    },
-    "contentWhy": {
-      "unicode-tags": "在编辑器中完全不可见，但会原样进入模型上下文，可用于隐藏整段指令。",
-      "bidi-controls": "可使屏幕上的显示顺序与实际字符顺序不一致。",
-      "zero-width": "在编辑器中不可见，但会被模型读到。表情符号、波斯文等正常文字也会用到。",
-      "private-use": "没有标准含义。部分图标字体会用到。"
-    },
-    "toolRule": {
-      "curl-pipe-sh": {
-        "name": "下载即执行",
-        "why": "下载后直接执行，执行的内容由远端决定且无法预先查看"
-      },
-      "base64-decode-exec": {
-        "name": "解码后执行",
-        "why": "将要执行的内容隐藏在 base64 编码中"
-      },
-      "exfil-env": {
-        "name": "外发环境变量",
-        "why": "将环境变量（通常包含密钥）发送到外部"
-      },
-      "exfil-credentials": {
-        "name": "外发凭据文件",
-        "why": "要求模型将凭据文件的内容发送出去"
-      },
-      "exfil-credentials-reversed": {
-        "name": "外发凭据文件（动词在前）",
-        "why": "要求模型将凭据文件的内容发送出去"
-      },
-      "ssh-key-read": {
-        "name": "读取私钥或云凭据",
-        "why": "读取私钥或云服务凭据"
-      },
-      "secret-to-unknown-host": {
-        "name": "发送凭据到陌生主机",
-        "why": "将凭据发送到本机和该凭据所属服务商以外的主机"
-      },
-      "thinkwatch-data": {
-        "name": "读写 ThinkWatch 自己的数据",
-        "why": "读写 ThinkWatch 的数据目录，其中以明文保存全部上游密钥和这几项防护的设置"
-      },
-      "write-startup-item": {
-        "name": "写入启动项",
-        "why": "写入开机或打开终端时自动执行的位置"
-      },
-      "crontab-install": {
-        "name": "安装定时任务",
-        "why": "安装定时任务，或删除全部现有定时任务"
-      },
-      "rm-rf-root": {
-        "name": "删除主目录或根目录",
-        "why": "删除整个主目录或根目录"
-      },
-      "chmod-777": {
-        "name": "开放全部写权限",
-        "why": "将文件权限设为所有人可写"
-      },
-      "upload-file-to-host": {
-        "name": "上传本地文件到外部主机",
-        "why": "将本地文件的内容上传到外部主机"
-      }
     }
   },
   "mcpStore": {

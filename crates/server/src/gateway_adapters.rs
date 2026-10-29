@@ -88,6 +88,24 @@ impl ProviderMaterials {
             aws,
         }
     }
+
+    /// The credentials this provider sends, for outbound redaction to
+    /// recognise by value (`guard_policy::saved`).
+    pub(crate) fn credentials(
+        &self,
+    ) -> think_watch_common::guard_policy::saved::ProviderCredentials<'_> {
+        think_watch_common::guard_policy::saved::ProviderCredentials {
+            name: &self.name,
+            base_url: &self.base_url,
+            headers: &self.headers,
+            aws_secret_access_key: match &self.aws {
+                Credential::Keys {
+                    secret_access_key, ..
+                } => Some(secret_access_key),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// Build the upstream for a provider.

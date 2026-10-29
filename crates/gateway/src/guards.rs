@@ -27,7 +27,8 @@
 //! `logs:read_bodies` for bodies). A content event names the rule and
 //! counts the matches; a redaction event names the rule and counts the
 //! values, and only a built-in rule's carries a few, masked
-//! (`sk-an…7f9c`); a tool-call event quotes the arguments that matched —
+//! (`sk-an…7f9c`) — except a saved provider key's, which names the
+//! provider instead (`sources`); a tool-call event quotes the arguments that matched —
 //! the upstream's text, not the caller's — masked with the redaction rules
 //! ([`crate::redaction::Redaction::mask`]). A request writes at most a
 //! score of events per guard, one per rule.
@@ -35,6 +36,7 @@
 use std::sync::Arc;
 
 use think_watch_common::audit::{AuditActor, AuditEntry, GatewayActor, LogType};
+use think_watch_common::guard_policy::saved::SavedSecrets;
 use tw_guard::policy::Security;
 
 use crate::content_filter::ContentFilter;
@@ -50,14 +52,16 @@ pub struct Guards {
 }
 
 impl Guards {
-    /// Compile the policies. A custom rule that does not compile is left
-    /// out, loudly, and the rest still run (see
+    /// Compile the policies, with the providers' credentials (`saved`):
+    /// outbound redaction recognises them by value, and dangerous
+    /// commands counts them as credentials, each with its provider's host. A custom rule that does
+    /// not compile is left out, loudly, and the rest still run (see
     /// `think_watch_common::guard_policy::content_rules`).
-    pub fn new(policy: &Security) -> Self {
+    pub fn new(policy: &Security, saved: &SavedSecrets) -> Self {
         Self {
-            redaction: Redaction::new(&policy.redact),
+            redaction: Redaction::new(&policy.redact, saved),
             content: ContentFilter::new(&policy.content),
-            tools: Arc::new(ToolInspection::new(&policy.inspect_tools)),
+            tools: Arc::new(ToolInspection::new(&policy.inspect_tools, saved)),
         }
     }
 }
@@ -65,7 +69,7 @@ impl Guards {
 impl Default for Guards {
     /// The factory policies: every guard observing.
     fn default() -> Self {
-        Self::new(&Security::default())
+        Self::new(&Security::default(), &SavedSecrets::default())
     }
 }
 

@@ -1506,10 +1506,13 @@ mod tests {
     }
 
     fn outbound(surface: ClientSurface, path: &str, body: Value, cap: Option<u32>) -> Outbound {
-        let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
-            mode: tw_guard::policy::Mode::Off,
-            ..Default::default()
-        });
+        let redaction = Redaction::new(
+            &tw_guard::policy::RedactPolicy {
+                mode: tw_guard::policy::Mode::Off,
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let (_, ledger) = redaction.look(b"{}", Shape::Generate(surface.dialect));
         Outbound {
             surface,

@@ -19,6 +19,7 @@ use think_watch_auth::oidc::OidcManager;
 use think_watch_common::audit::AuditLogger;
 use think_watch_common::config::AppConfig;
 use think_watch_common::dynamic_config::DynamicConfig;
+use think_watch_common::guard_policy::saved::SavedSecrets;
 use think_watch_gateway::cache::ResponseCache;
 use think_watch_gateway::model_mapping::ModelMapper;
 use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
@@ -105,33 +106,67 @@ pub struct AppState {
     /// at once. A handle of its own because mcp-gateway cannot depend on
     /// the gateway crate without inverting the dep graph.
     pub blob_redactor: Arc<arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>>,
+
+    /// The providers' credentials, which outbound redaction recognises by
+    /// value. Collected whenever the providers are loaded
+    /// ([`install_providers`]); the guards and the at-rest redactor are
+    /// recompiled with them.
+    pub saved_secrets: Arc<arc_swap::ArcSwap<SavedSecrets>>,
 }
 
 /// The request guards, compiled from the policies in `system_settings`
-/// (`security.redact`, `security.inspect_tools`, `security.content`). A
-/// policy that is missing or unreadable runs as the factory one, loudly.
-pub async fn load_guards(dc: &DynamicConfig) -> think_watch_gateway::guards::Guards {
+/// (`security.redact`, `security.inspect_tools`, `security.content`), with
+/// the providers' credentials (`saved`) for outbound redaction to
+/// recognise by value. A policy that is missing or unreadable runs as the
+/// factory one, loudly.
+pub async fn load_guards(
+    dc: &DynamicConfig,
+    saved: &SavedSecrets,
+) -> think_watch_gateway::guards::Guards {
     let policy = think_watch_common::guard_policy::read(dc).await;
-    think_watch_gateway::guards::Guards::new(&policy)
+    think_watch_gateway::guards::Guards::new(&policy, saved)
 }
 
 /// The MCP gateway's at-rest redactor, from the same outbound redaction
-/// policy the guards are compiled from.
-pub async fn load_blob_redactor(dc: &DynamicConfig) -> think_watch_common::pii::BlobRedactor {
+/// policy and saved secrets the guards are compiled from.
+pub async fn load_blob_redactor(
+    dc: &DynamicConfig,
+    saved: &SavedSecrets,
+) -> think_watch_common::pii::BlobRedactor {
     let policy = think_watch_common::guard_policy::read(dc).await;
-    think_watch_common::pii::BlobRedactor::from_policy(&policy.redact)
+    think_watch_common::pii::BlobRedactor::from_policy(&policy.redact, saved)
 }
 
 /// Recompile the guards and the at-rest redactor from the dynamic config
-/// as it now stands, and swap them in together. Call after the config was
-/// reloaded.
+/// and the saved secrets as they now stand, and swap them in together.
+/// Call after the config was reloaded or the providers were.
 pub async fn reload_guards(state: &AppState) {
+    let saved = state.saved_secrets.load_full();
     state
         .guards
-        .store(Arc::new(load_guards(&state.dynamic_config).await));
-    state
-        .blob_redactor
-        .store(Arc::new(load_blob_redactor(&state.dynamic_config).await));
+        .store(Arc::new(load_guards(&state.dynamic_config, &saved).await));
+    state.blob_redactor.store(Arc::new(
+        load_blob_redactor(&state.dynamic_config, &saved).await,
+    ));
+}
+
+/// Load the providers from the database: rebuild the model router and
+/// swap it in, and, when the providers' credentials changed, swap those in
+/// and recompile the guards with them. On this instance only; see
+/// [`rebuild_gateway_router`] for the fan-out.
+pub async fn install_providers(state: &AppState) -> anyhow::Result<()> {
+    let mut router = ModelRouter::new();
+    let saved = load_providers_into_router(state, &mut router).await?;
+    state.gateway_router.store(Arc::new(router));
+    if **state.saved_secrets.load() != saved {
+        tracing::info!(
+            credentials = saved.len(),
+            "Provider credentials changed — recompiling outbound redaction"
+        );
+        state.saved_secrets.store(Arc::new(saved));
+        reload_guards(state).await;
+    }
+    Ok(())
 }
 
 /// Redis pub/sub channel that sibling replicas subscribe to so a
@@ -145,12 +180,10 @@ pub const GATEWAY_ROUTER_CHANGED_CHANNEL: &str = "gateway_router:changed";
 /// Rebuild the gateway model router from the database and hot-swap it in.
 /// Called by provider/model CRUD handlers after changes.
 pub async fn rebuild_gateway_router(state: &AppState) {
-    let mut new_router = ModelRouter::new();
-    if let Err(e) = load_providers_into_router(state, &mut new_router).await {
+    if let Err(e) = install_providers(state).await {
         tracing::error!("Failed to rebuild gateway router: {e}");
         return;
     }
-    state.gateway_router.store(Arc::new(new_router));
     tracing::info!("Gateway router hot-reloaded");
 
     // Notify sibling replicas so they reload too. Fire-and-forget:
@@ -212,16 +245,15 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     // the first one. The `/health/ready` probe checks the providers
     // table directly, so K8s won't route AI traffic to a pod with
     // an empty router.
-    // Build the initial router and swap it into the shared handle.
-    let mut initial_router = ModelRouter::new();
-    if let Err(e) = load_providers_into_router(&state, &mut initial_router).await {
+    // Build the initial router and swap it into the shared handle, and
+    // compile the guards with the providers' credentials.
+    if let Err(e) = install_providers(&state).await {
         metrics::counter!("gateway_provider_load_failed_total").increment(1);
         tracing::error!(
             "Failed to load providers from database; gateway will start with empty router \
              and /health/ready will return 503 until providers are configured: {e}"
         );
     }
-    state.gateway_router.store(Arc::new(initial_router));
 
     // Reuse AppState's WeightCache so the limits engine, cost tracker,
     // AND the model CRUD handlers all reference the SAME cache — the
@@ -1207,10 +1239,12 @@ fn default_model_prefixes(provider_type: &str) -> Vec<&'static str> {
 
 /// Load all active providers from the database, instantiate the appropriate
 /// provider implementation, and register them in the model router.
-pub(crate) async fn load_providers_into_router(
+/// Load the active providers and their routes into `router`, and collect
+/// the providers' credentials for outbound redaction.
+async fn load_providers_into_router(
     state: &AppState,
     router: &mut ModelRouter,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SavedSecrets> {
     use std::collections::HashMap;
 
     let providers = sqlx::query_as::<_, think_watch_common::models::Provider>(
@@ -1447,5 +1481,7 @@ pub(crate) async fn load_providers_into_router(
         "All providers loaded into model router"
     );
 
-    Ok(())
+    Ok(SavedSecrets::collect(
+        provider_map.values().map(ProviderMaterials::credentials),
+    ))
 }

@@ -34,15 +34,17 @@
 use std::sync::Arc;
 
 use think_watch_common::audit::AuditLogger;
+use think_watch_common::guard_policy::saved::{self, SavedSecrets};
 use tw_guard::policy::{Mode, RedactPolicy};
 use tw_guard::redact::replace::Ledger;
-use tw_guard::redact::rules::{Finding, Rule, RuleSet};
+use tw_guard::redact::rules::{Finding, Kind, Rule, RuleSet, SavedSource};
 
 pub use tw_guard::redact::flow::Shape;
 
 use crate::guards::Caller;
 
-/// Outbound redaction as configured: a mode and the rules.
+/// Outbound redaction as configured: a mode, and the rules — with the
+/// providers' credentials, recognised by value.
 #[derive(Debug, Clone)]
 pub struct Redaction {
     pub mode: Mode,
@@ -50,10 +52,13 @@ pub struct Redaction {
 }
 
 impl Redaction {
-    pub fn new(policy: &RedactPolicy) -> Self {
+    pub fn new(policy: &RedactPolicy, saved: &SavedSecrets) -> Self {
         Self {
             mode: policy.mode,
-            rules: Arc::new(think_watch_common::guard_policy::redact_rules(policy)),
+            rules: Arc::new(saved::with_saved(
+                think_watch_common::guard_policy::redact_rules(policy),
+                saved,
+            )),
         }
     }
 
@@ -198,8 +203,19 @@ pub struct RuleHits {
     /// The first few values in their masked form (`sk-an…7f9c`, `…1234`) —
     /// built-in rules only. **A custom rule's values are not written at
     /// all**: masking keeps the first five and last four characters, and of
-    /// a phone number or an IP address that is nearly all of it.
+    /// a phone number or an IP address that is nearly all of it. **Nor is
+    /// a saved secret's**, in any form: the event names where it came from
+    /// instead ([`Self::sources`]).
     pub masked: Vec<String>,
+    /// The saved secrets found, by where they came from (a provider's
+    /// key), each once: the rule that recognises them by value only.
+    pub sources: Vec<SavedSource>,
+}
+
+/// Whether a rule's values may be written masked: built-in rules, except
+/// the one that recognises the providers' credentials by value.
+fn writes_masked(rule: &Rule) -> bool {
+    !rule.custom() && rule.kind() != Kind::Saved
 }
 
 /// The findings of one request, one entry per rule, the rule with the most
@@ -215,6 +231,7 @@ pub fn per_rule(findings: &[Finding]) -> Vec<RuleHits> {
                     values: 0,
                     count: 0,
                     masked: Vec::new(),
+                    sources: Vec::new(),
                 });
                 out.len() - 1
             }
@@ -222,8 +239,13 @@ pub fn per_rule(findings: &[Finding]) -> Vec<RuleHits> {
         let r = &mut out[at];
         r.values += 1;
         r.count += f.count;
-        if !f.rule.custom() && r.masked.len() < MASKED_MAX {
+        if writes_masked(&f.rule) && r.masked.len() < MASKED_MAX {
             r.masked.push(f.masked.clone());
+        }
+        if let Some(source) = &f.source
+            && !r.sources.contains(source)
+        {
+            r.sources.push(source.clone());
         }
     }
     out.sort_by_key(|r| std::cmp::Reverse(r.count));
@@ -242,7 +264,8 @@ fn replaced(redaction: &Redaction, rule: &Rule) -> bool {
 /// or by a rule whose action is to record), at most [`RULE_EVENTS_MAX`] of
 /// them, and a counter. A value is never written as it is: a built-in
 /// rule's event carries a few in masked form, a custom rule's only how
-/// many there were.
+/// many there were. A saved secret's event names where each came from
+/// (`sources`: `[{"kind": "upstream-key", "name": <provider>}]`).
 pub fn record(audit: &AuditLogger, caller: &Caller, redaction: &Redaction, findings: &[Finding]) {
     if findings.is_empty() {
         return;
@@ -296,7 +319,9 @@ pub fn record(audit: &AuditLogger, caller: &Caller, redaction: &Redaction, findi
             "mode": mode.slug(),
             "rules_in_request": rules.len(),
         });
-        if !r.rule.custom() {
+        if r.rule.kind() == Kind::Saved {
+            detail["sources"] = serde_json::json!(r.sources);
+        } else if writes_masked(&r.rule) {
             detail["masked"] = serde_json::json!(r.masked);
         }
         audit.log(caller.audit(action).detail(detail));
@@ -316,10 +341,13 @@ mod tests {
     const RESPONSES: Shape = Shape::Generate(Dialect::Responses);
 
     fn redaction(mode: Mode) -> Redaction {
-        Redaction::new(&RedactPolicy {
-            mode,
-            ..Default::default()
-        })
+        Redaction::new(
+            &RedactPolicy {
+                mode,
+                ..Default::default()
+            },
+            &Default::default(),
+        )
     }
 
     #[test]
@@ -469,20 +497,79 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_secret_s_hits_name_their_provider_and_never_the_value() {
+        use think_watch_common::guard_policy::saved::ProviderCredentials;
+        let a = [(
+            "Authorization".to_string(),
+            "Bearer test-alpha-key-0123456789".to_string(),
+        )];
+        let b = [(
+            "x-api-key".to_string(),
+            "test-beta-key-0123456789".to_string(),
+        )];
+        let saved = SavedSecrets::collect([
+            ProviderCredentials {
+                name: "alpha",
+                base_url: "https://a.example.com",
+                headers: &a,
+                aws_secret_access_key: None,
+            },
+            ProviderCredentials {
+                name: "beta",
+                base_url: "https://b.example.com",
+                headers: &b,
+                aws_secret_access_key: None,
+            },
+        ]);
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                ..Default::default()
+            },
+            &saved,
+        );
+        let body = serde_json::json!({"messages": [{"role": "user", "content":
+            "key test-beta-key-0123456789, again test-beta-key-0123456789, and test-alpha-key-0123456789"
+        }]})
+        .to_string();
+        let (found, ledger) = r.look(body.as_bytes(), CHAT);
+        let rules = per_rule(&found);
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        let hits = &rules[0];
+        assert_eq!(hits.rule.id(), "thinkwatch-saved-secret");
+        assert_eq!((hits.values, hits.count), (2, 3));
+        assert!(hits.masked.is_empty(), "never a value, masked or not");
+        let names: Vec<&str> = hits.sources.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["beta", "alpha"]);
+        assert_eq!(
+            serde_json::json!(hits.sources[0]),
+            serde_json::json!({"kind": "upstream-key", "name": "beta"})
+        );
+        // Replaced on the wire like any other value.
+        let (sent, _) = r.replace(body.into_bytes(), &ledger, CHAT);
+        let sent = String::from_utf8(sent).unwrap();
+        assert!(!sent.contains("test-beta-key"), "{sent}");
+        assert!(!writes_masked(&Rule::Custom("ssn".into())));
+    }
+
+    #[test]
     fn findings_are_one_entry_per_rule_and_a_custom_rule_keeps_no_values() {
-        let r = Redaction::new(&RedactPolicy {
-            mode: Mode::Enforce,
-            custom: vec![tw_guard::policy::CustomRedactRule {
-                name: "ssn".into(),
-                pattern: r"\d{3}-\d{2}-\d{4}".into(),
-                matching: tw_guard::policy::ContentMatch::Regex,
-                case_sensitive: true,
-                label: None,
-                action: Default::default(),
-                disabled: false,
-            }],
-            ..Default::default()
-        });
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                custom: vec![tw_guard::policy::CustomRedactRule {
+                    name: "ssn".into(),
+                    pattern: r"\d{3}-\d{2}-\d{4}".into(),
+                    matching: tw_guard::policy::ContentMatch::Regex,
+                    case_sensitive: true,
+                    label: None,
+                    action: Default::default(),
+                    disabled: false,
+                }],
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let other = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBB";
         let body = serde_json::json!({"messages": [{"role": "user", "content": format!(
             "{KEY} {other} {KEY} 123-45-6789 987-65-4321 123-45-6789 111-22-3333"
@@ -511,10 +598,13 @@ mod tests {
 
     #[test]
     fn a_built_in_rule_lists_only_a_few_masked_values() {
-        let r = Redaction::new(&RedactPolicy {
-            mode: Mode::Observe,
-            ..Default::default()
-        });
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Observe,
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let keys: Vec<String> = (0..12)
             .map(|i| format!("sk-ant-api03-{}", format!("{i:02}").repeat(14)))
             .collect();
@@ -536,24 +626,27 @@ mod tests {
 
     #[test]
     fn a_rule_that_records_only_is_found_and_reported_but_not_replaced() {
-        let r = Redaction::new(&RedactPolicy {
-            mode: Mode::Enforce,
-            actions: [(
-                "anthropic-api-key".to_string(),
-                tw_guard::policy::RedactAction::Record,
-            )]
-            .into(),
-            custom: vec![tw_guard::policy::CustomRedactRule {
-                name: "project".into(),
-                pattern: "PRJ-7".into(),
-                matching: tw_guard::policy::ContentMatch::Contains,
-                case_sensitive: false,
-                label: Some("PROJECT".into()),
-                action: tw_guard::policy::RedactAction::Placeholder,
-                disabled: false,
-            }],
-            ..Default::default()
-        });
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                actions: [(
+                    "anthropic-api-key".to_string(),
+                    tw_guard::policy::RedactAction::Record,
+                )]
+                .into(),
+                custom: vec![tw_guard::policy::CustomRedactRule {
+                    name: "project".into(),
+                    pattern: "PRJ-7".into(),
+                    matching: tw_guard::policy::ContentMatch::Contains,
+                    case_sensitive: false,
+                    label: Some("PROJECT".into()),
+                    action: tw_guard::policy::RedactAction::Placeholder,
+                    disabled: false,
+                }],
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let body =
             serde_json::json!({"messages": [{"role": "user", "content": format!("{KEY} PRJ-7")}]})
                 .to_string();
@@ -614,11 +707,14 @@ mod tests {
     /// upstream refused the whole request.
     #[test]
     fn a_reasoning_item_id_is_sent_as_it_is_and_the_same_number_in_text_is_not() {
-        let r = Redaction::new(&RedactPolicy {
-            mode: Mode::Enforce,
-            enable: vec!["cn-mobile-phone".into()],
-            ..Default::default()
-        });
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                enable: vec!["cn-mobile-phone".into()],
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let id = "rs_0d1f5e8a13800138000b6f2c9e4a7d3c1b0e9f8a7d6c5b4a3";
         assert!(
             !tw_guard::redact::flow::hits(&format!("\"{id}\""), &r.rules).is_empty(),
@@ -651,23 +747,26 @@ mod tests {
     /// is replaced.
     #[test]
     fn protocol_values_are_never_replaced_written_text_always_is() {
-        let r = Redaction::new(&RedactPolicy {
-            mode: Mode::Enforce,
-            enable: tw_guard::redact::rules::BUILTINS
-                .iter()
-                .map(|b| b.id.to_string())
-                .collect(),
-            custom: vec![tw_guard::policy::CustomRedactRule {
-                name: "tool".into(),
-                pattern: "notify".into(),
-                matching: tw_guard::policy::ContentMatch::Contains,
-                case_sensitive: false,
-                label: None,
-                action: Default::default(),
-                disabled: false,
-            }],
-            ..Default::default()
-        });
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                enable: tw_guard::redact::rules::BUILTINS
+                    .iter()
+                    .map(|b| b.id.to_string())
+                    .collect(),
+                custom: vec![tw_guard::policy::CustomRedactRule {
+                    name: "tool".into(),
+                    pattern: "notify".into(),
+                    matching: tw_guard::policy::ContentMatch::Contains,
+                    case_sensitive: false,
+                    label: None,
+                    action: Default::default(),
+                    disabled: false,
+                }],
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         const PHONE: &str = "13800138000";
         const EMAIL: &str = "alice@corp.example.org";
         let body = serde_json::json!({

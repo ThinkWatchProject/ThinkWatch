@@ -188,20 +188,6 @@
       "action": "Action",
       "enabled": "On"
     },
-    "kind": {
-      "api-keys": "API keys",
-      "private-keys": "Private keys",
-      "jwt": "JWTs",
-      "conn-strings": "Connection strings",
-      "personal": "Personal information",
-      "internal": "Internal addresses",
-      "command": "Built-in",
-      "injection": "Instruction override",
-      "persona": "Identity and prompts",
-      "chinese": "Chinese phrasing",
-      "invisible": "Hidden characters",
-      "custom": "Custom"
-    },
     "scope": {
       "request": "Request",
       "response": "Answer"
@@ -346,155 +332,18 @@
         "answerText": "Answer · text",
         "toolCall": "Answer · tool call",
         "toolCallNamed": "Answer · tool call {{tool}}"
+      },
+      "source": {
+        "upstream-key": "API key of provider {{name}}"
       }
     },
     "matcher": {
-      "prefix": "Starts with {{prefix}}, followed by at least {{n}} characters",
-      "openaiLegacy": "Starts with {{prefix}}, at least {{n}} characters long, with both letters and digits",
-      "pem": "From {{begin}} to its END, as a whole",
-      "jwt": "Three base64url parts; the first decodes to text containing {{alg}}",
-      "connString": "Only the password in {{uri}}",
-      "connStringShape": "scheme://user:password@host",
-      "privateIp": "Addresses starting with {{ranges}}; not {{loopback}}",
-      "domainSuffix": "Domains ending in {{suffixes}}",
-      "cnResidentId": "An 18-character resident ID number whose region code, birth date since {{year}} and check character all check out",
-      "bankCard": "A {{networks}} card number whose prefix and length match and that passes the Luhn check; public test card numbers excepted",
-      "email": "Email addresses, such as {{example}}",
-      "cnMobilePhone": "11-digit mobile numbers starting with 13–19, not run together with other digits",
       "regex": "Regex {{pattern}}, ignoring case",
       "regexCaseSensitive": "Regex {{pattern}}, case-sensitive",
       "contains": "Contains {{text}}, ignoring case",
       "containsCaseSensitive": "Contains {{text}}, case-sensitive",
       "codepoints": "Code points {{ranges}}",
       "other": "Built-in check"
-    },
-    "check": {
-      "credential-to-network": "A credential sent to a host other than this machine and the credential's own provider",
-      "thinkwatch-data": "A path or command that points into ThinkWatch's data directory; a mention does not count",
-      "file-to-network": "A local file uploaded to an external host"
-    },
-    "cardNetwork": {
-      "UnionPay": "UnionPay"
-    },
-    "redactRule": {
-      "anthropic-api-key": "Anthropic API key",
-      "openai-project-key": "OpenAI project key",
-      "openai-api-key": "OpenAI API key",
-      "github-personal-token": "GitHub personal access token",
-      "github-oauth-token": "GitHub OAuth token",
-      "github-server-token": "GitHub server token",
-      "github-user-token": "GitHub user token",
-      "github-fine-grained-token": "GitHub fine-grained token",
-      "slack-bot-token": "Slack bot token",
-      "slack-user-token": "Slack user token",
-      "slack-app-token": "Slack app token",
-      "aws-access-key-id": "AWS access key ID",
-      "aws-temporary-key-id": "AWS temporary access key ID",
-      "google-api-key": "Google API key",
-      "google-oauth-token": "Google OAuth token",
-      "gitlab-token": "GitLab token",
-      "stripe-live-key": "Stripe live key",
-      "stripe-restricted-key": "Stripe restricted key",
-      "npm-token": "npm token",
-      "digitalocean-token": "DigitalOcean token",
-      "sendgrid-key": "SendGrid key",
-      "private-key": "Private key",
-      "jwt": "JWT",
-      "conn-string-password": "Connection string password",
-      "cn-resident-id": "Chinese resident ID number",
-      "bank-card": "Bank card number",
-      "email": "Email address",
-      "cn-mobile-phone": "Chinese mainland mobile number",
-      "internal-ip": "Internal IP address",
-      "internal-domain": "Internal domain"
-    },
-    "contentRule": {
-      "unicode-tags": "Unicode tag characters",
-      "bidi-controls": "Bidirectional controls",
-      "zero-width": "Zero-width characters",
-      "private-use": "Private-use characters",
-      "ignore-previous-instructions": "Ignore previous instructions",
-      "ignore-all-previous": "Ignore all previous",
-      "disregard-your-instructions": "Disregard your instructions",
-      "jailbreak": "Jailbreak",
-      "dan": "DAN",
-      "developer-mode": "Developer mode",
-      "you-are-now": "Persona manipulation",
-      "new-persona": "New persona",
-      "act-as": "Act as",
-      "pretend-to-be": "Pretend to be",
-      "system-prompt": "System prompt extraction",
-      "reveal-your-instructions": "Reveal instructions",
-      "what-are-your-rules": "What are your rules",
-      "base64-wall": "Base64 smuggling",
-      "zh-ignore-previous": "Ignore previous instructions (Chinese)",
-      "zh-forget-your": "Forget your instructions (Chinese)",
-      "zh-do-not-follow": "Do not follow (Chinese)",
-      "zh-you-are-now": "You are now (Chinese)",
-      "zh-role-play": "Role-play (Chinese)",
-      "zh-reveal-your": "Reveal your instructions (Chinese)",
-      "zh-system-prompt": "System prompt (Chinese)",
-      "zh-jailbreak": "Jailbreak (Chinese)"
-    },
-    "contentWhy": {
-      "unicode-tags": "Entirely invisible in an editor, yet carried into the model's context as they are, so a whole instruction can hide in them.",
-      "bidi-controls": "They make what is on screen read in a different order than the characters actually are.",
-      "zero-width": "Invisible in an editor, yet read by the model. Ordinary text such as emoji and Persian uses them too.",
-      "private-use": "They have no standard meaning. Some icon fonts use them."
-    },
-    "toolRule": {
-      "curl-pipe-sh": {
-        "name": "Download and run",
-        "why": "Downloads and runs it straight away; what runs is decided remotely and cannot be read first"
-      },
-      "base64-decode-exec": {
-        "name": "Decode and run",
-        "why": "Hides what will run inside base64"
-      },
-      "exfil-env": {
-        "name": "Send out environment variables",
-        "why": "Sends the environment, which usually holds keys, somewhere else"
-      },
-      "exfil-credentials": {
-        "name": "Send out a credential file",
-        "why": "Asks the model to send the contents of a credential file somewhere"
-      },
-      "exfil-credentials-reversed": {
-        "name": "Send out a credential file (verb first)",
-        "why": "Asks the model to send the contents of a credential file somewhere"
-      },
-      "ssh-key-read": {
-        "name": "Read a private key or cloud credential",
-        "why": "Reads a private key or a cloud credential"
-      },
-      "secret-to-unknown-host": {
-        "name": "Send a credential to an unknown host",
-        "why": "Sends a credential to a host that is neither local nor the credential's own provider"
-      },
-      "thinkwatch-data": {
-        "name": "Read or change ThinkWatch's own data",
-        "why": "Reads or changes ThinkWatch's data directory, which holds every upstream key in plain text and the settings of these protections"
-      },
-      "write-startup-item": {
-        "name": "Write a startup item",
-        "why": "Writes somewhere that runs at login or whenever a terminal opens"
-      },
-      "crontab-install": {
-        "name": "Install a scheduled job",
-        "why": "Installs a scheduled job, or deletes every existing one"
-      },
-      "rm-rf-root": {
-        "name": "Delete home or root",
-        "why": "Deletes the whole home directory or the root"
-      },
-      "chmod-777": {
-        "name": "World-writable permissions",
-        "why": "Makes a file writable by everyone"
-      },
-      "upload-file-to-host": {
-        "name": "Upload a local file to an external host",
-        "why": "Uploads the contents of a local file to an external host"
-      }
     }
   },
   "mcpStore": {

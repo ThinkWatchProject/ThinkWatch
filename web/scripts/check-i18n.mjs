@@ -31,54 +31,24 @@ const zhPath = join(webRoot, 'src/i18n/zh.json');
 // If a source file's dynamic pattern isn't listed here, it falls back to
 // being reported as "skipped" so the author is prompted to add it.
 
-// The security page (src/routes/gateway/security/). Guard and rule ids
-// mirror the rule view `GET /api/admin/security` returns (thinkwatch-core's
-// tw-guard); a rule core ships before the console names it falls back to the
-// server's English.
+// The security page (src/routes/gateway/security/). Guard ids mirror the
+// rule view `GET /api/admin/security` returns (thinkwatch-core's tw-guard).
 const GUARD_IDS = ['redact', 'inspect_tools', 'content'];
 const GUARD_COPY = [
   'name', 'lead', 'nowEnforce', 'testTitle', 'createTitle', 'editTitle',
   'nameHint', 'namePlaceholder', 'samplePlaceholder',
 ];
 const RULE_ACTIONS = ['placeholder', 'cut', 'block', 'strip', 'replace', 'record'];
-const REDACT_RULE_IDS = [
-  'anthropic-api-key', 'openai-project-key', 'openai-api-key',
-  'github-personal-token', 'github-oauth-token', 'github-server-token',
-  'github-user-token', 'github-fine-grained-token', 'slack-bot-token',
-  'slack-user-token', 'slack-app-token', 'aws-access-key-id',
-  'aws-temporary-key-id', 'google-api-key', 'google-oauth-token',
-  'gitlab-token', 'stripe-live-key', 'stripe-restricted-key', 'npm-token',
-  'digitalocean-token', 'sendgrid-key', 'private-key', 'jwt',
-  'conn-string-password', 'cn-resident-id', 'bank-card', 'email',
-  'cn-mobile-phone', 'internal-ip', 'internal-domain',
-];
-const TOOL_RULE_IDS = [
-  'curl-pipe-sh', 'base64-decode-exec', 'exfil-env', 'exfil-credentials',
-  'exfil-credentials-reversed', 'ssh-key-read', 'secret-to-unknown-host',
-  'thinkwatch-data', 'write-startup-item', 'crontab-install', 'rm-rf-root', 'chmod-777',
-  'upload-file-to-host',
-];
-const INVISIBLE_RULE_IDS = ['unicode-tags', 'bidi-controls', 'zero-width', 'private-use'];
-const CONTENT_RULE_IDS = [
-  ...INVISIBLE_RULE_IDS,
-  'ignore-previous-instructions', 'ignore-all-previous',
-  'disregard-your-instructions', 'jailbreak', 'dan', 'developer-mode',
-  'you-are-now', 'new-persona', 'act-as', 'pretend-to-be', 'system-prompt',
-  'reveal-your-instructions', 'what-are-your-rules', 'base64-wall',
-  'zh-ignore-previous', 'zh-forget-your', 'zh-do-not-follow',
-  'zh-you-are-now', 'zh-role-play', 'zh-reveal-your', 'zh-system-prompt',
-  'zh-jailbreak',
-];
+
+// Rule names, reasons, descriptions and group names come with the rule view
+// from thinkwatch-core in both languages (`name_zh`, `why_zh`, `about_zh`,
+// `kinds`); the console keeps no table of them.
 
 const DYNAMIC_ENUMS = {
   ...Object.fromEntries(
     GUARD_COPY.map((field) => ['contentSecurity.guard.${_}.' + field, GUARD_IDS]),
   ),
   'contentSecurity.summary.${_}': ['enforce', 'observe', 'off'],
-  'contentSecurity.kind.${_}': [
-    'api-keys', 'private-keys', 'jwt', 'conn-strings', 'personal', 'internal',
-    'command', 'injection', 'persona', 'chinese', 'invisible', 'custom',
-  ],
   'contentSecurity.ruleAction.${_}': RULE_ACTIONS,
   'contentSecurity.mode.${_}': ['enforce', 'observe', 'off'],
   'contentSecurity.now.${_}': ['observe', 'off'],
@@ -86,14 +56,8 @@ const DYNAMIC_ENUMS = {
   'contentSecurity.scopeChoice.${_}': ['request', 'response', 'both'],
   'contentSecurity.dialog.testAsSide.${_}': ['request', 'response'],
   'contentSecurity.dialog.modeNote.${_}': ['observe', 'off'],
-  'contentSecurity.redactRule.${_}': REDACT_RULE_IDS,
-  'contentSecurity.toolRule.${_}.name': TOOL_RULE_IDS,
-  'contentSecurity.toolRule.${_}.why': TOOL_RULE_IDS,
-  'contentSecurity.contentRule.${_}': CONTENT_RULE_IDS,
-  'contentSecurity.contentWhy.${_}': INVISIBLE_RULE_IDS,
-  'contentSecurity.cardNetwork.${_}': ['UnionPay'],
-  // Tool-call checks implemented in code (`{ kind: 'builtin', check }`).
-  'contentSecurity.check.${_}': ['credential-to-network', 'file-to-network', 'thinkwatch-data'],
+  // Where a saved secret came from (`sources[].kind` of a redaction event).
+  'contentSecurity.log.source.${_}': ['upstream-key'],
   'contentSecurity.dialog.match.${_}': ['contains', 'regex', 'codepoints'],
   'contentSecurity.dialog.regexHint.${_}': GUARD_IDS,
   'contentSecurity.dialog.actionWhat.${_}': RULE_ACTIONS,

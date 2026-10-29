@@ -1433,3 +1433,111 @@ async fn a_value_repeated_without_its_context_is_masked_in_the_log_row() {
         assert!(b.contains("<<TW_SECRET_1>>"), "{b}");
     }
 }
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn provider_credentials_reach_redaction_when_the_providers_load() {
+    use think_watch_common::json_secret::JsonSecret;
+    let app = TestApp::spawn().await;
+    app.set_setting("security.redact", json!({"mode": "enforce"}))
+        .await;
+    let saved = "test-saved-upstream-key-0123456789";
+    let enc = |v: &str| {
+        JsonSecret::encrypt(v, &app.state.config.encryption_key)
+            .unwrap()
+            .to_json()
+    };
+    let upstream = echo_upstream().await;
+    let name = unique_name("saved");
+    let provider = fixtures::create_provider(
+        &app.db,
+        &name,
+        "openai",
+        &upstream.uri(),
+        Some(json!({"headers": [
+            {"key": "Authorization", "value": enc(&format!("Bearer {saved}"))},
+            {"key": "OpenAI-Beta", "value": enc("assistants=v2-not-a-secret")}
+        ]})),
+    )
+    .await
+    .unwrap();
+    fixtures::create_model_and_route(&app.db, provider.id, "saved-key")
+        .await
+        .unwrap();
+    let guards_before = app.state.guards.load_full();
+    app.rebuild_gateway_router().await;
+
+    // Collected under the provider's name, with its base URL's host; the
+    // header that is configuration is not.
+    let list = app.state.saved_secrets.load_full();
+    let got: Vec<(String, String)> = list
+        .iter()
+        .map(|s| (s.provider.clone(), s.value.clone()))
+        .collect();
+    assert_eq!(got, [(name.clone(), saved.to_string())]);
+    assert_eq!(
+        list.iter().next().unwrap().host.as_deref(),
+        Some("127.0.0.1")
+    );
+    // The guards were recompiled with them.
+    let guards = app.state.guards.load_full();
+    assert!(!std::sync::Arc::ptr_eq(&guards_before, &guards));
+    assert_eq!(guards.redaction.rules.saved().map(|s| s.len()), Some(1));
+
+    // A caller pasting the key: the upstream never sees it.
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let key = fixtures::create_api_key(&app.db, user.user.id, "saved", &["ai_gateway"], None, None)
+        .await
+        .unwrap()
+        .plaintext;
+    let (status, text) = post_as(
+        &app,
+        &key,
+        "/v1/chat/completions",
+        &json!({"model": "saved-key", "messages": [
+            {"role": "user", "content": format!("why does {saved} fail")}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let body = String::from_utf8_lossy(&upstream.received_requests().await[0].body).into_owned();
+    assert!(!body.contains(saved), "{body}");
+    assert!(body.contains("<<TW_SECRET_1>>"), "{body}");
+    assert!(text.contains(saved), "restored for the caller: {text}");
+
+    // The console's trial knows it too, and names the rule, not the value.
+    let con = admin_session(&app).await;
+    let r: Value = con
+        .post(
+            "/api/admin/security/redact/test",
+            json!({"sample": format!("key {saved}")}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(r["hits"][0]["rule"], "thinkwatch-saved-secret", "{r}");
+    assert!(
+        !r["hits"][0]["excerpt"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("saved-upstream"),
+        "{r}"
+    );
+
+    // Unchanged credentials leave the guards as they are; a deactivated
+    // provider takes its credential with it.
+    app.rebuild_gateway_router().await;
+    assert!(std::sync::Arc::ptr_eq(
+        &guards,
+        &app.state.guards.load_full()
+    ));
+    sqlx::query("UPDATE providers SET is_active = false WHERE id = $1")
+        .bind(provider.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+    assert!(app.state.saved_secrets.load().is_empty());
+    assert!(app.state.guards.load().redaction.rules.saved().is_none());
+}
