@@ -28,6 +28,7 @@ pub(crate) mod generate;
 mod headers;
 mod identity;
 mod log_ctx;
+pub mod min_speed;
 mod models;
 mod pipeline;
 mod protocol_relearn;
@@ -42,7 +43,9 @@ pub mod transport;
 pub(crate) use accounting::post_flight_account;
 pub(crate) use body_capture::prepare_body_capture;
 pub(crate) use log_ctx::emit_gateway_log_with_extra;
-pub(crate) use routing::{Resend, SelectionRecord, fails as upstream_failed, finalize_health};
+pub(crate) use routing::{
+    Resend, SelectionRecord, fails as upstream_failed, finalize_health, forget_affinity,
+};
 
 // pub re-exports — `server::app` mounts these as route handlers.
 pub use early_cancel::{EarlyCancel, EarlyCancelSlot};

@@ -37,6 +37,15 @@ pub async fn name_of(pool: &PgPool, id: Uuid) -> Result<Option<String>, AppError
     )
 }
 
+/// The slowest generation a provider's streams may keep up (see
+/// `think_watch_gateway::proxy::min_speed`): `tokens_per_sec` `None` is
+/// off. Checked against the columns' ranges by the handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinSpeed {
+    pub tokens_per_sec: Option<i32>,
+    pub window_secs: i32,
+}
+
 pub async fn insert(
     pool: &PgPool,
     name: &str,
@@ -44,16 +53,20 @@ pub async fn insert(
     provider_type: &str,
     base_url: &str,
     config_json: &serde_json::Value,
+    min_speed: MinSpeed,
 ) -> Result<Provider, AppError> {
     Ok(sqlx::query_as::<_, Provider>(
-        r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json)
-           VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+        r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json,
+                                  min_speed_tokens_per_sec, min_speed_window_secs)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
     )
     .bind(name)
     .bind(display_name)
     .bind(provider_type)
     .bind(base_url)
     .bind(config_json)
+    .bind(min_speed.tokens_per_sec)
+    .bind(min_speed.window_secs)
     .fetch_one(pool)
     .await?)
 }
@@ -64,15 +77,19 @@ pub async fn update(
     display_name: &str,
     base_url: &str,
     config_json: &serde_json::Value,
+    min_speed: MinSpeed,
 ) -> Result<Provider, AppError> {
     Ok(sqlx::query_as::<_, Provider>(
-        r#"UPDATE providers SET display_name = $2, base_url = $3, config_json = $4
+        r#"UPDATE providers SET display_name = $2, base_url = $3, config_json = $4,
+                                min_speed_tokens_per_sec = $5, min_speed_window_secs = $6
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
     .bind(display_name)
     .bind(base_url)
     .bind(config_json)
+    .bind(min_speed.tokens_per_sec)
+    .bind(min_speed.window_secs)
     .fetch_one(pool)
     .await?)
 }

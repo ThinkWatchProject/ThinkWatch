@@ -11,6 +11,12 @@ export interface Provider {
    * re-submitting them blank keeps it (see `merge_headers_for_storage`).
    */
   config_json?: { headers?: { key: string; value: string; encrypted?: boolean }[] };
+  /**
+   * The slowest generation a stream may keep up, in tokens per second
+   * over `min_speed_window_secs` seconds. `null` ⇒ off.
+   */
+  min_speed_tokens_per_sec: number | null;
+  min_speed_window_secs: number;
   created_at: string;
 }
 

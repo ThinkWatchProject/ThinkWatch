@@ -280,6 +280,12 @@ pub async fn create_provider(
     encrypt_aws_secret_in_config(&mut config, &state.config.encryption_key)?;
     config["headers"] = encrypt_headers_for_storage(&req.headers, &state.config.encryption_key)?;
 
+    let min_speed = min_speed(
+        req.min_speed_tokens_per_sec,
+        req.min_speed_window_secs
+            .unwrap_or(i64::from(DEFAULT_MIN_SPEED_WINDOW_SECS)),
+    )?;
+
     let mut provider = repo::insert(
         &state.db,
         &req.name,
@@ -287,6 +293,7 @@ pub async fn create_provider(
         &req.provider_type,
         &req.base_url,
         &config,
+        min_speed,
     )
     .await?;
 
@@ -311,6 +318,52 @@ pub struct UpdateProviderRequest {
     pub base_url: Option<String>,
     /// Unified request headers (auth + custom + identity templates).
     pub headers: Option<Vec<ProviderHeader>>,
+    /// PATCH-clearable slowest generation, in tokens per second. Absent
+    /// = unchanged, JSON `null` = off, number (1 to 1000) = cut a stream
+    /// that averages fewer over `min_speed_window_secs`.
+    #[serde(
+        default,
+        deserialize_with = "crate::handlers::serde_util::deserialize_some"
+    )]
+    #[schema(value_type = Option<i64>)]
+    pub min_speed_tokens_per_sec: Option<Option<i64>>,
+    /// The window that speed is averaged over, in seconds (5 to 120).
+    /// Absent = unchanged.
+    pub min_speed_window_secs: Option<i64>,
+}
+
+/// A stream's window when none is given, in seconds.
+pub(crate) const DEFAULT_MIN_SPEED_WINDOW_SECS: i32 = 20;
+
+/// A provider's slowest generation as stored: `tokens_per_sec` 1 to 1000
+/// or none (off), `window_secs` 5 to 120 — the columns' CHECKs, as a
+/// useful 400.
+pub(crate) fn min_speed(
+    tokens_per_sec: Option<i64>,
+    window_secs: i64,
+) -> Result<repo::MinSpeed, AppError> {
+    let tokens_per_sec = tokens_per_sec
+        .map(|n| {
+            i32::try_from(n)
+                .ok()
+                .filter(|n| (1..=1000).contains(n))
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "min_speed_tokens_per_sec must be between 1 and 1000".into(),
+                    )
+                })
+        })
+        .transpose()?;
+    let window_secs = i32::try_from(window_secs)
+        .ok()
+        .filter(|n| (5..=120).contains(n))
+        .ok_or_else(|| {
+            AppError::BadRequest("min_speed_window_secs must be between 5 and 120".into())
+        })?;
+    Ok(repo::MinSpeed {
+        tokens_per_sec,
+        window_secs,
+    })
 }
 
 #[utoipa::path(
@@ -372,7 +425,24 @@ pub async fn update_provider(
         config
     };
 
-    let mut updated = repo::update(&state.db, id, display_name, base_url, &config_json).await?;
+    let min_speed = min_speed(
+        match req.min_speed_tokens_per_sec {
+            None => existing.min_speed_tokens_per_sec.map(i64::from),
+            Some(set) => set,
+        },
+        req.min_speed_window_secs
+            .unwrap_or(i64::from(existing.min_speed_window_secs)),
+    )?;
+
+    let mut updated = repo::update(
+        &state.db,
+        id,
+        display_name,
+        base_url,
+        &config_json,
+        min_speed,
+    )
+    .await?;
 
     // A new base URL or credential can mean an entirely different
     // upstream, so every dialect we learned for this provider's routes
@@ -620,6 +690,8 @@ fn test_materials(
         headers,
         api_version: stored.and_then(|s| s.api_version.clone()),
         aws,
+        // A connection test lists models; it streams nothing.
+        min_speed: None,
     }
 }
 
@@ -788,6 +860,65 @@ fn probe_url(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_minimum_speed_is_in_the_columns_ranges_or_off() {
+        let ok = |t, w| min_speed(t, w).unwrap();
+        assert_eq!(
+            ok(None, 20),
+            repo::MinSpeed {
+                tokens_per_sec: None,
+                window_secs: 20
+            }
+        );
+        assert_eq!(
+            ok(Some(1), 5),
+            repo::MinSpeed {
+                tokens_per_sec: Some(1),
+                window_secs: 5
+            }
+        );
+        assert_eq!(ok(Some(1000), 120).tokens_per_sec, Some(1000));
+        for (t, w) in [
+            (Some(0), 20),
+            (Some(1001), 20),
+            (Some(-1), 20),
+            (Some(i64::MAX), 20),
+            (None, 4),
+            (None, 121),
+            (None, 0),
+        ] {
+            assert!(min_speed(t, w).is_err(), "{t:?} / {w}");
+        }
+        assert!(
+            min_speed(Some(0), 20)
+                .unwrap_err()
+                .to_string()
+                .contains("min_speed_tokens_per_sec")
+        );
+        assert!(
+            min_speed(None, 4)
+                .unwrap_err()
+                .to_string()
+                .contains("min_speed_window_secs")
+        );
+    }
+
+    #[test]
+    fn a_patch_tells_an_absent_speed_from_a_cleared_one() {
+        let absent: UpdateProviderRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(absent.min_speed_tokens_per_sec, None);
+        assert_eq!(absent.min_speed_window_secs, None);
+        let cleared: UpdateProviderRequest =
+            serde_json::from_value(serde_json::json!({"min_speed_tokens_per_sec": null})).unwrap();
+        assert_eq!(cleared.min_speed_tokens_per_sec, Some(None));
+        let set: UpdateProviderRequest = serde_json::from_value(
+            serde_json::json!({"min_speed_tokens_per_sec": 15, "min_speed_window_secs": 30}),
+        )
+        .unwrap();
+        assert_eq!(set.min_speed_tokens_per_sec, Some(Some(15)));
+        assert_eq!(set.min_speed_window_secs, Some(30));
+    }
+
     fn test_hex_key() -> &'static str {
         // 32 bytes of zeroes → valid 64-char hex key for AES-256.
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -903,6 +1034,7 @@ mod tests {
             headers: vec![("Authorization".into(), "Bearer ABSK-saved".into())],
             api_version: None,
             aws: keys("AKIA-saved", "secret-saved"),
+            min_speed: None,
         }
     }
 
