@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
-import { CreateProviderDialog, EditProviderDialog, minSpeedFields } from './provider-dialogs'
+import { CreateProviderDialog, EditProviderDialog } from './provider-dialogs'
+import { minSpeedFields } from './provider-min-speed'
 import type { Provider } from './provider-types'
 
 vi.mock('@/lib/api', () => ({
