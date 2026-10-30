@@ -329,8 +329,24 @@ CREATE TABLE IF NOT EXISTS providers (
     is_active         BOOLEAN NOT NULL DEFAULT TRUE,
     config_json       JSONB DEFAULT '{}',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at        TIMESTAMPTZ
+    deleted_at        TIMESTAMPTZ,
+    -- The slowest generation this upstream may keep a stream at: once
+    -- its first token is in, a stream that averages fewer than
+    -- `min_speed_tokens_per_sec` over the last `min_speed_window_secs`
+    -- seconds (pauses of 5 s or more left out) is cut with a 503 and
+    -- counted against the route. NULL ⇒ off. See
+    -- crates/gateway/src/proxy/min_speed.rs.
+    min_speed_tokens_per_sec INT
+        CHECK (min_speed_tokens_per_sec IS NULL OR min_speed_tokens_per_sec BETWEEN 1 AND 1000),
+    min_speed_window_secs    INT NOT NULL DEFAULT 20
+        CHECK (min_speed_window_secs BETWEEN 5 AND 120)
 );
+
+-- Added after first boot; see the note above `model_routes`'s ALTER.
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS min_speed_tokens_per_sec
+    INT CHECK (min_speed_tokens_per_sec IS NULL OR min_speed_tokens_per_sec BETWEEN 1 AND 1000);
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS min_speed_window_secs
+    INT NOT NULL DEFAULT 20 CHECK (min_speed_window_secs BETWEEN 5 AND 120);
 
 CREATE INDEX IF NOT EXISTS idx_providers_not_deleted ON providers(created_at) WHERE deleted_at IS NULL;
 

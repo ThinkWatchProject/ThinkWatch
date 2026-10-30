@@ -68,6 +68,9 @@ pub struct Upstream {
     /// The models this upstream refused the cache breakpoints a
     /// conversion adds for (see `proxy::cache_marks`).
     pub(crate) cache_marks: crate::proxy::cache_marks::Refused,
+    /// The slowest generation a stream from this upstream may keep up
+    /// (see `proxy::min_speed`). `None` ⇒ not measured.
+    pub min_speed: Option<crate::proxy::min_speed::MinSpeed>,
 }
 
 impl Upstream {
@@ -79,7 +82,14 @@ impl Upstream {
             shape,
             label: label.to_string(),
             cache_marks: Default::default(),
+            min_speed: None,
         }
+    }
+
+    /// The same upstream, with streams cut below `min_speed`.
+    pub fn with_min_speed(mut self, min_speed: Option<crate::proxy::min_speed::MinSpeed>) -> Self {
+        self.min_speed = min_speed;
+        self
     }
 
     /// Is this the vendor's own endpoint rather than a relay?

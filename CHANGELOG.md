@@ -17,12 +17,16 @@ for the providers are recognised by value, whatever their format. The
 console shows the rules' names and descriptions as thinkwatch-core
 writes them, in both languages. A value recognised by mistake can be made
 an exception without switching its rule off, and long conversations are
-no longer scanned from the start every turn. The thinkwatch-core crates
+no longer scanned from the start every turn. A provider can set the
+slowest generation its streams may keep up, and a stream that falls
+below it is cut so the client can try again. The thinkwatch-core crates
 move from v0.83.1 to v0.86.0.
 
-No new setting or column. The redaction policy gains one optional field
-(`exceptions`), with endpoints of its own under
-`/api/admin/security/redact/exceptions`.
+No new setting. Two new provider columns
+(`providers.min_speed_tokens_per_sec`, `providers.min_speed_window_secs`,
+added on startup) and one new metric (`gateway_provider_too_slow_total`).
+The redaction policy gains one optional field (`exceptions`), with
+endpoints of its own under `/api/admin/security/redact/exceptions`.
 
 ### Read before upgrading
 
@@ -89,6 +93,24 @@ No new setting or column. The redaction policy gains one optional field
   it and scans only what is new. What is found is the same as without it.
   The cache is rebuilt whenever the rules, the providers' keys or the
   exceptions change.
+- **Stop a stream that generates too slowly** (the provider's
+  "Stop when generation is slower than … tokens/s for … s" setting,
+  `min_speed_tokens_per_sec` 1–1000 and `min_speed_window_secs` 5–120,
+  default 20, on the provider endpoints; blank or `null` is off, the
+  default). From the first token on, a stream is judged once a second:
+  when the text it streamed over the last window (answer, reasoning and
+  tool arguments, four ASCII characters or one other character to a
+  token; Gemini's running count when higher) comes to fewer tokens per
+  second than the minimum, the stream ends with a 503 error in the
+  client's format (`overloaded_error` for Anthropic, `response.failed`
+  for Responses, `UNAVAILABLE` for Gemini), the upstream connection is
+  closed, and the route is charged a failure. Pauses of 5 s or more are
+  left out of the window, and a window that is more than half pauses is
+  not judged. The session's affinity to that route is dropped, the
+  answer so far is billed as for any stream cut short, and the log row
+  carries the error `UpstreamTooSlow` and the speed at the cut
+  (`tokens_per_sec`). Whole answers and Responses WebSocket turns are
+  not measured.
 
 ### Changed
 

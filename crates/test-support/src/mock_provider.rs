@@ -192,6 +192,61 @@ pub async fn sse_upstream_lingering(
     format!("http://{addr}")
 }
 
+/// An upstream that answers every `POST {path}` with an event stream
+/// sent piece by piece: each `(wait, piece)` goes out `wait` after the one
+/// before it. Returns its base URL and a flag that is set when the
+/// gateway hangs up before the last piece went out.
+///
+/// wiremock sends a body in one piece, so this is a server of its own.
+pub async fn sse_upstream_paced(
+    path: &str,
+    pieces: Vec<(std::time::Duration, String)>,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Set on drop unless the stream ran to its end.
+    struct HungUp {
+        flag: Arc<AtomicBool>,
+        finished: bool,
+    }
+    impl Drop for HungUp {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let hung_up = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&hung_up);
+    let answer = axum::routing::post(move || {
+        let pieces = pieces.clone();
+        let flag = Arc::clone(&flag);
+        async move {
+            let body = async_stream::stream! {
+                let mut guard = HungUp { flag, finished: false };
+                for (wait, piece) in pieces {
+                    tokio::time::sleep(wait).await;
+                    yield Ok::<_, std::convert::Infallible>(bytes::Bytes::from(piece));
+                }
+                guard.finished = true;
+            };
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(body))
+                .unwrap()
+        }
+    });
+    let app = axum::Router::new().route(path, answer);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hung_up)
+}
+
 fn openai_sse_chunks(model: &str) -> Vec<u8> {
     let chunk = |delta: Value| {
         format!(

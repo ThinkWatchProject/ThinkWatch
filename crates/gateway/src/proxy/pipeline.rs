@@ -130,9 +130,24 @@ pub(super) fn launch_stream_pump(
         &deps.guards,
         &deps.request,
         &deps.route.provider_name,
+        deps.route.min_speed,
     );
     tokio::spawn(async move {
         let (invoked, sent) = tail.await;
+        // Cut for generating too slowly: the session's next request is not
+        // sent back to the same upstream by its affinity, and the row says
+        // how fast it was going.
+        if let Some(rate) = sent.too_slow {
+            super::forget_affinity(
+                &deps.state.redis,
+                deps.request.identity.user_id.as_deref(),
+                &deps.request.mapped_model,
+                deps.route.provider_id,
+                deps.route.sel_record.picked_route_id,
+            )
+            .await;
+            deps.route.sel_record.too_slow = Some(rate);
+        }
         // A stream that went out again: the route's time is the attempt
         // that ended it, and the row says how many retries there were.
         if sent.retries > 0 {

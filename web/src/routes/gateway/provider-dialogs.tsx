@@ -21,6 +21,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
 import type { Provider, TestResult } from './provider-types';
+import { DEFAULT_MIN_SPEED_WINDOW_SECS, minSpeedFields } from './provider-min-speed';
 
 const defaultHeadersForType = (type: string): [string, string][] => {
   switch (type) {
@@ -427,6 +428,8 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
   const [editStoredKeys, setEditStoredKeys] = useState<Set<string>>(new Set());
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
+  const [minSpeedRate, setMinSpeedRate] = useState('');
+  const [minSpeedWindow, setMinSpeedWindow] = useState(String(DEFAULT_MIN_SPEED_WINDOW_SECS));
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
 
@@ -437,6 +440,8 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
     if (provider) {
       setEditDisplayName(provider.display_name);
       setEditBaseUrl(provider.base_url);
+      setMinSpeedRate(provider.min_speed_tokens_per_sec?.toString() ?? '');
+      setMinSpeedWindow(String(provider.min_speed_window_secs ?? DEFAULT_MIN_SPEED_WINDOW_SECS));
       setEditError('');
       setTestResult(null);
       const existing = provider.config_json?.headers ?? [];
@@ -453,8 +458,10 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
     }
   }
 
+  const minSpeed = minSpeedFields(minSpeedRate, minSpeedWindow);
+
   const handleEdit = async () => {
-    if (!provider) return;
+    if (!provider || !minSpeed) return;
     setEditError('');
     setEditSaving(true);
     try {
@@ -462,6 +469,7 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
         display_name: editDisplayName,
         base_url: editBaseUrl,
         headers: editHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
+        ...minSpeed,
       });
       onOpenChange(false);
       await onSuccess();
@@ -531,6 +539,36 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
               presets={headerPresets(t)}
             />
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-prov-min-speed">{t('providers.minSpeed')}</Label>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span>{t('providers.minSpeedBefore')}</span>
+              <Input
+                id="edit-prov-min-speed"
+                className="w-20"
+                inputMode="numeric"
+                aria-label={t('providers.minSpeedRate')}
+                aria-invalid={!minSpeed}
+                value={minSpeedRate}
+                onChange={(e) => setMinSpeedRate(e.target.value)}
+              />
+              <span>{t('providers.minSpeedMiddle')}</span>
+              <Input
+                className="w-16"
+                inputMode="numeric"
+                aria-label={t('providers.minSpeedWindow')}
+                aria-invalid={!minSpeed}
+                value={minSpeedWindow}
+                onChange={(e) => setMinSpeedWindow(e.target.value)}
+              />
+              <span>{t('providers.minSpeedAfter')}</span>
+            </div>
+            {minSpeed ? (
+              <p className="text-xs text-muted-foreground">{t('providers.minSpeedHint')}</p>
+            ) : (
+              <p className="text-xs text-destructive">{t('providers.minSpeedInvalid')}</p>
+            )}
+          </div>
         </div>
         <TestResultPanel testResult={testResult} />
         {editError && (
@@ -557,7 +595,7 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
               setTestResult,
             )}
           />
-          <Button onClick={handleEdit} disabled={editSaving}>
+          <Button onClick={handleEdit} disabled={editSaving || !minSpeed}>
             {editSaving ? t('common.loading') : t('common.save')}
           </Button>
         </DialogFooter>

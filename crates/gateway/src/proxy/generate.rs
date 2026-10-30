@@ -1233,6 +1233,7 @@ async fn run(
             upstream_model: route.upstream_model.clone(),
             sel_record,
             caps: crate::route_caps::RouteCaps::of(route),
+            min_speed: route.upstream.min_speed,
         },
         cache_enabled: surface.caches,
     };

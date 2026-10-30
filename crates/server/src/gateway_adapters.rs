@@ -24,6 +24,8 @@ pub(crate) struct ProviderMaterials {
     /// Bedrock API key (an `Authorization` header) has no keys and is
     /// never signed. Only read by the Bedrock adapter.
     pub(crate) aws: Credential,
+    /// The slowest generation the provider's streams may keep up.
+    pub(crate) min_speed: Option<think_watch_gateway::proxy::min_speed::MinSpeed>,
 }
 
 impl ProviderMaterials {
@@ -86,6 +88,10 @@ impl ProviderMaterials {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             aws,
+            min_speed: think_watch_gateway::proxy::min_speed::MinSpeed::from_row(
+                provider.min_speed_tokens_per_sec,
+                provider.min_speed_window_secs,
+            ),
         }
     }
 
@@ -134,12 +140,9 @@ pub(crate) fn build_upstream(m: &ProviderMaterials) -> Arc<Upstream> {
         }
         _ => Shape::Standard,
     };
-    Arc::new(Upstream::new(
-        &m.base_url,
-        m.headers.clone(),
-        shape,
-        &m.name,
-    ))
+    Arc::new(
+        Upstream::new(&m.base_url, m.headers.clone(), shape, &m.name).with_min_speed(m.min_speed),
+    )
 }
 
 /// The API version an Azure deployment is addressed with when the
@@ -164,6 +167,8 @@ mod tests {
             config_json: config,
             created_at: chrono::Utc::now(),
             deleted_at: None,
+            min_speed_tokens_per_sec: None,
+            min_speed_window_secs: 20,
         }
     }
 

@@ -103,6 +103,21 @@ pub enum GatewayError {
          conversation."
     )]
     SealedHistoryUnavailable { provider: String, model: String },
+    /// A stream generated slower than its provider's minimum (see
+    /// `proxy::min_speed`): `rate` tokens per second over the last `secs`
+    /// seconds, below `min`. The stream was cut; maps to 503, the
+    /// upstream failing, so the client can try again and the route's
+    /// breaker counts it.
+    #[error(
+        "Upstream `{provider}` generated {rate} tokens per second over the last {secs} seconds, \
+         below the minimum of {min}."
+    )]
+    UpstreamTooSlow {
+        provider: String,
+        rate: u32,
+        min: u32,
+        secs: u32,
+    },
 }
 
 impl GatewayError {
@@ -126,6 +141,7 @@ impl GatewayError {
             GatewayError::PolicyBlocked(_) => 403,
             GatewayError::SealedHistoryRefused { status, .. } => i64::from(*status),
             GatewayError::SealedHistoryUnavailable { .. } => 409,
+            GatewayError::UpstreamTooSlow { .. } => 503,
         }
     }
 
@@ -146,6 +162,7 @@ impl GatewayError {
             GatewayError::PolicyBlocked(_) => "PolicyBlocked",
             GatewayError::SealedHistoryRefused { .. } => "SealedHistoryRefused",
             GatewayError::SealedHistoryUnavailable { .. } => "SealedHistoryUnavailable",
+            GatewayError::UpstreamTooSlow { .. } => "UpstreamTooSlow",
         }
     }
 
@@ -255,5 +272,26 @@ mod tests {
         let down = GatewayError::limiter_unavailable("rate_limiter_unavailable");
         assert_eq!(down.retry_after_secs(), Some(30));
         assert_eq!(down.should_retry(), None);
+    }
+
+    #[test]
+    fn a_stream_too_slow_is_the_upstream_failing_and_says_how_slow() {
+        let e = GatewayError::UpstreamTooSlow {
+            provider: "local-vllm".into(),
+            rate: 3,
+            min: 15,
+            secs: 20,
+        };
+        assert_eq!(e.status_code(), 503);
+        assert_eq!(e.error_tag(), "UpstreamTooSlow");
+        assert!(crate::proxy::upstream_failed(
+            e.error_tag(),
+            e.status_code()
+        ));
+        assert_eq!(
+            e.to_string(),
+            "Upstream `local-vllm` generated 3 tokens per second over the last 20 seconds, \
+             below the minimum of 15."
+        );
     }
 }

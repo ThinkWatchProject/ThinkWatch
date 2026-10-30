@@ -15,6 +15,12 @@ pub struct Provider {
     pub config_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// The slowest generation a stream from this upstream may keep up,
+    /// in tokens per second (1–1000), averaged over the last
+    /// `min_speed_window_secs` seconds (5–120). `None` ⇒ off. See
+    /// `think_watch_gateway::proxy::min_speed`.
+    pub min_speed_tokens_per_sec: Option<i32>,
+    pub min_speed_window_secs: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

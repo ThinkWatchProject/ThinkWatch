@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { CreateProviderDialog, EditProviderDialog } from './provider-dialogs'
+import { minSpeedFields } from './provider-min-speed'
 import type { Provider } from './provider-types'
 
 vi.mock('@/lib/api', () => ({
@@ -44,6 +45,8 @@ function bedrock(headers: { key: string; value: string; encrypted?: boolean }[])
     base_url: 'us-east-1',
     is_active: true,
     config_json: { headers },
+    min_speed_tokens_per_sec: null,
+    min_speed_window_secs: 20,
     created_at: '2026-09-28T00:00:00Z',
   }
 }
@@ -153,6 +156,8 @@ describe('EditProviderDialog', () => {
       display_name: 'Bedrock',
       base_url: 'us-east-1',
       headers: [{ key: 'Authorization', value: 'Bearer ABSK-new' }],
+      min_speed_tokens_per_sec: null,
+      min_speed_window_secs: 20,
     })
   })
 
@@ -187,5 +192,59 @@ describe('EditProviderDialog', () => {
       headers: [],
       provider_id: 'prov-1',
     })
+  })
+
+  it('sets the slowest generation a stream may keep up', async () => {
+    const user = userEvent.setup()
+    renderEdit(bedrock([]))
+
+    const rate = screen.getByLabelText('Generation speed (tokens/s)')
+    const window = screen.getByLabelText('Window (seconds)')
+    expect(rate).toHaveValue('')
+    expect(window).toHaveValue('20')
+    await user.type(rate, '15')
+    await user.clear(window)
+    await user.type(window, '30')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/admin/providers/prov-1',
+      expect.objectContaining({ min_speed_tokens_per_sec: 15, min_speed_window_secs: 30 }),
+    )
+  })
+
+  it('turns the minimum off when the speed is cleared', async () => {
+    const user = userEvent.setup()
+    renderEdit({ ...bedrock([]), min_speed_tokens_per_sec: 15, min_speed_window_secs: 30 })
+
+    const rate = screen.getByLabelText('Generation speed (tokens/s)')
+    expect(rate).toHaveValue('15')
+    await user.clear(rate)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/admin/providers/prov-1',
+      expect.objectContaining({ min_speed_tokens_per_sec: null, min_speed_window_secs: 30 }),
+    )
+  })
+
+  it('will not save a speed or window out of range', async () => {
+    const user = userEvent.setup()
+    renderEdit(bedrock([]))
+
+    await user.type(screen.getByLabelText('Generation speed (tokens/s)'), '1001')
+    expect(screen.getByText(/whole number from 1 to 1000/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+})
+
+describe('minSpeedFields', () => {
+  it('takes whole numbers in range, and a blank speed as off', () => {
+    expect(minSpeedFields('', '20')).toEqual({ min_speed_tokens_per_sec: null, min_speed_window_secs: 20 })
+    expect(minSpeedFields(' 1000 ', '5')).toEqual({ min_speed_tokens_per_sec: 1000, min_speed_window_secs: 5 })
+    expect(minSpeedFields('1', '120')).toEqual({ min_speed_tokens_per_sec: 1, min_speed_window_secs: 120 })
+    for (const [rate, window] of [['0', '20'], ['1001', '20'], ['1.5', '20'], ['x', '20'], ['', '4'], ['', '121'], ['', '']]) {
+      expect(minSpeedFields(rate, window), `${rate} / ${window}`).toBeNull()
+    }
   })
 })
