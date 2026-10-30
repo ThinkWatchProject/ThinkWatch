@@ -33,6 +33,7 @@ import type {
   SecurityKindView,
   SecurityRuleView,
 } from '@/lib/security-types';
+import { ExceptionsPanel } from './exceptions-panel';
 import { About, Code, Codepoints, MatcherText } from './matcher-text';
 import {
   actionName,
@@ -139,6 +140,7 @@ export function GuardPanel({
           />
         </CardContent>
       </Card>
+      {guard === 'redact' && <ExceptionsPanel detail={detail} canWrite={canWrite} />}
     </div>
   );
 }

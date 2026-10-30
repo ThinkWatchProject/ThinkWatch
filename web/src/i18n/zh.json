@@ -344,6 +344,32 @@
       "containsCaseSensitive": "包含 {{text}}，区分大小写",
       "codepoints": "码位 {{ranges}}",
       "other": "内置判据"
+    },
+    "exceptions": {
+      "title": "例外 · {{count}} 个值",
+      "lead": "这些值在任何规则下都不替换、不记录。只保存哈希与打码后的值。",
+      "empty": "暂无例外。某个值反复被误认时，可只将该值列为例外，规则对其他值照常生效。",
+      "full": "例外已达上限 {{max}} 个，移出一个后才能添加。",
+      "add": "添加例外",
+      "addTitle": "添加例外",
+      "addDesc": "此值今后在任何规则下都不再替换，也不再记录。保存的供应商 API 密钥不能列为例外。",
+      "value": "值",
+      "valueHint": "按请求中出现的样子粘贴，首尾的空格与换行不计。值在服务器端计算哈希，不保存原值。",
+      "duplicate": "此值已在例外中。",
+      "added": "已将 {{value}} 列为例外",
+      "removed": "已将 {{value}} 移出例外",
+      "remove": "移出例外",
+      "removeTitle": "将 {{value}} 移出例外？",
+      "removeDesc": "移出后，规则将重新替换或记录此值。",
+      "noRule": "无规则认出",
+      "loadFailed": "无法加载例外",
+      "excepted": "例外，不处理",
+      "inTrial": "{{count}} 个值属于例外，不处理。",
+      "col": {
+        "value": "值",
+        "rule": "规则",
+        "added": "加入时间"
+      }
     }
   },
   "mcpStore": {

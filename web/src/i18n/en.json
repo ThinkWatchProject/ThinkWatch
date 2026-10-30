@@ -344,6 +344,32 @@
       "containsCaseSensitive": "Contains {{text}}, case-sensitive",
       "codepoints": "Code points {{ranges}}",
       "other": "Built-in check"
+    },
+    "exceptions": {
+      "title": "Exceptions · {{count}}",
+      "lead": "These values are neither replaced nor recorded, whichever rule finds them. Only a hash and the masked value are kept.",
+      "empty": "No exceptions. A value that is recognised by mistake again and again can be made an exception, and the rule keeps working for every other value.",
+      "full": "There are {{max}} exceptions, the most there may be. Remove one to add another.",
+      "add": "Add exception",
+      "addTitle": "Add an exception",
+      "addDesc": "This value will no longer be replaced, nor recorded, by any rule. Saved provider API keys cannot be exceptions.",
+      "value": "Value",
+      "valueHint": "Paste the value as it appears in requests; spaces and line breaks around it are ignored. It is hashed on the server and not stored.",
+      "duplicate": "This value is already an exception.",
+      "added": "Added {{value}} as an exception",
+      "removed": "Removed {{value}} from the exceptions",
+      "remove": "Remove",
+      "removeTitle": "Remove {{value}} from the exceptions?",
+      "removeDesc": "The rules will replace or record this value again.",
+      "noRule": "No rule recognised it",
+      "loadFailed": "Could not load the exceptions",
+      "excepted": "Exception, left as is",
+      "inTrial": "Exceptions left as is: {{count}}",
+      "col": {
+        "value": "Value",
+        "rule": "Rule",
+        "added": "Added"
+      }
     }
   },
   "mcpStore": {

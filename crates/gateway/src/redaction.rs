@@ -36,7 +36,8 @@ use std::sync::Arc;
 use think_watch_common::audit::AuditLogger;
 use think_watch_common::guard_policy::saved::{self, SavedSecrets};
 use tw_guard::policy::{Mode, RedactPolicy};
-use tw_guard::redact::replace::Ledger;
+use tw_guard::redact::flow::ScanCache;
+use tw_guard::redact::replace::{Ledger, Scheme};
 use tw_guard::redact::rules::{Finding, Kind, Rule, RuleSet, SavedSource};
 
 pub use tw_guard::redact::flow::Shape;
@@ -44,11 +45,22 @@ pub use tw_guard::redact::flow::Shape;
 use crate::guards::Caller;
 
 /// Outbound redaction as configured: a mode, and the rules — with the
-/// providers' credentials, recognised by value.
+/// providers' credentials, recognised by value, and the exception values
+/// that are not.
+///
+/// **One scan cache per compiled rule set** (thinkwatch-core's
+/// [`ScanCache`]): a client sends the whole conversation every turn, and
+/// the parts of it already scanned last turn are taken from the cache
+/// instead of being scanned again. What is found is exactly what a scan
+/// without it finds. The cache keeps hit positions and rule ids, never a
+/// value, in this process's memory only; it is built with the rules and
+/// dropped with them when a policy, the providers' keys or the exceptions
+/// change.
 #[derive(Debug, Clone)]
 pub struct Redaction {
     pub mode: Mode,
     pub rules: Arc<RuleSet>,
+    cache: Arc<ScanCache>,
 }
 
 impl Redaction {
@@ -59,6 +71,7 @@ impl Redaction {
                 think_watch_common::guard_policy::redact_rules(policy),
                 saved,
             )),
+            cache: Arc::new(ScanCache::new()),
         }
     }
 
@@ -66,7 +79,15 @@ impl Redaction {
     /// in its written text (masked), and in enforce mode the ledger every
     /// hop is replaced with. Nothing when off.
     pub fn look(&self, body: &[u8], shape: Shape) -> (Vec<Finding>, Ledger) {
-        tw_guard::redact::flow::look(self.mode, &self.rules, body, shape)
+        let l = tw_guard::redact::flow::look_hits_with(
+            self.mode,
+            &self.rules,
+            body,
+            shape,
+            Ledger::new(Scheme::SECRET),
+            Some(&self.cache),
+        );
+        (l.found, l.ledger)
     }
 
     /// The bytes one hop sends, a request of `shape` — the format it goes
@@ -77,12 +98,13 @@ impl Redaction {
     /// Byte for byte what came in, and the same ledger, unless in enforce
     /// mode and something is found.
     pub fn replace(&self, body: Vec<u8>, ledger: &Ledger, shape: Shape) -> (Vec<u8>, Ledger) {
-        let (out, ledger) = tw_guard::redact::flow::replace(
+        let (out, ledger) = tw_guard::redact::flow::replace_with(
             self.mode,
             &self.rules,
             bytes::Bytes::from(body),
             ledger,
             shape,
+            Some(&self.cache),
         );
         (Vec::from(out), ledger)
     }
@@ -550,6 +572,67 @@ mod tests {
         let sent = String::from_utf8(sent).unwrap();
         assert!(!sent.contains("test-beta-key"), "{sent}");
         assert!(!writes_masked(&Rule::Custom("ssn".into())));
+    }
+
+    #[test]
+    fn an_exception_value_is_neither_replaced_nor_recorded() {
+        let other = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let r = Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                exceptions: vec![tw_guard::policy::RedactException {
+                    sha256: tw_guard::redact::exceptions::sha256_hex(KEY),
+                    masked: "sk-an…AAAA".into(),
+                    rule: "anthropic-api-key".into(),
+                    added_at: 1,
+                }],
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        let body = serde_json::json!({"messages": [
+            {"role": "user", "content": format!("{KEY} and {other}")}
+        ]})
+        .to_string();
+        let (found, ledger) = r.look(body.as_bytes(), CHAT);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (sent, _) = r.replace(body.into_bytes(), &ledger, CHAT);
+        let sent = String::from_utf8(sent).unwrap();
+        assert!(sent.contains(KEY) && !sent.contains(other), "{sent}");
+    }
+
+    /// The scan cache takes the unchanged history from the turn before; the
+    /// findings, the numbering and what is sent are the same as without it.
+    #[test]
+    fn a_growing_conversation_redacts_the_same_turn_after_turn() {
+        let r = redaction(Mode::Enforce);
+        let filler = "lorem ipsum dolor sit amet ".repeat(200);
+        let mut messages = Vec::new();
+        for turn in 0..30 {
+            let content = if turn % 7 == 0 {
+                format!(
+                    "{filler} turn {turn} key sk-ant-api03-{}",
+                    format!("{turn:02}").repeat(14)
+                )
+            } else {
+                format!("{filler} turn {turn}")
+            };
+            messages.push(serde_json::json!({"role": "user", "content": content}));
+            let body = serde_json::json!({"messages": messages}).to_string();
+            let cached = r.look(body.as_bytes(), CHAT);
+            let plain =
+                tw_guard::redact::flow::look(Mode::Enforce, &r.rules, body.as_bytes(), CHAT);
+            assert_eq!(cached.0, plain.0, "turn {turn}");
+            let (a, _) = r.replace(body.clone().into_bytes(), &cached.1, CHAT);
+            let (b, _) = tw_guard::redact::flow::replace(
+                Mode::Enforce,
+                &r.rules,
+                bytes::Bytes::from(body),
+                &plain.1,
+                CHAT,
+            );
+            assert_eq!(a, b.to_vec(), "turn {turn}");
+        }
     }
 
     #[test]

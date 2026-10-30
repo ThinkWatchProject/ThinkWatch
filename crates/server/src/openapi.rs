@@ -125,6 +125,9 @@ use crate::services::team_repository::Team;
         crate::handlers::admin::update_settings,
         crate::handlers::admin::get_security,
         crate::handlers::admin::test_security,
+        crate::handlers::admin::list_exceptions,
+        crate::handlers::admin::add_exception,
+        crate::handlers::admin::remove_exception,
         // Teams
         crate::handlers::teams::list_teams,
         crate::handlers::teams::get_team,

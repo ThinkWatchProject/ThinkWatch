@@ -1008,6 +1008,16 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/security/{guard}/test",
             post(handlers::admin::test_security),
         )
+        // Redaction's exception values: their own endpoints, since the
+        // console writes the rest of the policy back whole.
+        .route(
+            "/api/admin/security/redact/exceptions",
+            get(handlers::admin::list_exceptions).post(handlers::admin::add_exception),
+        )
+        .route(
+            "/api/admin/security/redact/exceptions/{sha256}",
+            delete(handlers::admin::remove_exception),
+        )
         // Log forwarders CRUD
         .route(
             "/api/admin/log-forwarders",

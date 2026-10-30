@@ -160,6 +160,26 @@ export interface GuardDetail {
   kinds: SecurityKindView[];
 }
 
+/**
+ * A redaction exception value: never replaced or recorded, whichever rule
+ * finds it. Only its SHA-256 and masked form are kept, never the value.
+ */
+export interface RedactException {
+  sha256: string;
+  masked: string;
+  /** The rule that first recognised it; absent when none did. */
+  rule?: string;
+  /** Milliseconds since the epoch. */
+  added_at: number;
+}
+
+/** `GET /api/admin/security/redact/exceptions`. */
+export interface RedactExceptionList {
+  items: RedactException[];
+  /** How many there may be. */
+  max: number;
+}
+
 /** `GET /api/admin/security`. */
 export interface SecurityDetail {
   redact: GuardDetail;
@@ -207,8 +227,14 @@ export interface SecurityTestHit {
    * characters are drawn as `‹U+200B›`, a run as `‹U+E0049 ×12›`.
    */
   excerpt: string;
-  /** What the rule does when the guard is on. */
+  /** What the rule does when the guard is on. Absent on an exception value. */
   action?: RuleAction | null;
+  /**
+   * Redaction: the value is an exception (`security.redact.exceptions`):
+   * recognised, but neither replaced nor recorded, and left as it is in
+   * `output`.
+   */
+  excepted?: boolean;
 }
 
 export interface SecurityTestResult {
