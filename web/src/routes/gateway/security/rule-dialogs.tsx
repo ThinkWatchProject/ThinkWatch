@@ -181,8 +181,11 @@ function TrialBox({ trial }: { trial: Trial }) {
     return <p className="text-xs text-destructive">{trial.error}</p>;
   }
   const result = trial.state === 'done' ? trial.result : trial.last;
-  const hits = result?.hits ?? [];
-  const tone = (h: SecurityTestHit) => toneOf(h.action);
+  const all = result?.hits ?? [];
+  // An exception value is marked, but it is not a hit: nothing is done to it.
+  const hits = all.filter((h) => !h.excepted);
+  const excepted = all.length - hits.length;
+  const tone = (h: SecurityTestHit): Mark['tone'] => (h.excepted ? 'muted' : toneOf(h.action));
   const bad = hits.some((h) => tone(h) === 'bad');
   // Dangerous commands send nothing and refuse nothing; the server
   // answers null and false there.
@@ -205,11 +208,16 @@ function TrialBox({ trial }: { trial: Trial }) {
             ? t('contentSecurity.dialog.hits', { count: hits.length })
             : t('contentSecurity.dialog.noHit'))}
       </p>
-      {result && hits.length > 0 && (
+      {result && all.length > 0 && (
         <Highlight
           text={result.sample}
-          marks={hits.map((h) => ({ start: h.start, end: h.end, tone: tone(h) }))}
+          marks={all.map((h) => ({ start: h.start, end: h.end, tone: tone(h) }))}
         />
+      )}
+      {excepted > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {t('contentSecurity.exceptions.inTrial', { count: excepted })}
+        </p>
       )}
       {refused && <p className="text-xs text-destructive">{t('contentSecurity.dialog.refused')}</p>}
       {!refused && result && result.output !== null && (
@@ -875,9 +883,15 @@ export function TestDialog({
                         <TableCell className="truncate font-mono text-xs text-muted-foreground">
                           {h.excerpt}
                         </TableCell>
-                        <TableCell className={actionTone(h.action)}>
-                          {actionName(t, h.action ?? 'record')}
-                        </TableCell>
+                        {h.excepted ? (
+                          <TableCell className="text-muted-foreground">
+                            {t('contentSecurity.exceptions.excepted')}
+                          </TableCell>
+                        ) : (
+                          <TableCell className={actionTone(h.action)}>
+                            {actionName(t, h.action ?? 'record')}
+                          </TableCell>
+                        )}
                       </TableRow>
                     ))}
                   </TableBody>

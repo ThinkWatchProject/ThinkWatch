@@ -15,11 +15,14 @@ Secrets and privacy recognises far more: the built-in redaction catalog
 grows from 30 rules to 120 in 20 groups, and the API keys saved
 for the providers are recognised by value, whatever their format. The
 console shows the rules' names and descriptions as thinkwatch-core
-writes them, in both languages. The thinkwatch-core crates move from
-v0.83.1 to v0.85.0.
+writes them, in both languages. A value recognised by mistake can be made
+an exception without switching its rule off, and long conversations are
+no longer scanned from the start every turn. The thinkwatch-core crates
+move from v0.83.1 to v0.86.0.
 
-No new setting, column or route; the redaction policy's shape is
-unchanged.
+No new setting or column. The redaction policy gains one optional field
+(`exceptions`), with endpoints of its own under
+`/api/admin/security/redact/exceptions`.
 
 ### Read before upgrading
 
@@ -40,7 +43,7 @@ unchanged.
 
 ### Added
 
-- **Expanded redaction rules** (thinkwatch-core v0.85.0): about 50 more
+- **Expanded redaction rules** (thinkwatch-core v0.85.0 and later): about 50 more
   prefixed credentials (AI services, code hosting, cloud, payments and
   collaboration), credentials by position (request headers, command
   lines, URL parameters, bot webhooks, configuration assignments),
@@ -67,8 +70,32 @@ unchanged.
   and no masked values; the security log shows it as the provider's API
   key.
 
+- **Exception values** (`security.redact.exceptions`, the Exceptions
+  section under the Secrets and privacy rules). A value listed there is
+  neither replaced nor recorded, whichever rule finds it; the rules keep
+  working for every other value. A value is added by pasting it: the
+  server hashes it on arrival and keeps only its SHA-256, its masked form,
+  the rule that recognised it and when it was added, never the value. At
+  most 500; at the cap, adding is unavailable. Saved provider keys cannot
+  be exceptions. Listing them takes `settings:read`; adding and removing
+  take `settings:write` and `pii_redactor:write`, and each is written to
+  the audit log (`security.redact_exception_added`,
+  `security.redact_exception_removed`) with the rule and the masked value
+  only. The trial marks an excepted value as left as is.
+- **Unchanged conversation history is not scanned again.** Each gateway
+  instance keeps, in memory, where the redaction rules matched in the
+  parts of recent requests it has scanned (positions and rule ids, never
+  values); the next turn of the same conversation takes those parts from
+  it and scans only what is new. What is found is the same as without it.
+  The cache is rebuilt whenever the rules, the providers' keys or the
+  exceptions change.
+
 ### Changed
 
+- **A redaction policy written through `PATCH /api/admin/settings` keeps
+  the stored exceptions**, whatever it carries: they are changed only
+  through their own endpoints, and the console writes the rest of the
+  policy back from the rule view, which does not carry them.
 - **Rule names and descriptions come from thinkwatch-core.** The security
   page shows each built-in rule's name, reason and description and each
   group's name as the rule view gives them, in English or Chinese; the

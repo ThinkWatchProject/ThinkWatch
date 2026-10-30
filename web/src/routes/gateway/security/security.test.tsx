@@ -9,14 +9,31 @@ import { GatewaySecurityPage } from '.'
 vi.mock('@/lib/api', () => ({
   api: vi.fn(),
   apiPatch: vi.fn(),
+  apiPost: vi.fn(),
+  apiDelete: vi.fn(),
   hasPermission: vi.fn(() => true),
+  ApiError: class ApiError extends Error {
+    status: number
+    constructor(message: string, status: number) {
+      super(message)
+      this.status = status
+    }
+  },
 }))
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#trace">{children}</a>,
 }))
 
-import { api, apiPatch, hasPermission } from '@/lib/api'
+import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api'
+
+const exception = {
+  sha256: 'a'.repeat(64),
+  masked: 'sk-an…AAAA',
+  rule: 'anthropic-api-key',
+  added_at: Date.UTC(2026, 9, 29, 8),
+}
+let exceptions: { items: (typeof exception)[]; max: number } = { items: [], max: 500 }
 
 const detail = (): SecurityDetail => ({
   redact: {
@@ -179,11 +196,13 @@ beforeEach(() => {
   vi.mocked(hasPermission).mockReturnValue(true)
   vi.mocked(api).mockImplementation(async (url: string) => {
     if (url === '/api/admin/security') return detail()
+    if (url === '/api/admin/security/redact/exceptions') return exceptions
     if (url.startsWith('/api/audit/logs?')) return events
     if (url.endsWith('/test')) return { hits: [], output: null, refused: false }
     throw new Error(`unexpected request: ${url}`)
   })
   vi.mocked(apiPatch).mockResolvedValue({})
+  exceptions = { items: [], max: 500 }
 })
 
 describe('GatewaySecurityPage', () => {
@@ -537,5 +556,75 @@ describe('GatewaySecurityPage', () => {
     // The action is said, not offered.
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Test…' })).toBeEnabled()
+  })
+  it('lists the exception values under the redaction rules, and adds and removes one', async () => {
+    const user = userEvent.setup()
+    vi.mocked(apiPost).mockResolvedValue({ ...exception, sha256: 'b'.repeat(64), masked: 'ghp_B…BBBB' })
+    vi.mocked(apiDelete).mockResolvedValue(exception)
+    exceptions = { items: [exception], max: 500 }
+    renderWithQueryClient(<GatewaySecurityPage />)
+
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
+    expect(await screen.findByText('Exceptions · 1')).toBeInTheDocument()
+    expect(screen.getByText('sk-an…AAAA')).toBeInTheDocument()
+    // The rule is named from the rule view.
+    expect(screen.getAllByText('Anthropic API key').length).toBeGreaterThan(1)
+
+    await user.click(screen.getByRole('button', { name: 'Add exception' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/will no longer be replaced, nor recorded/)).toBeInTheDocument()
+    await user.type(within(dialog).getByLabelText('Value'), 'ghp_test')
+    await user.click(within(dialog).getByRole('button', { name: 'Add exception' }))
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('/api/admin/security/redact/exceptions', { value: 'ghp_test' }),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }))
+    const confirm = await screen.findByRole('dialog')
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(apiDelete).toHaveBeenCalledWith(`/api/admin/security/redact/exceptions/${'a'.repeat(64)}`),
+    )
+  })
+
+  it('offers no adding at the cap, and one line when there are none', async () => {
+    const user = userEvent.setup()
+    exceptions = { items: [exception], max: 1 }
+    const { unmount } = renderWithQueryClient(<GatewaySecurityPage />)
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
+    expect(await screen.findByText(/There are 1 exceptions, the most there may be/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add exception' })).toBeDisabled()
+    unmount()
+
+    exceptions = { items: [], max: 500 }
+    renderWithQueryClient(<GatewaySecurityPage />)
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
+    expect(await screen.findByText(/^No exceptions\./)).toBeInTheDocument()
+    expect(screen.queryByText(/^Exceptions ·/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add exception' })).toBeEnabled()
+  })
+
+  it('says in the trial that an exception value is left as is', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api).mockImplementation(async (url: string) => {
+      if (url === '/api/admin/security') return detail()
+      if (url === '/api/admin/security/redact/exceptions') return exceptions
+      if (url.startsWith('/api/audit/logs?')) return events
+      if (url.endsWith('/test'))
+        return {
+          hits: [{ rule: 'anthropic-api-key', custom: false, start: 4, end: 14, excerpt: 'sk-an…AAAA', excepted: true }],
+          output: null,
+          refused: false,
+        }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    renderWithQueryClient(<GatewaySecurityPage />)
+    await user.click(await screen.findByRole('tab', { name: /Secrets & privacy/ }))
+    await user.click(await screen.findByRole('button', { name: 'Test…' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Test text'), 'key sk-ant-xyz')
+    expect(await within(dialog).findByText('Exception, left as is')).toBeInTheDocument()
+    expect(within(dialog).getByText('Exceptions left as is: 1')).toBeInTheDocument()
+    expect(within(dialog).getByText('No match')).toBeInTheDocument()
   })
 })

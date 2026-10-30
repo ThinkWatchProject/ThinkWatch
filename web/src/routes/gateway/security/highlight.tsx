@@ -5,13 +5,17 @@ import { cn } from '@/lib/utils';
 export interface Mark {
   start: number;
   end: number;
-  /** `bad`: the request or call would be stopped; `warn`: replaced, deleted or recorded. */
-  tone: 'warn' | 'bad';
+  /**
+   * `bad`: the request or call would be stopped; `warn`: replaced, deleted
+   * or recorded; `muted`: recognised, but an exception, left as it is.
+   */
+  tone: 'warn' | 'bad' | 'muted';
 }
 
 const TONE: Record<Mark['tone'], string> = {
   warn: 'bg-amber-500/20 shadow-[inset_0_-1.5px_0_0_var(--color-amber-500)]',
   bad: 'bg-destructive/15 shadow-[inset_0_-1.5px_0_0_var(--destructive)]',
+  muted: 'bg-muted shadow-[inset_0_-1.5px_0_0_var(--muted-foreground)]',
 };
 
 /**

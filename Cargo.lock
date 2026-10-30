@@ -2944,7 +2944,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2983,7 +2983,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4418,6 +4418,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "tw-guard",
  "url",
  "uuid",
  "wiremock",
@@ -4837,8 +4838,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.85.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
+version = "0.86.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.86.0#62aec779f28b8f2f087670cc5096af829bd5ad20"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4852,16 +4853,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.85.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
+version = "0.86.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.86.0#62aec779f28b8f2f087670cc5096af829bd5ad20"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-dialect"
-version = "0.85.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
+version = "0.86.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.86.0#62aec779f28b8f2f087670cc5096af829bd5ad20"
 dependencies = [
  "memchr",
  "serde",
@@ -4870,8 +4871,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.85.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.85.0#7134a31380ca2b3784079e3f3e0d2f7c64ec967b"
+version = "0.86.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.86.0#62aec779f28b8f2f087670cc5096af829bd5ad20"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",

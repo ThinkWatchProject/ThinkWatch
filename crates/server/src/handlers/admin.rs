@@ -19,7 +19,7 @@ pub use oidc::{
 pub use retention::{
     check_body_retention_vs_lifecycle, reconcile_blob_lifecycle, reconcile_clickhouse_ttls,
 };
-pub use security::{get_security, test_security};
+pub use security::{add_exception, get_security, list_exceptions, remove_exception, test_security};
 pub use settings::{
     AuditConfigResponse, SystemInfo, UpdateSettingsRequest, get_all_settings, get_audit_settings,
     get_settings_by_category, get_system_settings, update_settings,
@@ -42,7 +42,10 @@ pub use oidc::{
     __path_update_oidc_draft,
 };
 #[allow(unused_imports)]
-pub use security::{__path_get_security, __path_test_security};
+pub use security::{
+    __path_add_exception, __path_get_security, __path_list_exceptions, __path_remove_exception,
+    __path_test_security,
+};
 #[allow(unused_imports)]
 pub use settings::{
     __path_get_all_settings, __path_get_audit_settings, __path_get_settings_by_category,
