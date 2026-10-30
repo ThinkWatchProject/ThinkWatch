@@ -179,6 +179,53 @@ const headerPresets = (t: (key: string) => string) => [
 // Create Provider Dialog
 // ---------------------------------------------------------------------------
 
+/**
+ * "Stop when generation is slower than [ ] tokens/s for [20] s": the
+ * provider's minimum generation speed, checked as it is typed.
+ */
+function MinSpeedRow({ id, rate, window, onRateChange, onWindowChange }: {
+  id: string;
+  rate: string;
+  window: string;
+  onRateChange: (v: string) => void;
+  onWindowChange: (v: string) => void;
+}) {
+  const { t } = useTranslation();
+  const valid = minSpeedFields(rate, window) !== null;
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>{t('providers.minSpeed')}</Label>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span>{t('providers.minSpeedBefore')}</span>
+        <Input
+          id={id}
+          className="w-20"
+          inputMode="numeric"
+          aria-label={t('providers.minSpeedRate')}
+          aria-invalid={!valid}
+          value={rate}
+          onChange={(e) => onRateChange(e.target.value)}
+        />
+        <span>{t('providers.minSpeedMiddle')}</span>
+        <Input
+          className="w-16"
+          inputMode="numeric"
+          aria-label={t('providers.minSpeedWindow')}
+          aria-invalid={!valid}
+          value={window}
+          onChange={(e) => onWindowChange(e.target.value)}
+        />
+        <span>{t('providers.minSpeedAfter')}</span>
+      </div>
+      {valid ? (
+        <p className="text-xs text-muted-foreground">{t('providers.minSpeedHint')}</p>
+      ) : (
+        <p className="text-xs text-destructive">{t('providers.minSpeedInvalid')}</p>
+      )}
+    </div>
+  );
+}
+
 interface CreateProviderDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -196,6 +243,8 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
   const [bedrockAuthMode, setBedrockAuthMode] = useState<BedrockAuthMode>('aksk');
   const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
   const [awsSecretKey, setAwsSecretKey] = useState('');
+  const [minSpeedRate, setMinSpeedRate] = useState('');
+  const [minSpeedWindow, setMinSpeedWindow] = useState(String(DEFAULT_MIN_SPEED_WINDOW_SECS));
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -231,12 +280,17 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
     setBedrockAuthMode('aksk');
     setAwsAccessKeyId('');
     setAwsSecretKey('');
+    setMinSpeedRate('');
+    setMinSpeedWindow(String(DEFAULT_MIN_SPEED_WINDOW_SECS));
     setFormError('');
     setTestResult(null);
   };
 
+  const minSpeed = minSpeedFields(minSpeedRate, minSpeedWindow);
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
+    if (!minSpeed) return;
     setFormError('');
     setSubmitting(true);
     try {
@@ -247,6 +301,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
         base_url: effectiveBaseUrl,
         headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
         ...(awsKeys ? { config: awsKeys } : {}),
+        ...minSpeed,
       });
       onOpenChange(false);
       resetForm();
@@ -372,6 +427,13 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
               presets={headerPresets(t)}
             />
           </div>
+          <MinSpeedRow
+            id="prov-min-speed"
+            rate={minSpeedRate}
+            window={minSpeedWindow}
+            onRateChange={setMinSpeedRate}
+            onWindowChange={setMinSpeedWindow}
+          />
           <TestResultPanel testResult={testResult} />
           {formError && (
             <Alert variant="destructive">
@@ -389,7 +451,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
                 setTestResult,
               )}
             />
-            <Button type="submit" disabled={submitting}>
+            <Button type="submit" disabled={submitting || !minSpeed}>
               {submitting ? (
                 <><Loader2 className="mr-1 h-4 w-4 animate-spin" />{t('providers.creating')}</>
               ) : t('providers.createProvider')}
@@ -539,36 +601,13 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
               presets={headerPresets(t)}
             />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="edit-prov-min-speed">{t('providers.minSpeed')}</Label>
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span>{t('providers.minSpeedBefore')}</span>
-              <Input
-                id="edit-prov-min-speed"
-                className="w-20"
-                inputMode="numeric"
-                aria-label={t('providers.minSpeedRate')}
-                aria-invalid={!minSpeed}
-                value={minSpeedRate}
-                onChange={(e) => setMinSpeedRate(e.target.value)}
-              />
-              <span>{t('providers.minSpeedMiddle')}</span>
-              <Input
-                className="w-16"
-                inputMode="numeric"
-                aria-label={t('providers.minSpeedWindow')}
-                aria-invalid={!minSpeed}
-                value={minSpeedWindow}
-                onChange={(e) => setMinSpeedWindow(e.target.value)}
-              />
-              <span>{t('providers.minSpeedAfter')}</span>
-            </div>
-            {minSpeed ? (
-              <p className="text-xs text-muted-foreground">{t('providers.minSpeedHint')}</p>
-            ) : (
-              <p className="text-xs text-destructive">{t('providers.minSpeedInvalid')}</p>
-            )}
-          </div>
+          <MinSpeedRow
+            id="edit-prov-min-speed"
+            rate={minSpeedRate}
+            window={minSpeedWindow}
+            onRateChange={setMinSpeedRate}
+            onWindowChange={setMinSpeedWindow}
+          />
         </div>
         <TestResultPanel testResult={testResult} />
         {editError && (

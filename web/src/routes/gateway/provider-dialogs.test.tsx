@@ -78,7 +78,39 @@ describe('CreateProviderDialog', () => {
       provider_type: 'bedrock',
       base_url: 'us-east-1',
       headers: [{ key: 'Authorization', value: 'Bearer ABSK-test' }],
+      min_speed_tokens_per_sec: null,
+      min_speed_window_secs: 20,
     })
+  })
+
+  it('creates a provider with the slowest generation its streams may keep up', async () => {
+    const user = userEvent.setup()
+    renderCreate()
+
+    await user.type(screen.getByLabelText('Name'), 'local-vllm')
+    const rate = screen.getByLabelText('Generation speed (tokens/s)')
+    const window = screen.getByLabelText('Window (seconds)')
+    expect(rate).toHaveValue('')
+    expect(window).toHaveValue('20')
+    await user.type(rate, '15')
+    await user.clear(window)
+    await user.type(window, '30')
+    await user.click(screen.getByRole('button', { name: 'Create Provider' }))
+
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/admin/providers',
+      expect.objectContaining({ name: 'local-vllm', min_speed_tokens_per_sec: 15, min_speed_window_secs: 30 }),
+    )
+  })
+
+  it('will not create a provider with a speed or window out of range', async () => {
+    const user = userEvent.setup()
+    renderCreate()
+
+    await user.clear(screen.getByLabelText('Window (seconds)'))
+    await user.type(screen.getByLabelText('Window (seconds)'), '121')
+    expect(screen.getByText(/whole number from 1 to 1000/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create Provider' })).toBeDisabled()
   })
 
   it('tests a Bedrock provider with the access keys typed into the form', async () => {
