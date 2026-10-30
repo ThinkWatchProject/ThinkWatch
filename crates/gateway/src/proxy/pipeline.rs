@@ -136,8 +136,9 @@ pub(super) fn launch_stream_pump(
         let (invoked, sent) = tail.await;
         // Cut for generating too slowly: the session's next request is not
         // sent back to the same upstream by its affinity, and the row says
-        // how fast it was going.
-        if let Some(rate) = sent.too_slow {
+        // how fast it was going — only when that cut is how the stream
+        // ended, so the row, the route's health and the affinity agree.
+        if let Some(rate) = sent.too_slow.filter(|_| ended_too_slow(&invoked)) {
             super::forget_affinity(
                 &deps.state.redis,
                 deps.request.identity.user_id.as_deref(),
@@ -162,6 +163,18 @@ pub(super) fn launch_stream_pump(
         run_post_invoke::<ChatCompletionSurface>(invoked, &deps).await;
     });
     response
+}
+
+/// Whether the stream ended because it generated too slowly (see
+/// `super::min_speed`): its outcome, not just the pump's note of the cut.
+fn ended_too_slow(invoked: &Invoked<ChatCompletionSurface>) -> bool {
+    matches!(
+        &invoked.view,
+        CapturedView::Streaming {
+            outcome: crate::lifecycle::StreamOutcome::UpstreamError { error_type, .. },
+            ..
+        } if error_type == "UpstreamTooSlow"
+    )
 }
 
 /// Drive a whole answer through the post-invoke pipeline — cache fill,

@@ -98,19 +98,25 @@ endpoints of its own under `/api/admin/security/redact/exceptions`.
   `min_speed_tokens_per_sec` 1–1000 and `min_speed_window_secs` 5–120,
   default 20, on the provider endpoints; blank or `null` is off, the
   default). From the first token on, a stream is judged once a second:
-  when the text it streamed over the last window (answer, reasoning and
-  tool arguments, four ASCII characters or one other character to a
-  token; Gemini's running count when higher) comes to fewer tokens per
-  second than the minimum, the stream ends with a 503 error in the
+  when the visible text it streamed over the last window (answer,
+  reasoning streamed as generated, and tool arguments; four ASCII
+  characters or one other character to a token) comes to fewer tokens
+  per second than the minimum, the stream ends with a 503 error in the
   client's format (`overloaded_error` for Anthropic, `response.failed`
   for Responses, `UNAVAILABLE` for Gemini), the upstream connection is
-  closed, and the route is charged a failure. Pauses of 5 s or more are
-  left out of the window, and a window that is more than half pauses is
-  not judged. The session's affinity to that route is dropped, the
-  answer so far is billed as for any stream cut short, and the log row
-  carries the error `UpstreamTooSlow` and the speed at the cut
-  (`tokens_per_sec`). Whole answers and Responses WebSocket turns are
-  not measured.
+  closed, and the route is charged a failure. Left out of the window:
+  pauses of a quarter of the window or more (at most 5 s), and
+  summarised reasoning (Responses reasoning summaries, Anthropic thinking
+  blocks, Gemini thought parts, Bedrock reasoning content), which arrives
+  in bursts while the model reasons; a window more than half left out is
+  not judged. Nor is a second while summarised reasoning is open, one
+  whose last content is more than a second old, or anything after the
+  upstream has ended the answer. Counts the upstream reports are not
+  used: Gemini's includes its hidden thoughts. The session's affinity to
+  that route is dropped, the answer so far is billed as for any stream
+  cut short, and the log row carries the error `UpstreamTooSlow` and the
+  speed at the cut (`tokens_per_sec`). Whole answers and Responses
+  WebSocket turns are not measured.
 
 ### Changed
 

@@ -333,8 +333,8 @@ CREATE TABLE IF NOT EXISTS providers (
     -- The slowest generation this upstream may keep a stream at: once
     -- its first token is in, a stream that averages fewer than
     -- `min_speed_tokens_per_sec` over the last `min_speed_window_secs`
-    -- seconds (pauses of 5 s or more left out) is cut with a 503 and
-    -- counted against the route. NULL ⇒ off. See
+    -- seconds (long pauses and summarised reasoning left out) is cut
+    -- with a 503 and counted against the route. NULL ⇒ off. See
     -- crates/gateway/src/proxy/min_speed.rs.
     min_speed_tokens_per_sec INT
         CHECK (min_speed_tokens_per_sec IS NULL OR min_speed_tokens_per_sec BETWEEN 1 AND 1000),

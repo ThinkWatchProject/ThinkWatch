@@ -426,8 +426,10 @@ pub(crate) fn build_chat_pump(
                         }) else {
                             continue;
                         };
-                        // Too slow: the client is told in its own format, and
-                        // returning drops the upstream's connection.
+                        // Too slow: the upstream's connection goes now, not once
+                        // the client has taken the error, which is said in its
+                        // own format.
+                        drop(source);
                         let err = too_slow(&provider, rate, min);
                         let mut out = shaper.process(&error_frame(client, err.status_code(), &err.to_string()));
                         out.extend(shaper.finish());

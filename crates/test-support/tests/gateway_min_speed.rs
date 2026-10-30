@@ -2,7 +2,7 @@
 //!
 //! A provider with `min_speed_tokens_per_sec` set has its streams judged
 //! once a second from the first token on: below the minimum over the last
-//! `min_speed_window_secs` (pauses of 5 s or more left out), the stream is
+//! `min_speed_window_secs` (long pauses left out), the stream is
 //! cut with a 503 error in the client's format, the upstream's connection
 //! dropped and the route charged a failure. The upstreams here are paced
 //! servers (`sse_upstream_paced`), so each test takes as long as its
