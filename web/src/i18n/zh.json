@@ -589,7 +589,7 @@
     "minSpeedAfter": "秒时中断",
     "minSpeedRate": "生成速度（token/秒）",
     "minSpeedWindow": "判定时长（秒）",
-    "minSpeedHint": "速度留空即不限制。从第一个 token 起计，5 秒以上的停顿不计入。中断后由客户端重试。",
+    "minSpeedHint": "速度留空即不限制。从第一个 token 起计，较长的停顿不计入。中断后由客户端重试。",
     "minSpeedInvalid": "生成速度须为 1–1000 的整数，判定时长须为 5–120 秒。",
     "customHeaders": "自定义请求头",
     "customHeadersDesc": "随请求转发的自定义 HTTP 头。值中可使用 {{user_id}} 或 {{user_email}} 转发调用者身份。",

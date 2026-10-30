@@ -589,7 +589,7 @@
     "minSpeedAfter": "s",
     "minSpeedRate": "Generation speed (tokens/s)",
     "minSpeedWindow": "Window (seconds)",
-    "minSpeedHint": "Leave the speed blank for no limit. Measured from the first token; pauses of 5 s or more are not counted. After a stop, the client retries.",
+    "minSpeedHint": "Leave the speed blank for no limit. Measured from the first token; long pauses are not counted. After a stop, the client retries.",
     "minSpeedInvalid": "The speed must be a whole number from 1 to 1000, and the window from 5 to 120 seconds.",
     "customHeaders": "Custom Headers",
     "customHeadersDesc": "Custom HTTP headers forwarded with requests. Use {{user_id}} or {{user_email}} in values to forward caller identity.",
