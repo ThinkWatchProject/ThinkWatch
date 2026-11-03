@@ -108,6 +108,8 @@ pub(crate) fn pick_response_envelope(
 ///
 /// [`run_post_invoke`]: think_watch_common::lifecycle::stages::run_post_invoke
 pub(crate) struct PumpContext {
+    pub memory: think_watch_common::resources::SharedStreamBudget,
+    pub request_id: Option<serde_json::Value>,
     pub identity: crate::lifecycle::McpIdentity,
     pub trace_id: String,
     pub started_at: std::time::Instant,
@@ -151,7 +153,13 @@ impl McpProxy {
         let bytes_source = upstream_resp
             .bytes_stream()
             .map(|r| r.map_err(|e| e.to_string()));
-        let body = build_passthrough_body(bytes_source, events_buf, done_tx);
+        let body = build_passthrough_body(
+            bytes_source,
+            events_buf,
+            done_tx,
+            ctx.memory.clone(),
+            ctx.request_id,
+        );
 
         let payload = StreamingPayload {
             body,
@@ -205,6 +213,8 @@ pub(crate) fn build_passthrough_body<S>(
     source: S,
     events_buf: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     done_tx: tokio::sync::oneshot::Sender<StreamOutcome>,
+    memory: think_watch_common::resources::SharedStreamBudget,
+    request_id: Option<serde_json::Value>,
 ) -> std::pin::Pin<
     Box<
         dyn futures::stream::Stream<
@@ -232,6 +242,23 @@ where
         while let Some(chunk) = source.next().await {
             match chunk {
                 Ok(bytes) => {
+                    let admitted = memory.lock().unwrap_or_else(|e| e.into_inner()).append(bytes.len());
+                    if !admitted {
+                        metrics::counter!("gateway_memory_busy_total").increment(1);
+                        metrics::counter!("mcp_memory_busy_total").increment(1);
+                        if let Some(tx) = done_tx.take() {
+                            let _ = tx.send(StreamOutcome::UpstreamError {
+                                error_type: "gateway_memory".into(),
+                                message: "Gateway buffering capacity is occupied; retry shortly".into(),
+                                status_code: 429,
+                            });
+                        }
+                        let error = crate::proxy::err_response(request_id.clone(), crate::proxy::RESOURCE_BUSY,
+                            "Gateway buffering capacity is occupied; retry shortly");
+                        yield Ok::<Event, Infallible>(Event::default().data(serde_json::to_string(&error).unwrap()));
+                        text_buf.clear();
+                        break;
+                    }
                     // Reject the chunk BEFORE the allocation when its
                     // post-append size would push us past the cap.
                     // Tearing down the stream is preferable to letting
@@ -264,7 +291,7 @@ where
                             // Best-effort JSON parse so non-JSON
                             // `data:` payloads (rare) still land in
                             // the timeline verbatim.
-                            let parsed = serde_json::from_str::<serde_json::Value>(&payload)
+                            let parsed = think_watch_common::resources::cpu(payload.len(), || serde_json::from_str::<serde_json::Value>(&payload)).await
                                 .unwrap_or_else(|_| {
                                     serde_json::Value::String(payload.clone())
                                 });
@@ -303,7 +330,7 @@ where
             && let Some(payload) = extract_sse_data_payload(trailing)
             && !payload.is_empty()
         {
-            let parsed = serde_json::from_str::<serde_json::Value>(&payload)
+            let parsed = think_watch_common::resources::cpu(payload.len(), || serde_json::from_str::<serde_json::Value>(&payload)).await
                 .unwrap_or_else(|_| serde_json::Value::String(payload.clone()));
             if let Ok(mut g) = events_buf.lock() {
                 g.push(parsed);
@@ -352,11 +379,12 @@ pub(crate) fn build_replay_payload(
     {
         events.push(s);
     }
-    let stream = futures::stream::iter(
-        events
-            .into_iter()
-            .map(|s| Ok::<_, Infallible>(Event::default().data(s))),
-    );
+    let stream = async_stream::stream! {
+        let _memory = response.memory;
+        for event in events {
+            yield Ok::<_, Infallible>(Event::default().data(event));
+        }
+    };
     StreamingPayload {
         body: Box::pin(stream),
         new_session_id: None,
@@ -368,8 +396,24 @@ mod replay_tests {
     use super::*;
     use futures::StreamExt;
 
+    #[tokio::test]
+    async fn replay_retains_buffer_admission_until_the_slow_consumer_drops() {
+        let budget = think_watch_common::resources::ByteBudget::new(100);
+        let mut lease = budget.reserve();
+        assert!(lease.grow(100));
+        let mut response = make_response(1, serde_json::json!({"ok":true}));
+        response.memory = Some(lease.wrap(bytes::Bytes::from_static(b"upstream")));
+        let mut payload = build_replay_payload(response, None);
+        assert_eq!(budget.used(), 100);
+        let _ = payload.body.next().await.unwrap().unwrap();
+        assert_eq!(budget.used(), 100);
+        drop(payload);
+        assert_eq!(budget.used(), 0);
+    }
+
     fn make_response(id: u64, result: serde_json::Value) -> JsonRpcResponse {
         JsonRpcResponse {
+            memory: None,
             jsonrpc: "2.0".to_owned(),
             id: Some(serde_json::json!(id)),
             result: Some(result),
@@ -537,13 +581,54 @@ mod passthrough_tests {
     use futures::stream::{self, StreamExt};
     use std::sync::{Arc, Mutex};
 
+    #[tokio::test]
+    async fn small_events_share_admission_and_a_detached_tail_keeps_it_after_cancel() {
+        use think_watch_common::resources::{BODY_HEADROOM, ByteBudget, StreamBudget};
+        let chunk = Bytes::from_static(b"data: {\"result\":1}\n\n");
+        let budget = ByteBudget::new(chunk.len() * BODY_HEADROOM);
+        let memory = Arc::new(Mutex::new(StreamBudget::new(&budget, 1024)));
+        let tail_memory = memory.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut body = build_passthrough_body(
+            stream::iter([Ok(chunk.clone()), Ok(chunk.clone())]),
+            events.clone(),
+            tx,
+            memory,
+            Some(serde_json::json!(42)),
+        );
+        let _ = body.next().await.unwrap().unwrap();
+        let busy = body.next().await.unwrap().unwrap();
+        let busy = format!("{busy:?}");
+        assert!(busy.contains("-32005"), "{busy}");
+        assert!(
+            busy.contains("42"),
+            "the busy response must identify the request: {busy}"
+        );
+        assert!(
+            matches!(rx.await.unwrap(), StreamOutcome::UpstreamError { error_type, status_code: 429, .. } if error_type == "gateway_memory")
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+        drop(body);
+        assert_eq!(budget.used(), chunk.len() * BODY_HEADROOM);
+        drop(events);
+        drop(tail_memory);
+        assert_eq!(budget.used(), 0);
+    }
+
     async fn run_body(
         chunks: Vec<Result<Bytes, String>>,
     ) -> (usize, Vec<serde_json::Value>, Option<&'static str>) {
         let events_buf: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
         let source = stream::iter(chunks);
-        let body = build_passthrough_body(source, events_buf.clone(), done_tx);
+        let body = build_passthrough_body(
+            source,
+            events_buf.clone(),
+            done_tx,
+            think_watch_common::resources::stream_budget(),
+            None,
+        );
         let mut count = 0usize;
         let mut body = body;
         while let Some(_ev) = body.next().await {
@@ -629,7 +714,13 @@ mod passthrough_tests {
             "data: {\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n\n",
         ))])
         .chain(stream::pending());
-        let body = build_passthrough_body(source, events_buf.clone(), done_tx);
+        let body = build_passthrough_body(
+            source,
+            events_buf.clone(),
+            done_tx,
+            think_watch_common::resources::stream_budget(),
+            None,
+        );
         let mut body = body;
         let _ = body.next().await;
         drop(body);

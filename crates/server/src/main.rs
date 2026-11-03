@@ -5,8 +5,40 @@ use think_watch_common::db;
 use think_watch_server::{app, handlers, init, tracing_ch};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // A process-local policy, inherited by subsequently created threads.
+        // Sparse small-object heaps should not pin entire 2 MiB huge pages.
+        // SAFETY: PR_SET_THP_DISABLE only consumes integer arguments.
+        unsafe {
+            libc::prctl(
+                libc::PR_SET_THP_DISABLE,
+                1 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            )
+        };
+    }
+    let policy = think_watch_common::resources::policy();
+    let workers = match std::env::var("TOKIO_WORKER_THREADS") {
+        Ok(value) => value.parse::<std::num::NonZeroUsize>()?.get(),
+        Err(std::env::VarError::NotPresent) => policy.io_workers,
+        Err(error) => return Err(error.into()),
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .thread_keep_alive(think_watch_common::resources::IDLE_TIMEOUT)
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> anyhow::Result<()> {
     // Container healthcheck. The runtime image is distroless/static —
     // no shell, no curl — so the only executable available to Docker's
     // healthcheck is this binary. `think-watch-server healthcheck`
@@ -28,6 +60,8 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer().json())
         .with(ch_layer)
         .init();
+
+    tracing::info!(policy = ?think_watch_common::resources::policy(), allocator = "mimalloc", "Automatic resource admission enabled");
 
     let config = AppConfig::from_env()?;
     if let Err(e) = config.validate() {

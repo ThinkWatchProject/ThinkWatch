@@ -32,6 +32,7 @@
 //! are thinkwatch-core's, shared with the desktop gateway.
 
 use std::convert::Infallible;
+use think_watch_common::resources;
 
 use crate::call_ctx::CallCtx;
 use crate::error::GatewayError;
@@ -628,9 +629,12 @@ pub(crate) async fn send(
 ) -> Result<(reqwest::Response, Wire), GatewayError> {
     let upstream = &entry.upstream;
     let official = upstream.is_official();
-    let first = outbound
-        .address(entry.protocol, model, official)?
-        .for_upstream(upstream, model);
+    let first = resources::cpu(usize::MAX, || {
+        outbound
+            .address(entry.protocol, model, official)
+            .map(|wire| wire.for_upstream(upstream, model))
+    })
+    .await?;
     // Only a request that can carry an effort asks the memory.
     let memory = if outbound.reasoning.any {
         effort::recall(redis, entry.provider_id, first.dialect, model).await
@@ -724,9 +728,12 @@ pub(crate) async fn send(
                 to = %protocol,
                 "Upstream rejected the configured protocol — retrying with an alternate"
             );
-            let wire = outbound
-                .address(*protocol, model, official)?
-                .for_upstream(upstream, model);
+            let wire = resources::cpu(usize::MAX, || {
+                outbound
+                    .address(*protocol, model, official)
+                    .map(|wire| wire.for_upstream(upstream, model))
+            })
+            .await?;
             let wire = if outbound.reasoning.any {
                 let memory = effort::recall(redis, entry.provider_id, wire.dialect, model).await;
                 wire.remembered(&memory)
@@ -770,33 +777,46 @@ pub(crate) async fn read_whole(
     caller_model: &str,
     input_estimate: u64,
 ) -> Result<Completed, GatewayError> {
-    let upstream = resp
-        .bytes()
+    let upstream = resources::read_response(resp, resources::policy().max_body_bytes)
         .await
-        .map_err(super::transport::transport_error)?;
+        .map_err(|error| match error {
+            resources::ReadError::Busy => GatewayError::rate_limited("gateway_memory", 1),
+            resources::ReadError::Transport(error) => super::transport::transport_error(error),
+            resources::ReadError::TooLarge => {
+                GatewayError::ProviderInvalidResponse(error.to_string())
+            }
+        })?;
+    let memory = upstream.clone();
+    resources::cpu(upstream.len(), || {
+        let mut sniffer = tw_dialect::usage::Sniffer::new();
+        sniffer.feed(&upstream);
+        let (usage, usage_estimated) = crate::usage_estimate::complete(
+            sniffer.finish(),
+            true,
+            input_estimate,
+            Some(&upstream),
+        );
+        if usage_estimated {
+            metrics::counter!("gateway_usage_estimated_total").increment(1);
+        }
 
-    let mut sniffer = tw_dialect::usage::Sniffer::new();
-    sniffer.feed(&upstream);
-    let (usage, usage_estimated) =
-        crate::usage_estimate::complete(sniffer.finish(), true, input_estimate, Some(&upstream));
-    if usage_estimated {
-        metrics::counter!("gateway_usage_estimated_total").increment(1);
-    }
-
-    let body = match &wire.convert {
-        Some(session) => session.response(&upstream).ok_or_else(|| {
-            GatewayError::ProviderInvalidResponse(
-                "The upstream answered with something that is not JSON.".into(),
-            )
-        })?,
-        None => upstream.to_vec(),
-    };
-    Ok(Completed {
-        body: rewrite_model(&body, caller_model),
-        logged: None,
-        usage,
-        usage_estimated,
+        let body = match &wire.convert {
+            Some(session) => session.response(&upstream).ok_or_else(|| {
+                GatewayError::ProviderInvalidResponse(
+                    "The upstream answered with something that is not JSON.".into(),
+                )
+            })?,
+            None => upstream.to_vec(),
+        };
+        Ok(Completed {
+            memory: Some(memory),
+            body: rewrite_model(&body, caller_model),
+            logged: None,
+            usage,
+            usage_estimated,
+        })
     })
+    .await
 }
 
 // ───────────────────────────────────────────── the pipeline
@@ -860,11 +880,14 @@ async fn run(
         "(unknown)",
         request_started_at,
     );
-    let raw: Value = serde_json::from_slice(&body).map_err(|_| {
-        early_ctx.emit(GatewayError::TransformError(
-            "The request body is not valid JSON.".into(),
-        ))
-    })?;
+    let original_body = body.clone();
+    let raw: Value = resources::cpu(body.len(), || serde_json::from_slice(&body))
+        .await
+        .map_err(|_| {
+            early_ctx.emit(GatewayError::TransformError(
+                "The request body is not valid JSON.".into(),
+            ))
+        })?;
     let (model, is_stream) = if surface.dialect == Dialect::Gemini {
         gemini_target(path).ok_or_else(|| {
             early_ctx.emit(GatewayError::TransformError(format!(
@@ -927,7 +950,8 @@ async fn run(
     //    the caller's 403, quoting their words (masked). The rules that
     //    check answers run on the way back (the shaper for a stream, below
     //    for a whole answer).
-    let screening = guards.content.screen(surface.dialect, &body);
+    let screening =
+        resources::cpu(body.len(), || guards.content.screen(surface.dialect, &body)).await;
     crate::content_filter::record(&state.audit, &caller, guards.content.mode, &screening);
     if let Some(hit) = screening.refusal() {
         return Err(ctx
@@ -938,12 +962,14 @@ async fn run(
     // every hop, the audit row — the request is the changed one.
     let (body, raw) = match screening.body {
         Some(stripped) => {
-            let raw = serde_json::from_slice(&stripped).map_err(|_| {
-                ctx.emit(GatewayError::TransformError(
+            let raw = resources::cpu(stripped.len(), || serde_json::from_slice(&stripped))
+                .await
+                .map_err(|_| {
+                    ctx.emit(GatewayError::TransformError(
                     "The request could not be read after the content filter changed text in it."
                         .into(),
                 ))
-            })?;
+                })?;
             (stripped, raw)
         }
         None => (body, raw),
@@ -954,8 +980,10 @@ async fn run(
     //    conversation kept on OpenAI's servers (`previous_response_id`), or
     //    carries a compaction only OpenAI can read — can still be forwarded
     //    to an upstream of its own format, so that is where it goes (step 8).
-    let decoded =
-        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect));
+    let decoded = resources::cpu(body.len(), || {
+        tw_dialect::convert::decode(surface.dialect, &raw, path, internal_query(surface.dialect))
+    })
+    .await;
 
     // 5. Outbound redaction: the text written in the request — located by
     //    the structure of the caller's format, never its ids, types or
@@ -968,19 +996,25 @@ async fn run(
     //    The audit row keeps what the caller wrote (their at-rest
     //    redaction setting applies on top).
     let shape = Shape::Generate(surface.dialect);
-    let (findings, ledger) = guards.redaction.look(&body, shape);
+    let (findings, ledger) =
+        resources::cpu(body.len(), || guards.redaction.look(&body, shape)).await;
     crate::redaction::record(&state.audit, &caller, &guards.redaction, &findings);
-    let request_for_audit = body.to_vec();
-    let outbound_body = if ledger.is_empty() {
-        raw
-    } else {
-        let (replaced, _) = guards.redaction.replace(body.to_vec(), &ledger, shape);
-        serde_json::from_slice(&replaced).map_err(|_| {
-            ctx.emit(GatewayError::TransformError(
-                "The request could not be read after redaction.".into(),
-            ))
-        })?
-    };
+    let request_for_audit = resources::retain(body.clone(), original_body);
+    let outbound_body = resources::cpu(body.len(), || {
+        if ledger.is_empty() {
+            Ok::<_, GatewayErrorResponse>(raw)
+        } else {
+            let (replaced, _) = guards.redaction.replace(body.to_vec(), &ledger, shape);
+            serde_json::from_slice(&replaced)
+                .map_err(|_| {
+                    ctx.emit(GatewayError::TransformError(
+                        "The request could not be read after redaction.".into(),
+                    ))
+                })
+                .map_err(Into::into)
+        }
+    })
+    .await?;
 
     // 6. The model's settings. The output cap is applied to each hop as it
     //    is addressed (`Outbound::cap_output`): whether to fill one in
@@ -1005,22 +1039,27 @@ async fn run(
     //    budgets like a real call would — the caller received them, and
     //    otherwise repeating a cached prompt would get round every token
     //    limit.
-    let cache_fingerprint = if surface.caches {
-        ResponseCache::fingerprint(&outbound_body).map(|mut fp| {
-            // The cap and the reasoning setting are applied after this, per
-            // hop: an answer made under one must not be served under
-            // another.
-            if let Some(cap) = max_output_tokens {
-                fp.extend_from_slice(format!("\nmax_output_tokens={cap}").as_bytes());
-            }
-            if let Some(setting) = reasoning.setting {
-                fp.extend_from_slice(format!("\nreasoning_effort={}", setting.slug()).as_bytes());
-            }
-            fp
-        })
-    } else {
-        None
-    };
+    let cache_fingerprint = resources::cpu(body.len(), || {
+        if surface.caches {
+            ResponseCache::fingerprint(&outbound_body).map(|mut fp| {
+                // The cap and the reasoning setting are applied after this, per
+                // hop: an answer made under one must not be served under
+                // another.
+                if let Some(cap) = max_output_tokens {
+                    fp.extend_from_slice(format!("\nmax_output_tokens={cap}").as_bytes());
+                }
+                if let Some(setting) = reasoning.setting {
+                    fp.extend_from_slice(
+                        format!("\nreasoning_effort={}", setting.slug()).as_bytes(),
+                    );
+                }
+                fp
+            })
+        } else {
+            None
+        }
+    })
+    .await;
     if let Some(fp) = &cache_fingerprint
         && let Some(cached) = state.cache.get(fp).await
     {
@@ -1028,23 +1067,33 @@ async fn run(
         // With this caller's values in it: what they would run. A stored
         // answer passed the content rules and the inspection in force when
         // it was stored, not necessarily the ones in force now.
-        let restored = crate::redaction::restore_body(&ledger, &cached.body);
-        let restored = crate::content_filter::whole(
-            &guards.content,
-            &state.audit,
-            &caller,
-            "cache",
-            surface.dialect,
-            restored,
-        );
-        if let Some(e) = crate::tool_inspection::check_whole(
-            &guards.tools,
-            &guards.redaction,
-            &state.audit,
-            &caller,
-            "cache",
-            &restored,
-        ) {
+        let restored = resources::cpu(cached.body.len(), || {
+            crate::redaction::restore_body(&ledger, &cached.body)
+        })
+        .await;
+        let restored = resources::cpu(restored.len(), || {
+            crate::content_filter::whole(
+                &guards.content,
+                &state.audit,
+                &caller,
+                "cache",
+                surface.dialect,
+                restored,
+            )
+        })
+        .await;
+        if let Some(e) = resources::cpu(restored.len(), || {
+            crate::tool_inspection::check_whole(
+                &guards.tools,
+                &guards.redaction,
+                &state.audit,
+                &caller,
+                "cache",
+                &restored,
+            )
+        })
+        .await
+        {
             return Err(ctx.emit(e).into());
         }
         // The tokens the stored answer records, weighted for this model,
@@ -1110,12 +1159,13 @@ async fn run(
             // client gets the framing it asked for.
             let body = String::from_utf8_lossy(&restored).into_owned();
             let events = async_stream::stream! {
+                let _memory = cached.memory;
                 yield Ok::<_, Infallible>(axum::response::sse::Event::default().data(body));
                 yield Ok::<_, Infallible>(axum::response::sse::Event::default().data("[DONE]"));
             };
             axum::response::sse::Sse::new(events).into_response()
         } else {
-            json_response(restored)
+            json_response(resources::retain(restored.into(), cached.memory))
         };
         response
             .headers_mut()
@@ -1213,6 +1263,7 @@ async fn run(
         state: state.clone(),
         guards: guards.clone(),
         request: crate::lifecycle::ChatRequestSnapshot {
+            memory: resources::stream_budget(),
             identity: identity.clone(),
             trace_id: metadata.request_id.clone(),
             session_id: session_id.clone(),
@@ -1233,6 +1284,7 @@ async fn run(
             upstream_model: route.upstream_model.clone(),
             sel_record,
             caps: crate::route_caps::RouteCaps::of(route),
+            min_speed: route.upstream.min_speed,
         },
         cache_enabled: surface.caches,
     };
@@ -1360,28 +1412,39 @@ async fn run(
 
     // The answer as the caller will receive it: their values restored,
     // then its text through the content rules that check answers.
-    let restored = crate::redaction::restore_body(&answer_ledger, &completed.body);
-    let restored = crate::content_filter::whole(
-        &guards.content,
-        &state.audit,
-        &caller,
-        &entry.provider_name,
-        surface.dialect,
-        restored,
-    );
+    let response_memory = completed.memory.clone();
+    let restored = resources::cpu(completed.body.len(), || {
+        crate::redaction::restore_body(&answer_ledger, &completed.body)
+    })
+    .await;
+    let restored = resources::cpu(restored.len(), || {
+        crate::content_filter::whole(
+            &guards.content,
+            &state.audit,
+            &caller,
+            &entry.provider_name,
+            surface.dialect,
+            restored,
+        )
+    })
+    .await;
 
     // Tool calls, on the whole answer before any of it has gone out — in
     // the form the caller would run them. A refusal is the gateway's
     // policy, not the upstream failing, so the route's health counts it as
     // a success; the answer is neither cached nor billed.
-    if let Some(e) = crate::tool_inspection::check_whole(
-        &guards.tools,
-        &guards.redaction,
-        &state.audit,
-        &caller,
-        &entry.provider_name,
-        &restored,
-    ) {
+    if let Some(e) = resources::cpu(restored.len(), || {
+        crate::tool_inspection::check_whole(
+            &guards.tools,
+            &guards.redaction,
+            &state.audit,
+            &caller,
+            &entry.provider_name,
+            &restored,
+        )
+    })
+    .await
+    {
         finalize_health(&state, &sel_record, true).await;
         return Err(ctx.emit(e).into());
     }
@@ -1407,7 +1470,10 @@ async fn run(
         "Audit log: request completed"
     );
 
-    let mut response = json_response(restored);
+    let mut response = json_response(resources::retain(
+        restored.into(),
+        response_memory.unwrap_or_default(),
+    ));
     response
         .headers_mut()
         .insert("X-Cache", HeaderValue::from_static("MISS"));
@@ -1474,13 +1540,13 @@ fn dialect_headers(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-fn json_response(body: Vec<u8>) -> axum::response::Response {
+fn json_response(body: impl Into<Bytes>) -> axum::response::Response {
     (
         [(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         )],
-        body,
+        body.into(),
     )
         .into_response()
 }
@@ -1506,10 +1572,13 @@ mod tests {
     }
 
     fn outbound(surface: ClientSurface, path: &str, body: Value, cap: Option<u32>) -> Outbound {
-        let redaction = Redaction::new(&tw_guard::policy::RedactPolicy {
-            mode: tw_guard::policy::Mode::Off,
-            ..Default::default()
-        });
+        let redaction = Redaction::new(
+            &tw_guard::policy::RedactPolicy {
+                mode: tw_guard::policy::Mode::Off,
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let (_, ledger) = redaction.look(b"{}", Shape::Generate(surface.dialect));
         Outbound {
             surface,

@@ -77,13 +77,14 @@ pub async fn oauth_discover(
     for url in &candidates {
         match http.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let body: serde_json::Value = match resp.json().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        last_err = Some(format!("{url}: {e}"));
-                        continue;
-                    }
-                };
+                let (body, _memory): (serde_json::Value, _) =
+                    match think_watch_common::resources::read_json(resp, 64 * 1024).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            last_err = Some(format!("{url}: {e}"));
+                            continue;
+                        }
+                    };
                 return Ok(Json(parse_oauth_metadata(&body)));
             }
             Ok(resp) => {
@@ -455,13 +456,14 @@ async fn fetch_protected_resource(
             return None;
         }
     };
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            diag.push(format!("{url}: parse: {e}"));
-            return None;
-        }
-    };
+    let (body, _memory): (serde_json::Value, _) =
+        match think_watch_common::resources::read_json(resp, 64 * 1024).await {
+            Ok(v) => v,
+            Err(e) => {
+                diag.push(format!("{url}: parse: {e}"));
+                return None;
+            }
+        };
     let issuer = body
         .get("authorization_servers")
         .and_then(|v| v.as_array())
@@ -501,8 +503,10 @@ async fn fetch_authz_server_metadata(
         }
         match http.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(body) => {
+                match think_watch_common::resources::read_json::<serde_json::Value>(resp, 64 * 1024)
+                    .await
+                {
+                    Ok((body, _memory)) => {
                         diag.push(format!("found authz-server metadata at {url}"));
                         return parse_authz_server_metadata(&body);
                     }
@@ -655,7 +659,14 @@ async fn register_dynamic_client(
         }
     };
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let bytes = match think_watch_common::resources::read_response(resp, 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            diag.push(format!("dynamic-registration response read: {error}"));
+            return None;
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes);
     if !status.is_success() {
         diag.push(format!(
             "dynamic-registration HTTP {status}: {}",

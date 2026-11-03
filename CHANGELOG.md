@@ -11,6 +11,168 @@ target.
 
 ## [Unreleased]
 
+## [3.11.0] — 2026-11-03
+
+Execution and buffering now adapt automatically to available CPUs and memory,
+including container limits. CPU work expands with traffic and extra threads
+retire after ten idle seconds; no runtime configuration change is required.
+
+Secrets and privacy recognises far more: the built-in redaction catalog
+grows from 30 rules to 131 in 20 groups, and the API keys saved
+for the providers are recognised by value, whatever their format. The
+console shows the rules' names and descriptions as thinkwatch-core
+writes them, in both languages. A value recognised by mistake can be made
+an exception without switching its rule off, and long conversations are
+no longer scanned from the start every turn. A provider can set the
+slowest generation its streams may keep up, and a stream that falls
+below it is cut so the client can try again. The thinkwatch-core crates
+move from v0.83.1 to v0.89.0.
+
+No new runtime setting. Two new provider columns
+(`providers.min_speed_tokens_per_sec`, `providers.min_speed_window_secs`,
+added on startup). New metrics cover minimum generation speed, buffering
+pressure and audit backlog memory.
+The redaction policy gains one optional field (`exceptions`), with
+endpoints of its own under `/api/admin/security/redact/exceptions`.
+
+### Read before upgrading
+
+- **Buffering is admitted against a process-wide memory budget.** Request,
+  response, cache and retained streaming data use limits derived from the
+  container or machine's memory. Temporary pressure returns a retryable 429
+  with `Retry-After: 1`; an already-started stream receives an error event.
+  Large upstream responses and stream timelines are bounded, and new audit
+  entries are dropped with metrics if the separate audit byte budget fills.
+  See [automatic process resources](docs/operations/resources.md) for the
+  limits and monitoring. These allocation budgets are not a hard RSS cap.
+- **UUIDs and blockchain credentials gain built-in rules.** Core v0.88.0
+  added 11 rules, enabled by default, including UUIDs, wallet keys and
+  accounts, exchange credentials and recovery material. Monitor records
+  findings; installations with protection On replace matching message
+  text. UUIDs, hashes and public accounts do not independently trigger
+  credential-exfiltration blocking. Review any workflows that send order
+  or trace identifiers as message text.
+- **New credential rules ship on.** Under the On state of Secrets and
+  privacy (`security.redact` mode `enforce`), values they find start
+  being replaced with placeholders: among them credentials in request
+  headers, command lines, URLs and bot webhooks, and secrets assigned in
+  `.env`-style configuration (`DB_PASSWORD=…`). Under Monitor, the
+  factory state, they are only recorded. A rule that gets in the way can
+  be switched off on its own in the console.
+- **Some keys are reported under a rule of their own.** `sk-or-v1-`
+  (OpenRouter), `sk-lf-` (Langfuse), `sk-svcacct-`, `sk-admin-` and
+  `sk-api-` keys were reported as `openai-api-key`; they now have their
+  own rule ids, and so do audit events and the
+  `gateway_redaction_found_total` metric's `kind` label, which follows
+  the new groups (`ai-services`, `dev-platforms`, `cloud`, …) instead of
+  `api-keys` and `personal`.
+
+### Added
+
+- **Expanded redaction rules** (thinkwatch-core v0.85.0 and later): about 50 more
+  prefixed credentials (AI services, code hosting, cloud, payments and
+  collaboration), credentials by position (request headers, command
+  lines, URL parameters, bot webhooks, configuration assignments),
+  cryptocurrency recovery phrases and private keys, and personal
+  information: identity documents, foreign ID numbers, IBAN, phone
+  numbers, addresses and coordinates, vehicles, device identifiers and
+  values by field name. Of the new personal-information rules only the
+  two that can be checked digit by digit ship on (passport
+  machine-readable zone, IBAN), alongside the resident ID and bank card
+  numbers as before.
+- **Saved upstream keys are recognised by value.** The API keys in each
+  provider's credential headers (the `Bearer` scheme left out) and a
+  Bedrock provider's secret access key are matched wherever they appear
+  in a request, as written or JSON-escaped; values shorter than 12
+  characters are not. The list follows the providers: it is rebuilt when
+  they load, when one is created, changed or deleted, and on the other
+  instances through the router reload. The same keys count as
+  credentials for the dangerous-commands rule "credential sent to an
+  unknown host", each allowed to its own provider's host, and the
+  console's trial recognises them too.
+- **A saved key's audit event names its provider, never the value.** The
+  `gateway.redaction_*` event of the rule `thinkwatch-saved-secret`
+  carries `sources` (`[{"kind": "upstream-key", "name": <provider>}]`)
+  and no masked values; the security log shows it as the provider's API
+  key.
+
+- **Exception values** (`security.redact.exceptions`, the Exceptions
+  section under the Secrets and privacy rules). A value listed there is
+  neither replaced nor recorded, whichever rule finds it; the rules keep
+  working for every other value. A value is added by pasting it: the
+  server hashes it on arrival and keeps only its SHA-256, its masked form,
+  the rule that recognised it and when it was added, never the value. At
+  most 500; at the cap, adding is unavailable. Saved provider keys cannot
+  be exceptions. Listing them takes `settings:read`; adding and removing
+  take `settings:write` and `pii_redactor:write`, and each is written to
+  the audit log (`security.redact_exception_added`,
+  `security.redact_exception_removed`) with the rule and the masked value
+  only. The trial marks an excepted value as left as is.
+- **Unchanged conversation history is not scanned again.** Each gateway
+  instance keeps, in memory, where the redaction rules matched in the
+  parts of recent requests it has scanned (positions and rule ids, never
+  values); the next turn of the same conversation takes those parts from
+  it and scans only what is new. What is found is the same as without it.
+  The cache is rebuilt whenever the rules, the providers' keys or the
+  exceptions change.
+- **Stop a stream that generates too slowly** (the provider's
+  "Stop when generation is slower than … tokens/s for … s" setting,
+  `min_speed_tokens_per_sec` 1–1000 and `min_speed_window_secs` 5–120,
+  default 20, on the provider endpoints; blank or `null` is off, the
+  default). From the first token on, a stream is judged once a second:
+  when the visible text it streamed over the last window (answer,
+  reasoning streamed as generated, and tool arguments; four ASCII
+  characters or one other character to a token) comes to fewer tokens
+  per second than the minimum, the stream ends with a 503 error in the
+  client's format (`overloaded_error` for Anthropic, `response.failed`
+  for Responses, `UNAVAILABLE` for Gemini), the upstream connection is
+  closed, and the route is charged a failure. Left out of the window:
+  pauses of a quarter of the window or more (at most 5 s), and
+  summarised reasoning (Responses reasoning summaries, Anthropic thinking
+  blocks, Gemini thought parts, Bedrock reasoning content), which arrives
+  in bursts while the model reasons; a window more than half left out is
+  not judged. Nor is a second while summarised reasoning is open, one
+  whose last content is more than a second old, or anything after the
+  upstream has ended the answer. Counts the upstream reports are not
+  used: Gemini's includes its hidden thoughts. The session's affinity to
+  that route is dropped, the answer so far is billed as for any stream
+  cut short, and the log row carries the error `UpstreamTooSlow` and the
+  speed at the cut (`tokens_per_sec`). Whole answers and Responses
+  WebSocket turns are not measured.
+
+### Changed
+
+- **CPU execution grows with load.** The permanent I/O scheduler uses at
+  most eight workers by default. Parsing, redaction, inspection and
+  conversion share CPU admission with password hashing; sufficiently
+  provisioned 80-CPU machines can run 80 CPU jobs. Extra threads retire
+  after ten idle seconds. Argon2 also observes a memory-based concurrency
+  limit, retained until a running hash finishes even if its caller leaves.
+- **Buffers and audit retries retain admission until their final owner
+  releases them.** Chunked AI/MCP responses, cache reads, transformed
+  output and detached stream tails use the same buffering budget. MCP
+  discovery, provider/registry catalogs, OAuth endpoints, S3 reads and
+  audit-forwarder diagnostics also use bounded reads. Local pressure does
+  not count as an upstream failure. Audit queue and ClickHouse retry
+  batches share a separate byte limit and expose buffered-memory and
+  dropped-entry pressure through metrics.
+- **Release binaries use mimalloc.** Linux also applies a process-local
+  transparent-huge-page policy before runtime threads start. Host sysctls
+  and deployment resource settings need no changes.
+- **A redaction policy written through `PATCH /api/admin/settings` keeps
+  the stored exceptions**, whatever it carries: they are changed only
+  through their own endpoints, and the console writes the rest of the
+  policy back from the rule view, which does not carry them.
+- **Rule names and descriptions come from thinkwatch-core.** The security
+  page shows each built-in rule's name, reason and description and each
+  group's name as the rule view gives them, in English or Chinese; the
+  console no longer keeps its own name tables. Security-log rows and
+  trial hits name the rule by looking its id up in the rule view. The
+  rule search also matches prefixes, field names and descriptions.
+- **The conversion of the old PII pattern list** switches on or off only
+  the four personal-information rules that list could express; the new
+  personal-information rules keep their factory setting.
+
 ## [3.10.0] — 2026-10-25
 
 Upstreams that fail for the moment before any of the answer reached the
@@ -2694,7 +2856,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.10.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.11.0...HEAD
+[3.11.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.11.0
 [3.10.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.10.0
 [3.9.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.1
 [3.9.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.0

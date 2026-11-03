@@ -257,6 +257,15 @@ pub struct CreateProviderRequest {
     #[serde(default)]
     pub headers: Vec<ProviderHeader>,
     pub config: Option<serde_json::Value>,
+    /// Cut a stream that generates fewer tokens per second than this
+    /// (1–1000), averaged over `min_speed_window_secs`. Absent or `null`
+    /// ⇒ off.
+    #[serde(default)]
+    pub min_speed_tokens_per_sec: Option<i64>,
+    /// The window the speed is averaged over, in seconds (5–120).
+    /// Absent ⇒ 20.
+    #[serde(default)]
+    pub min_speed_window_secs: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]

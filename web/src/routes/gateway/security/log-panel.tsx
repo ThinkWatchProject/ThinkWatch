@@ -18,8 +18,8 @@ import {
 import { Segmented } from '@/components/segmented';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { GUARDS, type Guard } from '@/lib/security-types';
-import { GUARD_ACTIONS, guardOf, outcomeOf, partOf, type GuardEvent } from './log-events';
+import { GUARDS, type Guard, type SecurityDetail } from '@/lib/security-types';
+import { GUARD_ACTIONS, guardOf, outcomeOf, partOf, sourcesOf, type GuardEvent } from './log-events';
 import { actionTone, guardName, ruleName } from './names';
 
 const PAGE_SIZE = 50;
@@ -30,9 +30,11 @@ type Filter = 'all' | Guard;
  * The security log: what the three guards found, newest first, read from
  * the audit log. Each row says the guard, the rule, where the hit was and
  * what became of it; monitor-mode hits say so. The request's text is never
- * in the audit log, only the trace that leads to it.
+ * in the audit log, only the trace that leads to it. An event names its
+ * rule by id; the name shown is the rule view's (`detail`), in the
+ * console's language.
  */
-export function LogPanel() {
+export function LogPanel({ detail }: { detail: SecurityDetail | undefined }) {
   const { t } = useTranslation();
   const [filter, setFilter] = useState<Filter>('all');
   const [page, setPage] = useState(0);
@@ -126,7 +128,7 @@ export function LogPanel() {
             </TableHeader>
             <TableBody>
               {items.map((e) => (
-                <EventRow key={e.id} e={e} />
+                <EventRow key={e.id} e={e} detail={detail} />
               ))}
             </TableBody>
           </Table>
@@ -159,13 +161,14 @@ export function LogPanel() {
   );
 }
 
-function EventRow({ e }: { e: GuardEvent }) {
-  const { t } = useTranslation();
+function EventRow({ e, detail }: { e: GuardEvent; detail: SecurityDetail | undefined }) {
+  const { t, i18n } = useTranslation();
   const guard = guardOf(e.action);
   const d = e.detail ?? {};
   if (!guard) return null;
   const outcome = outcomeOf(t, e.action, d);
-  const rule = d.rule ? ruleName(t, guard, d.rule, d.custom === true, d.rule_name) : '—';
+  const rule = d.rule ? ruleName(i18n.language, detail?.[guard], d.rule, d.custom === true, d.rule_name) : '—';
+  const sources = new Intl.ListFormat(i18n.language, { type: 'conjunction' }).format(sourcesOf(t, d));
   const when = new Date(e.created_at);
   return (
     <TableRow>
@@ -175,6 +178,11 @@ function EventRow({ e }: { e: GuardEvent }) {
       <TableCell className="truncate">{guardName(t, guard)}</TableCell>
       <TableCell className="truncate" title={rule}>
         {rule}
+        {sources && (
+          <div className="truncate text-xs text-muted-foreground" title={sources}>
+            {sources}
+          </div>
+        )}
         {d.model && <div className="truncate text-xs text-muted-foreground">{d.model}</div>}
       </TableCell>
       <TableCell className="truncate text-muted-foreground">{partOf(t, guard, d)}</TableCell>

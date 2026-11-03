@@ -29,7 +29,9 @@ use tw_guard::redact::rules::RuleSet;
 
 use crate::dynamic_config::DynamicConfig;
 
+pub mod exceptions;
 pub mod legacy;
+pub mod saved;
 
 /// The settings key a guard's policy is stored under.
 pub fn key(guard: Guard) -> &'static str {

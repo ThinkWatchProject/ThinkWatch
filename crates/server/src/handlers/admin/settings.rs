@@ -265,7 +265,7 @@ pub struct UpdateSettingsRequest {
 pub async fn update_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<UpdateSettingsRequest>,
+    Json(mut req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut permissions: Vec<&'static str> = std::iter::once("settings:write")
         .chain(
@@ -282,6 +282,23 @@ pub async fn update_settings(
             .require_global_permission(&state.db, permission)
             .await?;
     }
+    // Redaction's exception values are edited through their own endpoints
+    // (`security::add_exception`): a policy written here keeps the stored
+    // ones, whatever it carries. The console rebuilds the policy from the
+    // rule view, which does not carry them.
+    let redact_key = guard_policy::key(tw_guard::policy::Guard::Redact);
+    if let Some(incoming) = req.settings.remove(redact_key) {
+        let stored: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT value FROM system_settings WHERE key = $1")
+                .bind(redact_key)
+                .fetch_optional(&state.db)
+                .await?;
+        req.settings.insert(
+            redact_key.to_string(),
+            guard_policy::exceptions::keep_stored(incoming, stored.as_ref()),
+        );
+    }
+
     // Validate each setting
     for (key, value) in &req.settings {
         validate_setting(key, value)?;

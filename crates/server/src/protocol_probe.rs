@@ -247,7 +247,11 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Probe
         match attempt {
             Ok(Ok(resp)) => {
                 // Drain it so the connection goes back to the pool.
-                let _ = resp.bytes().await;
+                let _ = tokio::time::timeout(
+                    PROBE_TIMEOUT,
+                    think_watch_common::resources::read_response(resp, 64 * 1024),
+                )
+                .await;
                 return Probe::Verdict(Verdict::Ok(candidate));
             }
             Ok(Err(GatewayError::UpstreamAuthError { status, message })) => {

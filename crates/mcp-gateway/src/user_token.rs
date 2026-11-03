@@ -825,7 +825,10 @@ impl UserTokenResolver {
         };
 
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let bytes = think_watch_common::resources::read_response(resp, 64 * 1024)
+            .await
+            .map_err(|e| OAuthRefreshFailure::Transient(format!("token response read: {e}")))?;
+        let text = String::from_utf8_lossy(&bytes);
         if !status.is_success() {
             // Only treat actually-irrecoverable grant rejections as
             // Permanent — the original "any 4xx → Permanent" rule

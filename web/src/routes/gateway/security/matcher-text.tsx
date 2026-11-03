@@ -17,14 +17,6 @@ function fill(template: string, parts: Record<string, ReactNode>): ReactNode {
   });
 }
 
-/** Joins nodes the way the language joins a list (`a, b or c` / `a、b或c`). */
-function joined(lang: string, items: ReactNode[], type: 'conjunction' | 'disjunction'): ReactNode {
-  const parts = new Intl.ListFormat(lang, { type }).formatToParts(items.map((_, i) => String(i)));
-  return parts.map((p, i) =>
-    p.type === 'element' ? <Fragment key={i}>{items[Number(p.value)]}</Fragment> : p.value,
-  );
-}
-
 /** A literal from a rule, in code type. Spaces are kept: ` dan ` differs from `dan`. */
 export function Code({ children, className }: { children: ReactNode; className?: string }) {
   return (
@@ -53,62 +45,29 @@ export function Codepoints({ ranges }: { ranges: string[] }) {
   );
 }
 
-/** What a rule matches, as one sentence. */
+/**
+ * A built-in rule's description as the server writes it: text in backticks
+ * is code, shown in code type without the backticks.
+ */
+export function About({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('`').map((piece, i) =>
+        i % 2 === 1 ? <Code key={i}>{piece}</Code> : <Fragment key={i}>{piece}</Fragment>,
+      )}
+    </>
+  );
+}
+
+/**
+ * What a rule matches, as one sentence: a custom rule's pattern, a content
+ * rule's code points. A built-in redaction rule is described by the server
+ * (`about`, see {@link About}); a check implemented in code, or a matcher
+ * this console does not know, reads as a built-in check.
+ */
 export function MatcherText({ m }: { m: Matcher }) {
-  const { t, i18n } = useTranslation();
-  const lang = i18n.language;
+  const { t } = useTranslation();
   switch (m.kind) {
-    case 'prefix':
-      return fill(t('contentSecurity.matcher.prefix', RAW), {
-        prefix: <Code>{m.prefix}</Code>,
-        n: m.min_tail,
-      });
-    case 'openai-legacy':
-      return fill(t('contentSecurity.matcher.openaiLegacy', RAW), {
-        prefix: <Code>sk-</Code>,
-        n: m.min_len,
-      });
-    case 'pem':
-      return fill(t('contentSecurity.matcher.pem', RAW), {
-        begin: <Code>-----BEGIN … PRIVATE KEY-----</Code>,
-      });
-    case 'jwt':
-      return fill(t('contentSecurity.matcher.jwt', RAW), { alg: <Code>"alg"</Code> });
-    case 'conn-string':
-      return fill(t('contentSecurity.matcher.connString', RAW), {
-        uri: <Code>{t('contentSecurity.matcher.connStringShape')}</Code>,
-      });
-    case 'private-ip':
-      return fill(t('contentSecurity.matcher.privateIp', RAW), {
-        ranges: joined(
-          lang,
-          ['10.', '172.16–31.', '192.168.'].map((p) => <Code key={p}>{p}</Code>),
-          'disjunction',
-        ),
-        loopback: <Code>127.0.0.1</Code>,
-      });
-    case 'domain-suffix':
-      return fill(t('contentSecurity.matcher.domainSuffix', RAW), {
-        suffixes: joined(
-          lang,
-          m.suffixes.map((s) => <Code key={s}>{s}</Code>),
-          'disjunction',
-        ),
-      });
-    case 'cn-resident-id':
-      return fill(t('contentSecurity.matcher.cnResidentId', RAW), { year: m.born_since });
-    case 'bank-card':
-      return fill(t('contentSecurity.matcher.bankCard', RAW), {
-        networks: joined(
-          lang,
-          m.networks.map((n) => t(`contentSecurity.cardNetwork.${n.name}`, { defaultValue: n.name })),
-          'disjunction',
-        ),
-      });
-    case 'email':
-      return fill(t('contentSecurity.matcher.email', RAW), { example: <Code>name@example.com</Code> });
-    case 'cn-mobile-phone':
-      return t('contentSecurity.matcher.cnMobilePhone');
     case 'regex':
       return fill(
         t(m.case_sensitive ? 'contentSecurity.matcher.regexCaseSensitive' : 'contentSecurity.matcher.regex', RAW),
@@ -126,11 +85,7 @@ export function MatcherText({ m }: { m: Matcher }) {
       return fill(t('contentSecurity.matcher.codepoints', RAW), {
         ranges: <Codepoints ranges={m.ranges} />,
       });
-    case 'builtin':
-      // A check implemented in code: say what it looks for, not how.
-      return t(`contentSecurity.check.${m.check}`, { defaultValue: t('contentSecurity.matcher.other') });
     default:
-      // A kind this console does not know yet.
       return t('contentSecurity.matcher.other');
   }
 }

@@ -441,12 +441,19 @@ async fn try_discover_and_persist_tools_with_auth(
         .unwrap_or("")
         .to_lowercase();
 
-    let json: serde_json::Value = if content_type.contains("text/event-stream") {
-        let text = resp.text().await?;
-        parse_sse_json(&text)?
-    } else {
-        resp.json().await?
-    };
+    let memory = think_watch_common::resources::read_response(
+        resp,
+        think_watch_common::resources::policy().max_body_bytes,
+    )
+    .await?;
+    let json: serde_json::Value = think_watch_common::resources::cpu(memory.len(), || {
+        if content_type.contains("text/event-stream") {
+            parse_sse_json(&String::from_utf8_lossy(&memory))
+        } else {
+            serde_json::from_slice(&memory).map_err(Into::into)
+        }
+    })
+    .await?;
     // Strict: require a `result` field so malformed responses are
     // caught instead of silently treated as success.
     let result = json
@@ -569,12 +576,19 @@ pub async fn discover_user_tools(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
-    let json: serde_json::Value = if content_type.contains("text/event-stream") {
-        let text = resp.text().await?;
-        parse_sse_json(&text)?
-    } else {
-        resp.json().await?
-    };
+    let memory = think_watch_common::resources::read_response(
+        resp,
+        think_watch_common::resources::policy().max_body_bytes,
+    )
+    .await?;
+    let json: serde_json::Value = think_watch_common::resources::cpu(memory.len(), || {
+        if content_type.contains("text/event-stream") {
+            parse_sse_json(&String::from_utf8_lossy(&memory))
+        } else {
+            serde_json::from_slice(&memory).map_err(Into::into)
+        }
+    })
+    .await?;
     let result = json
         .get("result")
         .ok_or_else(|| anyhow::anyhow!("tools/list response missing `result` field"))?

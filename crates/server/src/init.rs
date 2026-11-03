@@ -64,11 +64,16 @@ pub async fn init_state(
         think_watch_auth::jwt::JwtManager::leeway_from_env(),
     ));
 
+    // No saved secrets yet: the providers are loaded with the router
+    // (`app::install_providers`), which recompiles these with theirs.
+    let saved_secrets = Arc::new(arc_swap::ArcSwap::from_pointee(
+        think_watch_common::guard_policy::saved::SavedSecrets::default(),
+    ));
     let guards = Arc::new(arc_swap::ArcSwap::from_pointee(
-        app::load_guards(&dynamic_config).await,
+        app::load_guards(&dynamic_config, &saved_secrets.load()).await,
     ));
     let blob_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(
-        app::load_blob_redactor(&dynamic_config).await,
+        app::load_blob_redactor(&dynamic_config, &saved_secrets.load()).await,
     ));
 
     let init_http_secs = dynamic_config.perf_http_client_secs().await as u64;
@@ -145,6 +150,7 @@ pub async fn init_state(
         cost_tracker,
         blob_store,
         blob_redactor,
+        saved_secrets,
     };
 
     Ok(state)
@@ -262,6 +268,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     let dc_clone = state.dynamic_config.clone();
     let guards_clone = state.guards.clone();
     let blob_clone = state.blob_redactor.clone();
+    let saved_clone = state.saved_secrets.clone();
     let http_clone = state.http_client.clone();
     let pool_clone = state.mcp_pool.clone();
     // Wrap in `supervise()` so a panic inside the reload (e.g.
@@ -296,12 +303,14 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                 tracing::warn!("Failed to reload dynamic config: {e}");
                 return;
             }
-            guards.store(Arc::new(app::load_guards(dc).await));
+            guards.store(Arc::new(app::load_guards(dc, &saved_clone.load()).await));
             // Same policy, swapped alongside — the MCP gateway's at-rest
             // redactor must stay in lockstep with the AI gateway's, or
             // operators get the surprise "I added a rule in the console
             // and one of two redaction surfaces still leaks it".
-            blob.store(Arc::new(app::load_blob_redactor(dc).await));
+            blob.store(Arc::new(
+                app::load_blob_redactor(dc, &saved_clone.load()).await,
+            ));
             let http_secs = dc.perf_http_client_secs().await as u64;
             match reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(http_secs))
@@ -393,16 +402,14 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                 Ok(msg) if msg.channel == app::GATEWAY_ROUTER_CHANGED_CHANNEL => {
                     // Build a new router locally; don't re-publish so a
                     // single CRUD doesn't fan out into a publish storm.
-                    let mut new_router = think_watch_gateway::router::ModelRouter::new();
-                    if let Err(e) =
-                        app::load_providers_into_router(&router_state, &mut new_router).await
-                    {
+                    // The providers' credentials come along, and the
+                    // guards are recompiled when they changed.
+                    if let Err(e) = app::install_providers(&router_state).await {
                         tracing::error!(
                             "Failed to rebuild gateway router after pub/sub notify: {e}"
                         );
                         continue;
                     }
-                    router_state.gateway_router.store(Arc::new(new_router));
                     tracing::info!("Gateway router hot-reloaded via pub/sub");
                 }
                 Ok(_) => {}
@@ -410,14 +417,10 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                     tracing::warn!(
                         "gateway_router:changed subscriber lagged by {n}; reloading anyway"
                     );
-                    let mut new_router = think_watch_gateway::router::ModelRouter::new();
-                    if let Err(e) =
-                        app::load_providers_into_router(&router_state, &mut new_router).await
-                    {
+                    if let Err(e) = app::install_providers(&router_state).await {
                         tracing::error!("Failed to rebuild gateway router on lag: {e}");
                         continue;
                     }
-                    router_state.gateway_router.store(Arc::new(new_router));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     tracing::info!(

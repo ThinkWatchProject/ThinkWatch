@@ -50,6 +50,29 @@ export interface GuardEventDetail {
   count?: number;
   values?: number;
   tool?: string;
+  /**
+   * Redaction, the rule that recognises saved keys by value: whose key the
+   * request carried (`{ kind: 'upstream-key', name: <provider> }`). Never
+   * any part of the value.
+   */
+  sources?: SavedSource[];
+}
+
+/** Where a saved secret came from. */
+export interface SavedSource {
+  kind: string;
+  name: string;
+}
+
+/**
+ * The saved secrets an event's request carried, named by where they came
+ * from: "API key of provider DeepSeek". A kind this console does not know
+ * yet shows its name alone.
+ */
+export function sourcesOf(t: TFunction, d: GuardEventDetail): string[] {
+  return (d.sources ?? []).map((s) =>
+    t(`contentSecurity.log.source.${s.kind}`, { name: s.name, defaultValue: s.name }),
+  );
 }
 
 /** The guard an event belongs to. */

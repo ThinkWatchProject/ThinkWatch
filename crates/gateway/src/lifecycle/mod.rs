@@ -34,6 +34,7 @@ use tw_dialect::ir::Dialect;
 
 use crate::guards::Guards;
 use crate::proxy::generate::{Wire, priced, tokens};
+use crate::proxy::min_speed::{CHECK_EVERY, MinSpeed, SpeedWatch};
 use crate::proxy::retry::{KEEP_ALIVE, KEEP_ALIVE_FRAME};
 use crate::proxy::shaper::{StreamShaper, rewrite_model};
 use crate::proxy::{
@@ -50,6 +51,8 @@ pub(crate) struct ChatCompletionSurface;
 
 /// A whole answer, in the caller's format.
 pub struct Completed {
+    /// Retain the upstream byte reservation through conversion and audit.
+    pub memory: Option<Bytes>,
     /// As the upstream answered, in the caller's format, with redaction
     /// placeholders still in place and the answer's text not yet through
     /// the content rules — the form the cache stores, so a later caller
@@ -95,6 +98,7 @@ pub struct ChatStreamCaptured {
 /// attempt and by the streaming tail task. Owned rather than borrowed so
 /// the detached tail needs no `'static` borrow.
 pub(crate) struct ChatRequestSnapshot {
+    pub memory: think_watch_common::resources::SharedStreamBudget,
     pub identity: GatewayRequestIdentity,
     /// The one id every audit row and gateway log carries for this request.
     pub trace_id: String,
@@ -107,7 +111,7 @@ pub(crate) struct ChatRequestSnapshot {
     /// stripped anything, before outbound redaction: the audit row is the
     /// record of what the user wrote. Body capture applies its own
     /// redaction toggle on top.
-    pub request_for_audit: Vec<u8>,
+    pub request_for_audit: Bytes,
     /// Where the cache keeps this request's answer. `None` when the
     /// request must not be cached.
     pub cache_fingerprint: Option<Vec<u8>>,
@@ -141,6 +145,9 @@ pub(crate) struct ChatPickedRoute {
     /// The route's capacity caps: its token cap counts the answer's
     /// tokens in `record_usage`.
     pub caps: crate::route_caps::RouteCaps,
+    /// The slowest generation the provider's streams may keep up (see
+    /// `proxy::min_speed`).
+    pub min_speed: Option<MinSpeed>,
 }
 
 /// Everything the post-invoke hooks read. Built once before the upstream
@@ -188,6 +195,9 @@ pub(crate) struct Sent {
     /// The attempt under way sent a different reasoning effort than the
     /// caller asked (see `proxy::effort`).
     pub effort: Option<crate::proxy::effort::EffortChange>,
+    /// The stream was cut for generating too slowly, at this many tokens
+    /// per second (see `proxy::min_speed`).
+    pub too_slow: Option<u32>,
 }
 
 /// Build the streaming pump: forward the upstream's bytes to the caller —
@@ -251,7 +261,9 @@ pub(crate) fn build_chat_pump(
     guards: &Guards,
     request: &ChatRequestSnapshot,
     provider: &str,
+    min_speed: Option<MinSpeed>,
 ) -> (axum::response::Response, StreamTail) {
+    let memory = request.memory.clone();
     let readers = Arc::new(Mutex::new(Readers::default()));
     let readers_for_tail = Arc::clone(&readers);
 
@@ -288,6 +300,7 @@ pub(crate) fn build_chat_pump(
         last_sent: std::time::Instant::now(),
         waiting: false,
         effort: None,
+        too_slow: None,
     }));
     // Gemini clients get no keep-alive comments: the google-genai SDK reads
     // every SSE line as JSON.
@@ -318,7 +331,7 @@ pub(crate) fn build_chat_pump(
             }
             let sent_at = std::time::Instant::now();
             if let Ok(mut s) = sent.lock() {
-                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at, waiting: false, effort: None };
+                *s = Sent { retries: resend.budget.retries(), last_sent: sent_at, waiting: false, effort: None, too_slow: None };
             }
             // What an attempt that failed had read is not this one's: its
             // usage is not billed, its error not the request's.
@@ -392,16 +405,49 @@ pub(crate) fn build_chat_pump(
             // While a failure could still be sent again, the upstream's
             // opening is held back until its first content (see `Opening`).
             let mut hold = resend.budget.open().then(|| Opening::new(wire.dialect));
+            // The provider's slowest generation, judged once a second from
+            // the first token on (see `proxy::min_speed`).
+            let mut speed = min_speed.map(|m| SpeedWatch::new(m, wire.dialect));
+            let mut judge = tokio::time::interval(CHECK_EVERY);
+            judge.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut source = upstream.bytes_stream();
             loop {
                 let next = tokio::select! {
-                    item = source.next() => Some(item),
-                    _ = tokio::time::sleep_until(quiet_since + KEEP_ALIVE), if hold.is_some() && keep_alive => None,
+                    item = source.next() => Pulled::Item(item),
+                    _ = tokio::time::sleep_until(quiet_since + KEEP_ALIVE), if hold.is_some() && keep_alive => Pulled::KeepAlive,
+                    _ = judge.tick(), if speed.as_ref().is_some_and(SpeedWatch::started) => Pulled::Judge,
                 };
-                let Some(item) = next else {
-                    quiet_since = tokio::time::Instant::now();
-                    yield Ok(Bytes::from_static(KEEP_ALIVE_FRAME));
-                    continue;
+                let item = match next {
+                    Pulled::Item(item) => item,
+                    Pulled::KeepAlive => {
+                        quiet_since = tokio::time::Instant::now();
+                        yield Ok(Bytes::from_static(KEEP_ALIVE_FRAME));
+                        continue;
+                    }
+                    Pulled::Judge => {
+                        let Some((rate, min)) = speed.as_mut().and_then(|s| {
+                            Some((s.too_slow(std::time::Instant::now())?, s.min()))
+                        }) else {
+                            continue;
+                        };
+                        // Too slow: the upstream's connection goes now, not once
+                        // the client has taken the error, which is said in its
+                        // own format.
+                        drop(source);
+                        let err = too_slow(&provider, rate, min);
+                        let mut out = shaper.process(&error_frame(client, err.status_code(), &err.to_string()));
+                        out.extend(shaper.finish());
+                        if let Ok(mut s) = sent.lock() {
+                            s.too_slow = Some(rate);
+                        }
+                        tell(&mut done_tx, StreamOutcome::UpstreamError {
+                            error_type: err.error_tag().to_string(),
+                            message: err.to_string(),
+                            status_code: err.status_code(),
+                        });
+                        yield Ok(Bytes::from(out));
+                        return;
+                    }
                 };
                 let Some(item) = item else {
                     // The upstream's stream ended. One whose opening is still
@@ -418,7 +464,7 @@ pub(crate) fn build_chat_pump(
                             backoff = Some(wait);
                             continue 'attempt;
                         }
-                        match deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client) {
+                        match think_watch_common::resources::cpu(0, || deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client)).await {
                             Ok(out) => {
                                 if !out.is_empty() {
                                     if last_frame.is_in(&out) {
@@ -448,13 +494,27 @@ pub(crate) fn build_chat_pump(
                 };
                 match item {
                     Ok(chunk) => {
-                        let (sealed, said) = match readers.lock() {
+                        if !memory.lock().unwrap_or_else(|e| e.into_inner()).append(chunk.len()) {
+                            metrics::counter!("gateway_memory_busy_total").increment(1);
+                            let err = GatewayError::rate_limited("gateway_memory", 1);
+                            let out = cut(&shaper, convert.as_mut(), client, &[], &err);
+                            tell(&mut done_tx, StreamOutcome::UpstreamError {
+                                error_type: err.error_tag().into(),
+                                message: err.to_string(), status_code: err.status_code(),
+                            });
+                            yield Ok(Bytes::from(out));
+                            return;
+                        }
+                        if let Some(s) = speed.as_mut() {
+                            s.feed(&chunk, std::time::Instant::now());
+                        }
+                        let (sealed, said) = think_watch_common::resources::cpu(chunk.len(), || match readers.lock() {
                             Ok(mut r) => {
                                 r.feed(&chunk);
                                 (r.sealed_refusal(), r.reported(false))
                             }
                             Err(_) => (None, None),
-                        };
+                        }).await;
                         // The upstream cannot read the conversation's encrypted
                         // history: the client is told why in plain words, in
                         // place of the upstream's own error.
@@ -493,7 +553,7 @@ pub(crate) fn build_chat_pump(
                                 hold.take().map(Opening::release).unwrap_or_default()
                             }
                         };
-                        match deliver(&chunk, &mut convert, &mut shaper, inspector.as_mut(), client) {
+                        match think_watch_common::resources::cpu(chunk.len(), || deliver(&chunk, &mut convert, &mut shaper, inspector.as_mut(), client)).await {
                             Ok(out) => {
                                 if !out.is_empty() {
                                     if last_frame.is_in(&out) {
@@ -524,7 +584,7 @@ pub(crate) fn build_chat_pump(
                                 continue 'attempt;
                             }
                             // The opening it sent goes out before the error.
-                            match deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client) {
+                            match think_watch_common::resources::cpu(0, || deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client)).await {
                                 Ok(out) => {
                                     if !out.is_empty() {
                                         yield Ok(Bytes::from(out));
@@ -691,6 +751,7 @@ pub(crate) fn build_chat_pump(
             last_sent: started_at,
             waiting: false,
             effort: None,
+            too_slow: None,
         });
         let invoked = Invoked {
             client_ip: identity.ip_address.clone(),
@@ -1108,6 +1169,7 @@ fn resending(
             last_sent: std::time::Instant::now(),
             waiting: true,
             effort: None,
+            too_slow: None,
         };
     }
     tracing::info!(
@@ -1221,6 +1283,37 @@ impl Opening {
     /// What was held back, to go out.
     fn release(self) -> Vec<u8> {
         self.held
+    }
+}
+
+/// What the pump waits on next: a piece of the upstream's stream (or its
+/// end), a keep-alive due, or a second to judge the stream's speed.
+enum Pulled<T> {
+    Item(T),
+    KeepAlive,
+    Judge,
+}
+
+/// A stream cut for generating at `rate` tokens per second, below `min`:
+/// the error, and the log line saying so.
+fn too_slow(provider: &str, rate: u32, min: MinSpeed) -> GatewayError {
+    tracing::warn!(
+        provider,
+        tokens_per_sec = rate,
+        min_tokens_per_sec = min.tokens_per_sec,
+        window_secs = min.window_secs,
+        "upstream generated too slowly, cutting the stream"
+    );
+    metrics::counter!(
+        "gateway_provider_too_slow_total",
+        "provider" => crate::metrics_labels::normalize_provider_label(provider),
+    )
+    .increment(1);
+    GatewayError::UpstreamTooSlow {
+        provider: provider.to_string(),
+        rate,
+        min: min.tokens_per_sec,
+        secs: min.window_secs,
     }
 }
 
@@ -1435,6 +1528,7 @@ impl Surface for ChatCompletionSurface {
         };
         if let Some(body) = body {
             let cached = crate::cache::Cached {
+                memory: Bytes::new(),
                 body: body.clone(),
                 prompt_tokens,
                 completion_tokens,
@@ -1533,12 +1627,15 @@ impl Surface for ChatCompletionSurface {
             deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
             with_usage_detail(
-                effort_detail(
-                    retried_detail(
-                        pinned_detail(error_detail, deps.route.pinned),
-                        deps.route.sel_record.retries,
+                speed_detail(
+                    effort_detail(
+                        retried_detail(
+                            pinned_detail(error_detail, deps.route.pinned),
+                            deps.route.sel_record.retries,
+                        ),
+                        deps.route.sel_record.effort,
                     ),
-                    deps.route.sel_record.effort,
+                    deps.route.sel_record.too_slow,
                 ),
                 &usage,
                 usage_estimated(&invoked.view),
@@ -1620,6 +1717,24 @@ fn effort_detail(
         _ => serde_json::Map::new(),
     };
     d.insert("effort".into(), effort.detail());
+    Some(serde_json::Value::Object(d))
+}
+
+/// The audit detail, with `"tokens_per_sec"` when the stream was cut for
+/// generating too slowly (see `proxy::min_speed`): its speed over the
+/// window at the cut. A failed request otherwise records no speed.
+fn speed_detail(
+    detail: Option<serde_json::Value>,
+    too_slow: Option<u32>,
+) -> Option<serde_json::Value> {
+    let Some(rate) = too_slow else {
+        return detail;
+    };
+    let mut d = match detail {
+        Some(serde_json::Value::Object(d)) => d,
+        _ => serde_json::Map::new(),
+    };
+    d.insert("tokens_per_sec".into(), rate.into());
     Some(serde_json::Value::Object(d))
 }
 
@@ -1852,6 +1967,7 @@ mod tests {
             last_sent: std::time::Instant::now(),
             waiting: false,
             effort: None,
+            too_slow: None,
         });
         resending(
             "up",
@@ -2316,11 +2432,14 @@ mod tests {
             ContentAction, ContentMatch, ContentPolicy, ContentScope, CustomContentRule, Mode,
             RedactPolicy,
         };
-        let redaction = crate::redaction::Redaction::new(&RedactPolicy {
-            mode: Mode::Enforce,
-            enable: vec!["email".into()],
-            ..Default::default()
-        });
+        let redaction = crate::redaction::Redaction::new(
+            &RedactPolicy {
+                mode: Mode::Enforce,
+                enable: vec!["email".into()],
+                ..Default::default()
+            },
+            &Default::default(),
+        );
         let request = serde_json::json!({"messages": [
             {"role": "user", "content": "my email is alice@corp.example.org"}
         ]})

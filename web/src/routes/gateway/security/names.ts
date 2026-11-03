@@ -1,9 +1,19 @@
 import type { TFunction } from 'i18next';
-import type { Guard, GuardMode, RuleAction, RuleScope, SecurityRuleView } from '@/lib/security-types';
+import type {
+  Guard,
+  GuardDetail,
+  GuardMode,
+  RuleAction,
+  RuleScope,
+  SecurityKindView,
+  SecurityRuleView,
+} from '@/lib/security-types';
 
-// Names on the security page. Built-in rules are looked up by id; a rule
-// the server ships before the console has a name for it falls back to the
-// server's English. A custom rule's id is the name its author gave it.
+// Names on the security page. A built-in rule's name, reason and
+// description, and each group's name, come with the rule view in both
+// languages (thinkwatch-core writes them once for both products); the
+// console keeps no table of its own. A custom rule's id is the name its
+// author gave it.
 
 export function guardName(t: TFunction, guard: Guard): string {
   return t(`contentSecurity.guard.${guard}.name`);
@@ -19,45 +29,55 @@ export function scopeName(t: TFunction, scope: RuleScope): string {
   return t(`contentSecurity.scope.${scope}`);
 }
 
+/** Whether the console is in Chinese: rule text comes from the server in both languages. */
+function zh(lang: string): boolean {
+  return lang.startsWith('zh');
+}
+
+/** The Chinese text in Chinese when there is one, else the English. */
+function pick(lang: string, en: string | undefined, cn: string | undefined): string {
+  return (zh(lang) && cn ? cn : en) ?? '';
+}
+
+/** A rule's name as the view gives it. A custom rule's id is the name its author gave it. */
+export function viewName(lang: string, r: SecurityRuleView): string {
+  if (r.custom) return r.id;
+  return pick(lang, r.name, r.name_zh) || r.id;
+}
+
+/**
+ * A rule's name from its id, for a log row or a trial hit: looked up in the
+ * guard's view. A rule the view does not list (since removed) shows
+ * `fallback`, or its id.
+ */
 export function ruleName(
-  t: TFunction,
-  guard: Guard,
+  lang: string,
+  detail: GuardDetail | undefined,
   id: string,
   custom: boolean,
   fallback?: string,
 ): string {
   if (custom) return id;
-  const defaultValue = fallback ?? id;
-  switch (guard) {
-    case 'redact':
-      return t(`contentSecurity.redactRule.${id}`, { defaultValue });
-    case 'inspect_tools':
-      return t(`contentSecurity.toolRule.${id}.name`, { defaultValue });
-    case 'content':
-      return t(`contentSecurity.contentRule.${id}`, { defaultValue });
-  }
-}
-
-export function viewName(t: TFunction, guard: Guard, r: SecurityRuleView): string {
-  return ruleName(t, guard, r.id, r.custom, r.name);
+  const r = detail?.rules.find((r) => !r.custom && r.id === id);
+  return r ? viewName(lang, r) : (fallback ?? id);
 }
 
 /** Why a built-in rule is worth a look. Empty for rules that carry no reason. */
-export function ruleWhy(t: TFunction, guard: Guard, r: SecurityRuleView): string {
-  if (r.custom || !r.why) return '';
-  switch (guard) {
-    case 'inspect_tools':
-      return t(`contentSecurity.toolRule.${r.id}.why`, { defaultValue: r.why });
-    case 'content':
-      return t(`contentSecurity.contentWhy.${r.id}`, { defaultValue: r.why });
-    default:
-      return r.why;
-  }
+export function ruleWhy(lang: string, r: SecurityRuleView): string {
+  if (r.custom) return '';
+  return pick(lang, r.why, r.why_zh);
 }
 
-/** A rule group's heading. */
-export function kindName(t: TFunction, kind: string): string {
-  return t(`contentSecurity.kind.${kind}`, { defaultValue: kind });
+/** What a built-in redaction rule finds, as a sentence; backticks mark code. Empty elsewhere. */
+export function ruleAbout(lang: string, r: SecurityRuleView): string {
+  if (r.custom) return '';
+  return pick(lang, r.about, r.about_zh);
+}
+
+/** A rule group's heading, from the guard's view. */
+export function kindName(lang: string, kinds: SecurityKindView[] | undefined, slug: string): string {
+  const k = kinds?.find((k) => k.slug === slug);
+  return k ? pick(lang, k.name, k.name_zh) : slug;
 }
 
 export function actionName(t: TFunction, action: RuleAction): string {

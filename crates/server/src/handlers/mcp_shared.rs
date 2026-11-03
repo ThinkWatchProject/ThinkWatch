@@ -111,35 +111,33 @@ pub async fn probe_mcp_endpoint(
         .unwrap_or("")
         .to_lowercase();
 
-    let json: serde_json::Value = if content_type.contains("text/event-stream") {
-        match resp.text().await {
-            Ok(text) => crate::mcp_runtime::parse_sse_json(&text).unwrap_or_else(|e| {
-                tracing::warn!(
-                    endpoint = %endpoint_url,
-                    error = %e,
-                    "MCP probe: failed to parse SSE JSON response"
-                );
-                serde_json::Value::Null
-            }),
-            Err(e) => {
-                tracing::warn!(
-                    endpoint = %endpoint_url,
-                    error = %e,
-                    "MCP probe: failed to read SSE response body"
-                );
-                serde_json::Value::Null
-            }
+    let memory = match think_watch_common::resources::read_response(
+        resp,
+        think_watch_common::resources::policy().max_body_bytes,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return McpProbeOutcome {
+                success: false,
+                requires_auth: false,
+                message: format!("MCP response could not be read: {error}"),
+                latency_ms,
+                tools: vec![],
+            };
         }
-    } else {
-        resp.json().await.unwrap_or_else(|e| {
-            tracing::warn!(
-                endpoint = %endpoint_url,
-                error = %e,
-                "MCP probe: failed to parse JSON response"
-            );
+    };
+    let json: serde_json::Value = think_watch_common::resources::cpu(memory.len(), || {
+        if content_type.contains("text/event-stream") {
+            crate::mcp_runtime::parse_sse_json(&String::from_utf8_lossy(&memory))
+        } else {
+            serde_json::from_slice(&memory).map_err(Into::into)
+        }.unwrap_or_else(|e| {
+            tracing::warn!(endpoint = %endpoint_url, error = %e, "MCP probe: failed to parse response");
             serde_json::Value::Null
         })
-    };
+    }).await;
 
     let result_field = json.get("result");
     let tools: Vec<McpToolSummary> = result_field

@@ -20,6 +20,8 @@ use std::sync::Arc;
 use tw_guard::policy::RedactPolicy;
 use tw_guard::redact::rules::RuleSet;
 
+use crate::guard_policy::saved::SavedSecrets;
+
 /// Replace every match in `input` with `{{REDACTED_<rule>}}` — the
 /// built-in rule's id or the custom rule's name. Nothing is kept to restore
 /// them: the result is write-only audit data.
@@ -104,7 +106,7 @@ pub struct BlobRedactor {
 impl Default for BlobRedactor {
     /// The factory policy's rules.
     fn default() -> Self {
-        Self::from_policy(&RedactPolicy::default())
+        Self::from_policy(&RedactPolicy::default(), &SavedSecrets::default())
     }
 }
 
@@ -115,9 +117,14 @@ impl std::fmt::Debug for BlobRedactor {
 }
 
 impl BlobRedactor {
-    pub fn from_policy(policy: &RedactPolicy) -> Self {
+    /// The policy's rules, and the providers' credentials recognised by
+    /// value.
+    pub fn from_policy(policy: &RedactPolicy, saved: &SavedSecrets) -> Self {
         Self {
-            rules: Arc::new(crate::guard_policy::redact_rules(policy)),
+            rules: Arc::new(crate::guard_policy::saved::with_saved(
+                crate::guard_policy::redact_rules(policy),
+                saved,
+            )),
         }
     }
 
@@ -220,22 +227,25 @@ mod tests {
             "key {{REDACTED_anthropic-api-key}}"
         );
 
-        let r = BlobRedactor::from_policy(&RedactPolicy {
-            disable: tw_guard::redact::rules::BUILTINS
-                .iter()
-                .map(|b| b.id.to_string())
-                .collect(),
-            custom: vec![CustomRedactRule {
-                name: "project".into(),
-                pattern: r"PRJ-\d{6}".into(),
-                matching: tw_guard::policy::ContentMatch::Regex,
-                case_sensitive: true,
-                label: None,
-                action: Default::default(),
-                disabled: false,
-            }],
-            ..Default::default()
-        });
+        let r = BlobRedactor::from_policy(
+            &RedactPolicy {
+                disable: tw_guard::redact::rules::BUILTINS
+                    .iter()
+                    .map(|b| b.id.to_string())
+                    .collect(),
+                custom: vec![CustomRedactRule {
+                    name: "project".into(),
+                    pattern: r"PRJ-\d{6}".into(),
+                    matching: tw_guard::policy::ContentMatch::Regex,
+                    case_sensitive: true,
+                    label: None,
+                    action: Default::default(),
+                    disabled: false,
+                }],
+                ..Default::default()
+            },
+            &SavedSecrets::default(),
+        );
         assert_eq!(
             r.redact_blob(&format!("{key} PRJ-123456")),
             format!("{key} {{{{REDACTED_project}}}}")

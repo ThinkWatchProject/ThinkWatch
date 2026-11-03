@@ -105,16 +105,26 @@ impl McpResponseCache {
     ) -> Option<JsonRpcResponse> {
         let scope_label = scope_metric_label(caller);
         let key = Self::cache_key(server_id, caller, request);
-        let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
+        let cached = think_watch_common::resources::cached_body(&self.redis, &key).await;
         let hit = cached.is_some();
-        let parsed = cached.and_then(|json| {
-            serde_json::from_str::<JsonRpcResponse>(&json)
-                .map_err(|e| {
-                    tracing::warn!("Failed to deserialize cached MCP response: {e}");
-                    e
-                })
-                .ok()
-        });
+        let parsed = if let Some(json) = cached {
+            let memory = json.clone();
+            think_watch_common::resources::cpu(json.len(), || {
+                serde_json::from_slice::<JsonRpcResponse>(&json)
+                    .map_err(|e| {
+                        tracing::warn!("Failed to deserialize cached MCP response: {e}");
+                        e
+                    })
+                    .ok()
+                    .map(|mut response| {
+                        response.memory = Some(memory);
+                        response
+                    })
+            })
+            .await
+        } else {
+            None
+        };
         // Three counters per lookup, each labelled by scope so the
         // dashboard can break hit-rate down by global vs per-caller:
         //   * mcp_cache_total        — denominator

@@ -68,6 +68,9 @@ pub struct Upstream {
     /// The models this upstream refused the cache breakpoints a
     /// conversion adds for (see `proxy::cache_marks`).
     pub(crate) cache_marks: crate::proxy::cache_marks::Refused,
+    /// The slowest generation a stream from this upstream may keep up
+    /// (see `proxy::min_speed`). `None` ⇒ not measured.
+    pub min_speed: Option<crate::proxy::min_speed::MinSpeed>,
 }
 
 impl Upstream {
@@ -79,7 +82,14 @@ impl Upstream {
             shape,
             label: label.to_string(),
             cache_marks: Default::default(),
+            min_speed: None,
         }
+    }
+
+    /// The same upstream, with streams cut below `min_speed`.
+    pub fn with_min_speed(mut self, min_speed: Option<crate::proxy::min_speed::MinSpeed>) -> Self {
+        self.min_speed = min_speed;
+        self
     }
 
     /// Is this the vendor's own endpoint rather than a relay?
@@ -294,7 +304,10 @@ async fn check_status(
     }
     if !status.is_success() {
         let retry_after = retry_after(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
+        let body = think_watch_common::resources::read_response(resp, 64 * 1024)
+            .await
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|error| error.to_string());
         tracing::warn!(provider = label, status = %status, body = %body, "upstream returned non-2xx");
         const CLIENT_MAX: usize = 512;
         let shown = if body.len() > CLIENT_MAX {

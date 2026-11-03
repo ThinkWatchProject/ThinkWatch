@@ -23,7 +23,7 @@ mod streaming;
 use jsonrpc::ok_response;
 pub use jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
-    METHOD_NOT_FOUND, NEEDS_USER_CREDENTIALS, err_response,
+    METHOD_NOT_FOUND, NEEDS_USER_CREDENTIALS, RESOURCE_BUSY, err_response,
 };
 use streaming::build_replay_payload;
 pub(crate) use streaming::pick_response_envelope;
@@ -794,6 +794,7 @@ impl McpProxy {
                     ),
                 };
                 return HandleOutcome::Buffered(JsonRpcResponse {
+                    memory: None,
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
                     result: None,
@@ -824,6 +825,7 @@ impl McpProxy {
                     CredentialOwner::AdminShared => "/admin/mcp/servers",
                 };
                 return HandleOutcome::Buffered(JsonRpcResponse {
+                    memory: None,
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
                     result: None,
@@ -882,6 +884,7 @@ impl McpProxy {
         // to `run_post_invoke` per branch.
         let logged_arguments = params.get("arguments").cloned();
         let mut deps = crate::lifecycle::McpPostInvokeDeps {
+            stream_memory: think_watch_common::resources::stream_budget(),
             proxy: self.clone(),
             server_id,
             server_name: server_name.clone(),
@@ -958,6 +961,8 @@ impl McpProxy {
                         self.build_mcp_pump(
                             resp,
                             crate::proxy::streaming::PumpContext {
+                                memory: deps.stream_memory.clone(),
+                                request_id: request.id.clone(),
                                 identity: auth_identity,
                                 trace_id: auth_trace_id,
                                 started_at: auth_started_at,
@@ -968,13 +973,9 @@ impl McpProxy {
                         )
                     } else {
                         // Upstream chose application/json — buffer it.
-                        let response = match resp.json::<JsonRpcResponse>().await {
+                        let response = match crate::pool::read_json_response(resp).await {
                             Ok(r) => r,
-                            Err(e) => err_response(
-                                request.id.clone(),
-                                INTERNAL_ERROR,
-                                format!("Upstream server error: parse failed: {e}"),
-                            ),
+                            Err(e) => crate::pool::error_response(request.id.clone(), &e),
                         };
                         Invocation::Buffered(Invoked {
                             identity: auth_identity,
@@ -993,11 +994,7 @@ impl McpProxy {
                         error = %e,
                         "streaming upstream tools/call failed"
                     );
-                    let response = err_response(
-                        request.id.clone(),
-                        INTERNAL_ERROR,
-                        format!("Upstream server error: {e}"),
-                    );
+                    let response = crate::pool::error_response(request.id.clone(), &e);
                     Invocation::Buffered(Invoked {
                         identity: auth_identity,
                         trace_id: auth_trace_id,
@@ -1049,11 +1046,7 @@ impl McpProxy {
                         error = %e,
                         "upstream tools/call failed"
                     );
-                    let response = err_response(
-                        request.id.clone(),
-                        INTERNAL_ERROR,
-                        format!("Upstream server error: {e}"),
-                    );
+                    let response = crate::pool::error_response(request.id.clone(), &e);
                     Invocation::Buffered(Invoked {
                         identity: auth_identity,
                         trace_id: auth_trace_id,
@@ -1077,7 +1070,12 @@ impl McpProxy {
                 let response = emitted
                     .response
                     .expect("Invocation::Buffered always yields Emitted.response");
-                if ctx.wants_streaming {
+                if ctx.wants_streaming
+                    && !response
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.code == RESOURCE_BUSY)
+                {
                     // Client signalled SSE but the upstream replied
                     // buffered. Wrap the response (and any captured
                     // upstream timeline) as a sequence of SSE events.
@@ -1120,6 +1118,13 @@ impl McpProxy {
         server_name: &str,
         response: &JsonRpcResponse,
     ) {
+        if response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == RESOURCE_BUSY)
+        {
+            return;
+        }
         let is_server_failure = response
             .error
             .as_ref()

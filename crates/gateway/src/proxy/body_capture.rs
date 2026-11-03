@@ -198,7 +198,7 @@ async fn process_body(
     offloaded_flag: &mut bool,
 ) -> String {
     if redact_pii {
-        s = redaction.redact_blob(&s);
+        s = think_watch_common::resources::cpu(s.len(), || redaction.redact_blob(&s)).await;
     }
     if s.len() <= max_bytes {
         return s;

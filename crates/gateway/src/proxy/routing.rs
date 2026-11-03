@@ -91,6 +91,32 @@ pub(super) async fn set_affinity(
         .await;
 }
 
+/// Drop a session's affinity to the route a stream was just cut on for
+/// generating too slowly (see `super::min_speed`): the client's retry goes
+/// where the strategy sends it, not back to the same upstream. Only an
+/// affinity that still points at this route or its provider is dropped —
+/// another request of the session may have moved it since.
+pub(crate) async fn forget_affinity(
+    redis: &fred::clients::Client,
+    user_id: Option<&str>,
+    model: &str,
+    provider_id: Uuid,
+    route_id: Uuid,
+) {
+    use fred::interfaces::KeysInterface;
+    let Some(uid) = user_id else { return };
+    for (mode, id) in [
+        (AffinityMode::Provider, provider_id),
+        (AffinityMode::Route, route_id),
+    ] {
+        let key = format!("affinity:{}:{uid}:{model}", mode.as_str());
+        let held: Option<String> = redis.get(&key).await.ok().flatten();
+        if held.as_deref() == Some(id.to_string().as_str()) {
+            let _: Result<i64, _> = redis.del(&key).await;
+        }
+    }
+}
+
 /// Resolve `(strategy, affinity_mode, affinity_ttl)` for a model:
 /// per-model override falls through to gateway-wide defaults.
 async fn resolve_routing_config(
@@ -305,6 +331,10 @@ pub(crate) struct SelectionRecord {
     /// The request's last attempt was already counted against the route:
     /// a stream whose client left while it waited to go out again.
     pub counted: bool,
+    /// The stream was cut for generating too slowly (see
+    /// `super::min_speed`), at this many tokens per second over its
+    /// window. Said on the log row as `"tokens_per_sec"`.
+    pub too_slow: Option<u32>,
 }
 
 /// Record health for the picked route once the request finishes.
@@ -550,6 +580,7 @@ pub(super) async fn select_route_with_failover<'a>(
                             retries: budget.retries(),
                             effort,
                             counted: false,
+                            too_slow: None,
                         },
                     ));
                 }
@@ -662,6 +693,7 @@ pub(super) async fn select_route_for_stream<'a>(
                 retries: 0,
                 effort: None,
                 counted: false,
+                too_slow: None,
             },
         ));
     }

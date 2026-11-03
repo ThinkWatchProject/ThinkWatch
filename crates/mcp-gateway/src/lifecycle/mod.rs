@@ -151,6 +151,10 @@ impl Surface for McpSurface {
         // INVALID_PARAMS doesn't trip the breaker for everyone.
         match &invoked.view {
             CapturedView::Streaming {
+                outcome: StreamOutcome::UpstreamError { error_type, .. },
+                ..
+            } if error_type == "gateway_memory" => {}
+            CapturedView::Streaming {
                 outcome: StreamOutcome::UpstreamError { .. },
                 ..
             } => {
@@ -240,6 +244,8 @@ impl Surface for McpSurface {
 /// shaped); the rest are surface-specific identifiers the pipeline
 /// is generic over, so they cannot live on `Invoked<S>` itself.
 pub struct McpPostInvokeDeps {
+    /// Retains stream capture admission until cache/audit hooks finish.
+    pub stream_memory: think_watch_common::resources::SharedStreamBudget,
     pub proxy: McpProxy,
     pub server_id: Uuid,
     pub server_name: String,
@@ -278,6 +284,19 @@ fn response_for_hooks(invoked: &Invoked<McpSurface>, deps: &McpPostInvokeDeps) -
     match &invoked.view {
         CapturedView::Buffered(r) => r.clone(),
         CapturedView::Streaming { outcome, captured } => {
+            if let StreamOutcome::UpstreamError {
+                error_type,
+                message,
+                ..
+            } = outcome
+                && error_type == "gateway_memory"
+            {
+                return err_response(
+                    deps.original_request_id.clone(),
+                    crate::proxy::RESOURCE_BUSY,
+                    message.clone(),
+                );
+            }
             pick_response_envelope(captured, deps.original_request_id.as_ref()).unwrap_or_else(
                 || {
                     let msg = match outcome {

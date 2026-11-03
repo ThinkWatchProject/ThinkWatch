@@ -30,16 +30,18 @@ import {
   DEFAULT_REPLACEMENT,
   type ContentMatch,
   type Guard,
+  type GuardDetail,
   type GuardMode,
   type RuleAction,
   type RuleScope,
+  type SecurityKindView,
   type SecurityRuleView,
   type SecurityTestHit,
   type SecurityTestRequest,
 } from '@/lib/security-types';
 import { Highlight, type Mark } from './highlight';
-import { Code, MatcherText } from './matcher-text';
-import { actionName, actionTone, kindName, ruleName, ruleWhy, scopeName, viewName } from './names';
+import { About, Code, MatcherText } from './matcher-text';
+import { actionName, actionTone, kindName, ruleAbout, ruleName, ruleWhy, scopeName, viewName } from './names';
 import {
   ACTIONS,
   DEFAULT_LABEL,
@@ -179,8 +181,11 @@ function TrialBox({ trial }: { trial: Trial }) {
     return <p className="text-xs text-destructive">{trial.error}</p>;
   }
   const result = trial.state === 'done' ? trial.result : trial.last;
-  const hits = result?.hits ?? [];
-  const tone = (h: SecurityTestHit) => toneOf(h.action);
+  const all = result?.hits ?? [];
+  // An exception value is marked, but it is not a hit: nothing is done to it.
+  const hits = all.filter((h) => !h.excepted);
+  const excepted = all.length - hits.length;
+  const tone = (h: SecurityTestHit): Mark['tone'] => (h.excepted ? 'muted' : toneOf(h.action));
   const bad = hits.some((h) => tone(h) === 'bad');
   // Dangerous commands send nothing and refuse nothing; the server
   // answers null and false there.
@@ -203,11 +208,16 @@ function TrialBox({ trial }: { trial: Trial }) {
             ? t('contentSecurity.dialog.hits', { count: hits.length })
             : t('contentSecurity.dialog.noHit'))}
       </p>
-      {result && hits.length > 0 && (
+      {result && all.length > 0 && (
         <Highlight
           text={result.sample}
-          marks={hits.map((h) => ({ start: h.start, end: h.end, tone: tone(h) }))}
+          marks={all.map((h) => ({ start: h.start, end: h.end, tone: tone(h) }))}
         />
+      )}
+      {excepted > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {t('contentSecurity.exceptions.inTrial', { count: excepted })}
+        </p>
       )}
       {refused && <p className="text-xs text-destructive">{t('contentSecurity.dialog.refused')}</p>}
       {!refused && result && result.output !== null && (
@@ -653,6 +663,7 @@ export function BuiltinRuleDialog({
   guard,
   mode,
   rule,
+  kinds,
   canWrite,
   onClose,
   onCopy,
@@ -661,20 +672,24 @@ export function BuiltinRuleDialog({
   guard: Guard;
   mode: GuardMode;
   rule: SecurityRuleView;
+  /** The guard's groups, to name the rule's. */
+  kinds: SecurityKindView[];
   canWrite: boolean;
   onClose: () => void;
   /** Absent where no equivalent custom rule can be written: checks implemented in code. */
   onCopy?: () => void;
   onSaveAction: (action: RuleAction) => Promise<void>;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const initial = rule.action ?? 'record';
   const [action, setAction] = useState<RuleAction>(initial);
   const [sample, setSample] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const trial = useTrial(guard, { sample, rule: rule.id, action });
-  const why = ruleWhy(t, guard, rule);
+  const why = ruleWhy(lang, rule);
+  const about = ruleAbout(lang, rule);
   const changed = action !== initial;
 
   async function save() {
@@ -693,18 +708,18 @@ export function BuiltinRuleDialog({
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {viewName(t, guard, rule)}
+            {viewName(lang, rule)}
             <Badge variant="secondary">{t('contentSecurity.builtinGroup')}</Badge>
           </DialogTitle>
           <DialogDescription>
-            {why || t('contentSecurity.dialog.category', { kind: kindName(t, rule.kind) })}
+            {why || t('contentSecurity.dialog.category', { kind: kindName(lang, kinds, rule.kind) })}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <Field label={t('contentSecurity.col.match')}>
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm leading-relaxed">
-              <MatcherText m={rule.matcher} />
+              {about ? <About text={about} /> : <MatcherText m={rule.matcher} />}
             </div>
           </Field>
 
@@ -797,8 +812,18 @@ export function BuiltinRuleDialog({
  * processing, and for the content filter whether the request would be
  * refused. A content sample is tried as a request or as an answer.
  */
-export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => void }) {
-  const { t } = useTranslation();
+export function TestDialog({
+  guard,
+  detail,
+  onClose,
+}: {
+  guard: Guard;
+  /** The guard's view, to name the rules that matched. */
+  detail: GuardDetail | undefined;
+  onClose: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [sample, setSample] = useState('');
   const [side, setSide] = useState<RuleScope>('request');
   const content = guard === 'content';
@@ -848,19 +873,25 @@ export function TestDialog({ guard, onClose }: { guard: Guard; onClose: () => vo
                     {hits.map((h, i) => (
                       <TableRow key={`${h.rule}:${h.start}:${i}`}>
                         <TableCell className="truncate">
-                          {ruleName(t, guard, h.rule, h.custom)}
+                          {ruleName(lang, detail, h.rule, h.custom)}
                           {h.custom && (
                             <Badge variant="outline" className="ml-1.5">
-                              {kindName(t, 'custom')}
+                              {kindName(lang, detail?.kinds, 'custom')}
                             </Badge>
                           )}
                         </TableCell>
                         <TableCell className="truncate font-mono text-xs text-muted-foreground">
                           {h.excerpt}
                         </TableCell>
-                        <TableCell className={actionTone(h.action)}>
-                          {actionName(t, h.action ?? 'record')}
-                        </TableCell>
+                        {h.excepted ? (
+                          <TableCell className="text-muted-foreground">
+                            {t('contentSecurity.exceptions.excepted')}
+                          </TableCell>
+                        ) : (
+                          <TableCell className={actionTone(h.action)}>
+                            {actionName(t, h.action ?? 'record')}
+                          </TableCell>
+                        )}
                       </TableRow>
                     ))}
                   </TableBody>

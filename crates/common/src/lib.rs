@@ -43,6 +43,7 @@ pub mod clickhouse_client;
 pub mod cost_decimal; // Decimal ↔ raw i64/i128 helpers for CH Decimal(18, 10) columns
 pub mod lifecycle; // Surface-agnostic request pipeline (see lifecycle::mod docs)
 pub mod limits; // rate-limit & budget evaluation
+pub mod resources; // automatic CPU admission and process-wide byte budgets
 
 // --- Utilities ---
 pub mod crypto; // AES-256-GCM envelope for secrets at rest

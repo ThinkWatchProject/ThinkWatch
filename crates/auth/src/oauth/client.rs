@@ -98,7 +98,15 @@ pub async fn exchange_authorization_code(
         .map_err(TokenExchangeError::Unreachable)?;
 
     let status = resp.status();
-    let resp_text = resp.text().await.map_err(TokenExchangeError::Unreachable)?;
+    let bytes = think_watch_common::resources::read_response(resp, 64 * 1024)
+        .await
+        .map_err(|e| match e {
+            think_watch_common::resources::ReadError::Transport(e) => {
+                TokenExchangeError::Unreachable(e)
+            }
+            other => TokenExchangeError::InvalidResponse(other.to_string()),
+        })?;
+    let resp_text = String::from_utf8_lossy(&bytes);
 
     // Two cases land here:
     //   * non-2xx status (always treated as failure)
