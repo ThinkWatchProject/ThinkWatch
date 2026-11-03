@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use reqwest::Client;
+use think_watch_common::resources;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -55,6 +56,9 @@ pub enum PoolError {
 
     #[error("Failed to parse upstream JSON-RPC response: {0}")]
     ParseError(String),
+
+    #[error(transparent)]
+    Buffering(#[from] resources::ReadError),
 }
 
 /// Manages a pool of `McpConnection`s keyed by server ID.
@@ -219,7 +223,10 @@ impl ConnectionPool {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resources::read_response(resp, 64 * 1024)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|error| error.to_string());
             return Err(PoolError::UpstreamError {
                 status: status.as_u16(),
                 body,
@@ -237,28 +244,30 @@ impl ConnectionPool {
             .unwrap_or("")
             .to_lowercase();
 
-        let (json_resp, stream_audit_body): (JsonRpcResponse, Option<String>) =
+        let data = resources::read_response(resp, resources::policy().max_body_bytes).await?;
+        let (mut json_resp, stream_audit_body): (JsonRpcResponse, Option<String>) =
             if content_type.contains("text/event-stream") {
-                let text = resp
-                    .text()
-                    .await
-                    .map_err(|e| PoolError::ParseError(e.to_string()))?;
+                let text = String::from_utf8_lossy(&data);
                 // Pick the response envelope by matching id against the
                 // request id — without this, a tool that emits
                 // `notifications/progress` before the final response
                 // had its first progress notification returned AS the
                 // response (notifications have id=None which deserializes
                 // into JsonRpcResponse just fine, masking the real reply).
-                let (matched, full_audit) = parse_sse_json_rpc(&text, request.id.as_ref())?;
+                let (matched, full_audit) = resources::cpu(data.len(), || {
+                    parse_sse_json_rpc(&text, request.id.as_ref())
+                })
+                .await?;
                 (matched, Some(full_audit))
             } else {
-                let envelope: JsonRpcResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| PoolError::ParseError(e.to_string()))?;
+                let envelope: JsonRpcResponse =
+                    resources::cpu(data.len(), || serde_json::from_slice(&data))
+                        .await
+                        .map_err(|e| PoolError::ParseError(e.to_string()))?;
                 (envelope, None)
             };
 
+        json_resp.memory = Some(data);
         // Validate JSON-RPC version
         if json_resp.jsonrpc != "2.0" {
             return Err(PoolError::ParseError("Invalid JSON-RPC version".into()));
@@ -309,7 +318,10 @@ impl ConnectionPool {
             // Same error-surfacing contract as send_request — buffer
             // the small error body so the caller can see the upstream
             // diagnostic instead of an opaque "non-2xx".
-            let body = resp.text().await.unwrap_or_default();
+            let body = resources::read_response(resp, 64 * 1024)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|error| error.to_string());
             return Err(PoolError::UpstreamError {
                 status: status.as_u16(),
                 body,
@@ -475,6 +487,27 @@ fn parse_sse_json_rpc(
         .map_err(|e| PoolError::ParseError(format!("audit serialization: {e}")))?;
 
     Ok((json_resp, audit_body))
+}
+
+pub(crate) async fn read_json_response(
+    response: reqwest::Response,
+) -> Result<JsonRpcResponse, PoolError> {
+    let bytes = resources::read_response(response, resources::policy().max_body_bytes).await?;
+    let mut result: JsonRpcResponse =
+        resources::cpu(bytes.len(), || serde_json::from_slice(&bytes))
+            .await
+            .map_err(|e| PoolError::ParseError(e.to_string()))?;
+    result.memory = Some(bytes);
+    Ok(result)
+}
+
+pub(crate) fn error_response(id: Option<serde_json::Value>, error: &PoolError) -> JsonRpcResponse {
+    let code = if matches!(error, PoolError::Buffering(resources::ReadError::Busy)) {
+        crate::proxy::RESOURCE_BUSY
+    } else {
+        crate::proxy::INTERNAL_ERROR
+    };
+    crate::proxy::err_response(id, code, format!("Upstream server error: {error}"))
 }
 
 #[cfg(test)]

@@ -132,6 +132,10 @@ impl std::fmt::Display for BodyCaptureStatus {
 /// back out and feeds them into `send_webhook` again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
+    /// Account for queued and retained data through its final clone. Never part
+    /// of ClickHouse rows or the durable webhook JSON contract.
+    #[serde(skip)]
+    memory: Option<std::sync::Arc<crate::resources::Reservation>>,
     pub id: String,
     #[serde(skip, default = "default_log_type")]
     pub log_type: LogType,
@@ -407,6 +411,7 @@ impl AuditEntry {
     )]
     pub fn new(action: impl Into<String>) -> Self {
         Self {
+            memory: None,
             id: Uuid::new_v4().to_string(),
             log_type: LogType::Audit,
             user_id: None,
@@ -428,6 +433,61 @@ impl AuditEntry {
             response_body_bytes: None,
             created_at: Utc::now().to_rfc3339(),
         }
+    }
+
+    pub(super) fn reserve_memory(
+        &mut self,
+        budget: &std::sync::Arc<crate::resources::ByteBudget>,
+    ) -> bool {
+        fn value_bytes(value: &serde_json::Value) -> usize {
+            use serde_json::Value;
+            match value {
+                Value::String(s) => s.capacity(),
+                Value::Array(values) => values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Value>())
+                    .saturating_add(values.iter().map(value_bytes).sum::<usize>()),
+                Value::Object(values) => values.iter().fold(0usize, |total, (key, value)| {
+                    total
+                        .saturating_add(key.capacity())
+                        .saturating_add(std::mem::size_of::<(String, Value)>() * 2)
+                        .saturating_add(value_bytes(value))
+                }),
+                _ => 0,
+            }
+        }
+        let strings = [
+            Some(&self.id),
+            Some(&self.action),
+            Some(&self.created_at),
+            self.user_id.as_ref(),
+            self.user_email.as_ref(),
+            self.api_key_id.as_ref(),
+            self.api_key_lineage_id.as_ref(),
+            self.resource.as_ref(),
+            self.resource_id.as_ref(),
+            self.ip_address.as_ref(),
+            self.user_agent.as_ref(),
+            self.trace_id.as_ref(),
+            self.session_id.as_ref(),
+            self.request_body.as_ref(),
+            self.response_body.as_ref(),
+            self.body_capture_status.as_ref(),
+        ];
+        let bytes = strings
+            .into_iter()
+            .flatten()
+            .fold(std::mem::size_of::<Self>(), |n, s| {
+                n.saturating_add(s.capacity())
+            })
+            .saturating_add(self.detail.as_ref().map_or(0, value_bytes));
+        // Flush mappers and forwarders temporarily clone/serialize one entry.
+        let mut lease = budget.reserve();
+        if !lease.grow(bytes.saturating_mul(2)) {
+            return false;
+        }
+        self.memory = Some(std::sync::Arc::new(lease));
+        true
     }
 
     /// Create entry for gateway request logs.
@@ -678,5 +738,41 @@ mod tests {
         assert_eq!(decoded.resource, original.resource);
         assert_eq!(decoded.trace_id, original.trace_id);
         assert_eq!(decoded.detail, original.detail);
+    }
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod memory_tests {
+    use super::*;
+    use crate::resources::ByteBudget;
+
+    #[test]
+    fn queue_and_retry_clones_retain_body_admission_without_changing_wire_json() {
+        let budget = ByteBudget::new(32 * 1024);
+        let mut entry = AuditEntry::new("tools.call").request_body("x".repeat(4096));
+        let before = serde_json::to_value(&entry).unwrap();
+        assert!(entry.reserve_memory(&budget));
+        assert!(budget.used() >= 8192);
+        assert_eq!(before, serde_json::to_value(&entry).unwrap());
+        let retained = entry.clone();
+        drop(entry);
+        assert!(budget.used() >= 8192);
+        drop(retained);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn a_few_large_entries_hit_the_byte_limit_before_the_count_limit() {
+        let budget = ByteBudget::new(16 * 1024);
+        let mut first = AuditEntry::new("gateway").response_body("x".repeat(4096));
+        let mut second = first.clone();
+        assert!(first.reserve_memory(&budget));
+        let used = budget.used();
+        assert!(!second.reserve_memory(&budget));
+        assert_eq!(used, budget.used());
+        drop(first);
+        assert_eq!(budget.used(), 0);
+        assert!(second.reserve_memory(&budget));
     }
 }

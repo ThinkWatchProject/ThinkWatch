@@ -7,6 +7,7 @@ use xxhash_rust::xxh3::xxh3_128;
 
 /// A cached answer, in the caller's format with redaction placeholders intact.
 pub struct Cached {
+    pub memory: bytes::Bytes,
     pub body: Vec<u8>,
     /// Kept so a hit counts toward token limits and budgets the way the
     /// original call did.
@@ -135,17 +136,20 @@ impl ResponseCache {
     /// Look up a cached answer.
     pub async fn get(&self, fingerprint: &[u8]) -> Option<Cached> {
         let key = Self::cache_key_for(fingerprint);
-        let stored: Option<String> = self.redis.get(&key).await.ok().flatten();
-        stored.and_then(|json| {
-            serde_json::from_str::<Stored>(&json)
+        let json = think_watch_common::resources::cached_body(&self.redis, &key).await?;
+        let memory = json.clone();
+        think_watch_common::resources::cpu(json.len(), || {
+            serde_json::from_slice::<Stored>(&json)
                 .map_err(|e| tracing::warn!("Failed to read a cached response: {e}"))
                 .ok()
                 .map(|s| Cached {
+                    memory,
                     body: serde_json::to_vec(&s.body).unwrap_or_default(),
                     prompt_tokens: s.prompt_tokens,
                     completion_tokens: s.completion_tokens,
                 })
         })
+        .await
     }
 
     /// Invalidate all cached responses by deleting keys matching the

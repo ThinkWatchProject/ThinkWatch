@@ -440,6 +440,9 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         .merge(ai_routes)
         .merge(key_routes)
         .merge(mcp_routes)
+        .layer(axum::middleware::from_fn(
+            think_watch_common::resources::http::admit,
+        ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
         // When the timeout below starts counting: a whole answer's retries
         // stop in time for its error to be written (see `gateway_proxy::retry`).
@@ -1186,6 +1189,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         // upgrade path bypasses tower-http body transforms); permessage-
         // deflate negotiation belongs at the reverse-proxy layer.
         .layer(CompressionLayer::new())
+        .layer(axum::middleware::from_fn(think_watch_common::resources::http::admit))
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB for console API
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,

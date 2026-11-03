@@ -59,17 +59,15 @@ pub struct AuditLogger {
 
 /// Bounded audit channel capacity.
 ///
-/// At ~80 bytes per entry that's about 8 MB of in-memory backlog,
-/// which is fine for any reasonable host. 100k entries means a
-/// 30-second ClickHouse outage at 3k req/s still survives; drops
-/// are surfaced via a metric.
+/// Secondary count limit. Entries include captured bodies, so a separate
+/// process-wide byte budget is the primary memory bound, including retries.
 const AUDIT_CHANNEL_CAPACITY: usize = 100_000;
 
 /// Throttle window for the structured "audit drop" log line. The
 /// metric still increments on every drop, so dashboards see the
 /// real rate; the log is just for human inspection and one line
 /// per second is plenty.
-fn log_audit_drop_throttled(err: &tokio::sync::mpsc::error::TrySendError<AuditEntry>) {
+fn log_audit_drop_throttled(err: &impl std::fmt::Display) {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     static LAST_LOG_SECS: AtomicU64 = AtomicU64::new(0);
@@ -272,6 +270,8 @@ impl AuditLogger {
                         // the REMAINING capacity, so depth = total - capacity.
                         let depth = AUDIT_CHANNEL_CAPACITY.saturating_sub(tx_for_gauge.capacity());
                         metrics::gauge!("audit_log_queue_depth").set(depth as f64);
+                        metrics::gauge!("audit_log_buffered_bytes")
+                            .set(crate::resources::audit_budget().used() as f64);
                     }
                 }
             });
@@ -297,7 +297,7 @@ impl AuditLogger {
             .store(bps, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn log(&self, entry: AuditEntry) {
+    pub fn log(&self, mut entry: AuditEntry) {
         // Sampling: consult the atomic rate and skip the entry when a
         // uniform draw falls outside the keep window. A full keep
         // (10000) short-circuits the RNG so the hot path pays nothing
@@ -307,6 +307,12 @@ impl AuditLogger {
             .load(std::sync::atomic::Ordering::Relaxed);
         if bps < 10_000 && rand::random_range(0..10_000) >= bps {
             metrics::counter!("audit_log_sampled_out_total").increment(1);
+            return;
+        }
+        if !entry.reserve_memory(crate::resources::audit_budget()) {
+            metrics::counter!("audit_log_dropped_total").increment(1);
+            metrics::counter!("audit_log_memory_dropped_total").increment(1);
+            log_audit_drop_throttled(&"audit byte budget occupied (queue and retained batches)");
             return;
         }
         if let Err(e) = self.tx.try_send(entry) {

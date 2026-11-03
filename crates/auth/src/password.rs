@@ -1,10 +1,7 @@
-use std::sync::{Arc, LazyLock};
-
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use tokio::sync::Semaphore;
 
 const RANDOM_PASSWORD_LEN: usize = 16;
 const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*";
@@ -60,24 +57,13 @@ pub fn verify_password_or_dummy(password: &str, hash: Option<&str>) -> bool {
 // every other request scheduled on that thread, so the handlers use
 // these versions, which run it on the blocking pool.
 
-/// How many Argon2 runs go at once: one per CPU, as many as the async
-/// workers allowed when they ran it. Each run holds 19 MiB (`m=19456`)
-/// while it lasts and the blocking pool grows to hundreds of threads, so
-/// without this a burst of logins would hold gigabytes at once.
-static ARGON2_PERMITS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
-    Arc::new(Semaphore::new(
-        std::thread::available_parallelism().map_or(1, |n| n.get()),
-    ))
-});
-
-/// `f` on the blocking pool once an [`ARGON2_PERMITS`] place is free. The
-/// task keeps the place until it ends, even when the caller has gone.
+/// Share CPU admission with the data plane and limit Argon2 memory using
+/// the container allowance. The running task owns both places even when
+/// its caller is cancelled.
 async fn on_blocking_pool<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, tokio::task::JoinError> {
-    // Never closed, so the acquire cannot fail; the permit inside the
-    // result is held all the same.
-    let permit = Arc::clone(&ARGON2_PERMITS).acquire_owned().await;
+    let permit = think_watch_common::resources::password_slot().await;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         f()
@@ -111,6 +97,48 @@ pub async fn verify_password_or_dummy_off_runtime(password: String, hash: Option
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_callers_does_not_admit_more_running_password_jobs() {
+        use std::time::Duration;
+        let policy = think_watch_common::resources::policy();
+        let jobs = policy.argon_jobs.min(policy.cpu_jobs);
+        let (started, mut beginnings) = tokio::sync::mpsc::unbounded_channel();
+        let mut release = Vec::new();
+        let mut callers = Vec::new();
+        for _ in 0..jobs {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            release.push(tx);
+            let started = started.clone();
+            callers.push(tokio::spawn(on_blocking_pool(move || {
+                started.send(()).unwrap();
+                let _ = rx.recv_timeout(Duration::from_secs(10));
+            })));
+        }
+        for _ in 0..jobs {
+            tokio::time::timeout(Duration::from_secs(5), beginnings.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        for caller in callers {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        }
+        let next = tokio::spawn(on_blocking_pool(move || started.send(()).unwrap()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), beginnings.recv())
+                .await
+                .is_err()
+        );
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(5), next)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(beginnings.recv().await, Some(()));
+    }
+
     #[tokio::test]
     async fn the_off_runtime_versions_agree_with_the_blocking_ones() {
         let hash = hash_password_off_runtime("pw".into()).await.unwrap();
@@ -133,7 +161,9 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static RUNNING: AtomicUsize = AtomicUsize::new(0);
         static PEAK: AtomicUsize = AtomicUsize::new(0);
-        let permits = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let permits = think_watch_common::resources::policy()
+            .argon_jobs
+            .min(think_watch_common::resources::policy().cpu_jobs);
         let tasks: Vec<_> = (0..permits * 4)
             .map(|_| {
                 tokio::spawn(on_blocking_pool(|| {
