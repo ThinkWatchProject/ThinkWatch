@@ -378,8 +378,12 @@ impl S3Store {
             .await
             .map_err(|e| BlobError::Transport(e.to_string()))?;
         let status = resp.status();
-        let bytes = resp
-            .bytes()
+        let max = if status.is_success() {
+            crate::resources::policy().max_body_bytes
+        } else {
+            64 * 1024
+        };
+        let bytes = crate::resources::read_response(resp, max)
             .await
             .map_err(|e| BlobError::Transport(e.to_string()))?;
         if !status.is_success() {

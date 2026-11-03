@@ -1340,14 +1340,16 @@ pub(crate) async fn resolve_upstream_subject(
         return Some(s);
     }
     let endpoint = userinfo_endpoint?;
-    let body = match http
+    let (body, _memory): (serde_json::Value, _) = match http
         .get(endpoint)
         .bearer_auth(access_token)
         .header("Accept", "application/json")
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok()?,
+        Ok(r) if r.status().is_success() => think_watch_common::resources::read_json(r, 64 * 1024)
+            .await
+            .ok()?,
         Ok(r) => {
             tracing::debug!(
                 endpoint = %endpoint,

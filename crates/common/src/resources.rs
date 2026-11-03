@@ -252,6 +252,16 @@ pub async fn read_response(response: reqwest::Response, max: usize) -> Result<By
     read_response_with_budget(response, max, body_budget()).await
 }
 
+/// The caller keeps the returned Bytes while it uses the decoded value.
+pub async fn read_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max: usize,
+) -> anyhow::Result<(T, Bytes)> {
+    let bytes = read_response(response, max).await?;
+    let value = cpu(bytes.len(), || serde_json::from_slice(&bytes)).await?;
+    Ok((value, bytes))
+}
+
 async fn read_response_with_budget(
     mut response: reqwest::Response,
     max: usize,

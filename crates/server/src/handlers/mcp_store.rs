@@ -274,10 +274,12 @@ pub async fn sync_registry(
         )));
     }
 
-    let registry: RegistryResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Invalid registry JSON: {e}")))?;
+    let (registry, _memory): (RegistryResponse, _) = think_watch_common::resources::read_json(
+        resp,
+        think_watch_common::resources::policy().max_body_bytes,
+    )
+    .await
+    .map_err(|e| AppError::BadRequest(format!("Invalid registry JSON: {e}")))?;
 
     // Wrap the whole sync (upserts + post-loop cleanup DELETE) in a
     // single transaction. Previously each `INSERT ... ON CONFLICT

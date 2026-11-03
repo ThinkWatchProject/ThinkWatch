@@ -32,7 +32,9 @@ conversion, inspection and capture copies. A single response or stream timeline
 is limited to the smaller of 64 MiB and one thirty-second of that budget.
 The existing gateway 10 MiB and console 1 MiB request limits still apply.
 Error bodies and credential endpoint responses have a separate per-read 64 KiB
-limit and use the same shared budget.
+limit and use the same shared budget. MCP tool discovery, provider and registry
+catalogs, OAuth discovery, audit forwarder errors and S3 reads also use bounded
+reads, so administrative/background requests cannot bypass admission on ingress.
 
 Admission is incremental, including chunked responses. Readers reject growth
 before appending rather than waiting while holding partial bodies. Reservations
