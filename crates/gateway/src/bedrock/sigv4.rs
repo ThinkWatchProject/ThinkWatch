@@ -195,27 +195,29 @@ impl Signer {
         let fail = |what: &str, e: reqwest::Error| SignError::Credentials(format!("{what}: {e}"));
         let imds = &self.imds;
 
-        let token = client
+        let token_response = client
             .put(format!("{imds}/latest/api/token"))
             .header("X-aws-ec2-metadata-token-ttl-seconds", "300")
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| fail("IMDSv2 token request", e))?
-            .text()
+            .map_err(|e| fail("IMDSv2 token request", e))?;
+        let token_bytes = think_watch_common::resources::read_response(token_response, 64 * 1024)
             .await
-            .map_err(|e| fail("IMDSv2 token read", e))?;
+            .map_err(|e| SignError::Credentials(format!("IMDSv2 token read: {e}")))?;
+        let token = String::from_utf8_lossy(&token_bytes);
 
-        let role = client
+        let role_response = client
             .get(format!("{imds}/latest/meta-data/iam/security-credentials/"))
-            .header("X-aws-ec2-metadata-token", &token)
+            .header("X-aws-ec2-metadata-token", token.as_ref())
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| fail("IMDSv2 role lookup", e))?
-            .text()
+            .map_err(|e| fail("IMDSv2 role lookup", e))?;
+        let role_bytes = think_watch_common::resources::read_response(role_response, 64 * 1024)
             .await
-            .map_err(|e| fail("IMDSv2 role read", e))?;
+            .map_err(|e| SignError::Credentials(format!("IMDSv2 role read: {e}")))?;
+        let role = String::from_utf8_lossy(&role_bytes);
         // One role per instance profile; the listing is one name per line
         let role = role.lines().next().unwrap_or_default().trim();
         if role.is_empty() {
@@ -224,18 +226,21 @@ impl Signer {
             ));
         }
 
-        let creds: serde_json::Value = client
+        let credentials_response = client
             .get(format!(
                 "{imds}/latest/meta-data/iam/security-credentials/{role}"
             ))
-            .header("X-aws-ec2-metadata-token", &token)
+            .header("X-aws-ec2-metadata-token", token.as_ref())
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| fail("IMDSv2 credentials fetch", e))?
-            .json()
-            .await
-            .map_err(|e| fail("IMDSv2 credentials parse", e))?;
+            .map_err(|e| fail("IMDSv2 credentials fetch", e))?;
+        let credentials_bytes =
+            think_watch_common::resources::read_response(credentials_response, 64 * 1024)
+                .await
+                .map_err(|e| SignError::Credentials(format!("IMDSv2 credentials read: {e}")))?;
+        let creds: serde_json::Value = serde_json::from_slice(&credentials_bytes)
+            .map_err(|e| SignError::Credentials(format!("IMDSv2 credentials parse: {e}")))?;
 
         let field = |k: &str| {
             creds[k]

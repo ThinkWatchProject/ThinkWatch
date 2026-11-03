@@ -304,7 +304,10 @@ async fn check_status(
     }
     if !status.is_success() {
         let retry_after = retry_after(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
+        let body = think_watch_common::resources::read_response(resp, 64 * 1024)
+            .await
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|error| error.to_string());
         tracing::warn!(provider = label, status = %status, body = %body, "upstream returned non-2xx");
         const CLIENT_MAX: usize = 512;
         let shown = if body.len() > CLIENT_MAX {

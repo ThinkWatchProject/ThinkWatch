@@ -202,7 +202,10 @@ pub(super) async fn send_kafka(
     if resp.status().is_success() {
         Ok(())
     } else {
-        let body = resp.text().await.unwrap_or_default();
+        let bytes = crate::resources::read_response(resp, 64 * 1024)
+            .await
+            .map_err(|e| e.to_string())?;
+        let body = String::from_utf8_lossy(&bytes);
         Err(format!("Kafka REST proxy returned error: {body}"))
     }
 }
@@ -300,7 +303,10 @@ pub(super) async fn send_webhook(
         Ok(resp) if resp.status().is_success() => Ok(()),
         Ok(resp) => {
             let status = resp.status();
-            let rtext = resp.text().await.unwrap_or_default();
+            let bytes = crate::resources::read_response(resp, 64 * 1024)
+                .await
+                .map_err(|e| e.to_string())?;
+            let rtext = String::from_utf8_lossy(&bytes);
             Err(format!("Webhook returned {status}: {rtext}"))
         }
         Err(e) => Err(format!("Webhook request failed: {e}")),

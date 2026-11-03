@@ -108,7 +108,7 @@ pub async fn handle_post(
     State(state): State<Arc<McpGatewayState>>,
     headers: HeaderMap,
     axum::Extension(identity): axum::Extension<McpRequestIdentity>,
-    Json(request): Json<JsonRpcRequest>,
+    think_watch_common::resources::http::ScheduledJson(request): think_watch_common::resources::http::ScheduledJson<JsonRpcRequest>,
 ) -> impl IntoResponse {
     // --- Session management ------------------------------------------------
     let sessions = &state.proxy.sessions;
@@ -162,6 +162,16 @@ pub async fn handle_post(
 
     match outcome {
         HandleOutcome::Buffered(response) => {
+            let memory = response.memory.clone().unwrap_or_default();
+            if response
+                .error
+                .as_ref()
+                .is_some_and(|e| e.code == crate::proxy::RESOURCE_BUSY)
+            {
+                resp_headers.insert(axum::http::header::RETRY_AFTER, "1".parse().unwrap());
+                return (StatusCode::TOO_MANY_REQUESTS, resp_headers, Json(response))
+                    .into_response();
+            }
             // Buffered shape happens for initialize / tools/list, for
             // tools/call cache hits / early rejections, AND for
             // tools/call when the upstream replied with plain
@@ -172,13 +182,25 @@ pub async fn handle_post(
             // plain JSON-RPC clients.
             if sse_capable {
                 let payload = serde_json::to_string(&response).unwrap_or_default();
-                let event = Ok::<_, std::convert::Infallible>(Event::default().data(payload));
-                let stream = futures::stream::iter(std::iter::once(event));
+                let stream = async_stream::stream! {
+                    let _memory = memory;
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(payload));
+                };
                 let mut sse_resp = Sse::new(stream).into_response();
                 sse_resp.headers_mut().extend(resp_headers);
                 sse_resp
             } else {
-                (StatusCode::OK, resp_headers, Json(response)).into_response()
+                let bytes = serde_json::to_vec(&response).unwrap_or_default();
+                resp_headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json".parse().unwrap(),
+                );
+                (
+                    StatusCode::OK,
+                    resp_headers,
+                    think_watch_common::resources::retain(bytes.into(), memory),
+                )
+                    .into_response()
             }
         }
         HandleOutcome::Streaming(payload) => {

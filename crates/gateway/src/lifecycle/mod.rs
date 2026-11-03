@@ -51,6 +51,8 @@ pub(crate) struct ChatCompletionSurface;
 
 /// A whole answer, in the caller's format.
 pub struct Completed {
+    /// Retain the upstream byte reservation through conversion and audit.
+    pub memory: Option<Bytes>,
     /// As the upstream answered, in the caller's format, with redaction
     /// placeholders still in place and the answer's text not yet through
     /// the content rules — the form the cache stores, so a later caller
@@ -96,6 +98,7 @@ pub struct ChatStreamCaptured {
 /// attempt and by the streaming tail task. Owned rather than borrowed so
 /// the detached tail needs no `'static` borrow.
 pub(crate) struct ChatRequestSnapshot {
+    pub memory: think_watch_common::resources::SharedStreamBudget,
     pub identity: GatewayRequestIdentity,
     /// The one id every audit row and gateway log carries for this request.
     pub trace_id: String,
@@ -108,7 +111,7 @@ pub(crate) struct ChatRequestSnapshot {
     /// stripped anything, before outbound redaction: the audit row is the
     /// record of what the user wrote. Body capture applies its own
     /// redaction toggle on top.
-    pub request_for_audit: Vec<u8>,
+    pub request_for_audit: Bytes,
     /// Where the cache keeps this request's answer. `None` when the
     /// request must not be cached.
     pub cache_fingerprint: Option<Vec<u8>>,
@@ -260,6 +263,7 @@ pub(crate) fn build_chat_pump(
     provider: &str,
     min_speed: Option<MinSpeed>,
 ) -> (axum::response::Response, StreamTail) {
+    let memory = request.memory.clone();
     let readers = Arc::new(Mutex::new(Readers::default()));
     let readers_for_tail = Arc::clone(&readers);
 
@@ -460,7 +464,7 @@ pub(crate) fn build_chat_pump(
                             backoff = Some(wait);
                             continue 'attempt;
                         }
-                        match deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client) {
+                        match think_watch_common::resources::cpu(0, || deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client)).await {
                             Ok(out) => {
                                 if !out.is_empty() {
                                     if last_frame.is_in(&out) {
@@ -490,16 +494,27 @@ pub(crate) fn build_chat_pump(
                 };
                 match item {
                     Ok(chunk) => {
+                        if !memory.lock().unwrap_or_else(|e| e.into_inner()).append(chunk.len()) {
+                            metrics::counter!("gateway_memory_busy_total").increment(1);
+                            let err = GatewayError::rate_limited("gateway_memory", 1);
+                            let out = cut(&shaper, convert.as_mut(), client, &[], &err);
+                            tell(&mut done_tx, StreamOutcome::UpstreamError {
+                                error_type: err.error_tag().into(),
+                                message: err.to_string(), status_code: err.status_code(),
+                            });
+                            yield Ok(Bytes::from(out));
+                            return;
+                        }
                         if let Some(s) = speed.as_mut() {
                             s.feed(&chunk, std::time::Instant::now());
                         }
-                        let (sealed, said) = match readers.lock() {
+                        let (sealed, said) = think_watch_common::resources::cpu(chunk.len(), || match readers.lock() {
                             Ok(mut r) => {
                                 r.feed(&chunk);
                                 (r.sealed_refusal(), r.reported(false))
                             }
                             Err(_) => (None, None),
-                        };
+                        }).await;
                         // The upstream cannot read the conversation's encrypted
                         // history: the client is told why in plain words, in
                         // place of the upstream's own error.
@@ -538,7 +553,7 @@ pub(crate) fn build_chat_pump(
                                 hold.take().map(Opening::release).unwrap_or_default()
                             }
                         };
-                        match deliver(&chunk, &mut convert, &mut shaper, inspector.as_mut(), client) {
+                        match think_watch_common::resources::cpu(chunk.len(), || deliver(&chunk, &mut convert, &mut shaper, inspector.as_mut(), client)).await {
                             Ok(out) => {
                                 if !out.is_empty() {
                                     if last_frame.is_in(&out) {
@@ -569,7 +584,7 @@ pub(crate) fn build_chat_pump(
                                 continue 'attempt;
                             }
                             // The opening it sent goes out before the error.
-                            match deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client) {
+                            match think_watch_common::resources::cpu(0, || deliver(&h.release(), &mut convert, &mut shaper, inspector.as_mut(), client)).await {
                                 Ok(out) => {
                                     if !out.is_empty() {
                                         yield Ok(Bytes::from(out));
@@ -1513,6 +1528,7 @@ impl Surface for ChatCompletionSurface {
         };
         if let Some(body) = body {
             let cached = crate::cache::Cached {
+                memory: Bytes::new(),
                 body: body.clone(),
                 prompt_tokens,
                 completion_tokens,

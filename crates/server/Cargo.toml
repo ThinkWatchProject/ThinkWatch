@@ -11,6 +11,8 @@ name = "think-watch-server"
 path = "src/main.rs"
 
 [dependencies]
+mimalloc = { version = "0.1.52", features = ["no_thp"] }
+libc = "0.2"
 tw-breaker = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }

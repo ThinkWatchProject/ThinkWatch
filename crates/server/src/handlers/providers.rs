@@ -806,7 +806,19 @@ async fn list_models(client: &reqwest::Client, url: &str, headers: &[(String, St
     };
 
     let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let memory = match think_watch_common::resources::read_response(
+        resp,
+        think_watch_common::resources::policy().max_body_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return Listing::Failed(error.to_string()),
+    };
+    let body: serde_json::Value = think_watch_common::resources::cpu(memory.len(), || {
+        serde_json::from_slice(&memory).unwrap_or(serde_json::Value::Null)
+    })
+    .await;
     if !status.is_success() {
         let message = body
             .get("error")

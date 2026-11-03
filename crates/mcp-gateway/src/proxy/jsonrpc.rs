@@ -15,6 +15,9 @@ pub struct JsonRpcRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
+    /// Internal ownership only; excluded from the JSON-RPC wire format.
+    #[serde(skip)]
+    pub memory: Option<bytes::Bytes>,
     pub jsonrpc: String,
     pub id: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,6 +39,7 @@ pub const INVALID_REQUEST: i32 = -32600;
 pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
+pub const RESOURCE_BUSY: i32 = -32005;
 /// ThinkWatch-specific: the calling user (or the calling API key's
 /// chosen account label) has no upstream credential for the requested
 /// MCP server. The `data` field carries `server_id` and an optional
@@ -48,6 +52,7 @@ pub(crate) fn ok_response(
     result: serde_json::Value,
 ) -> JsonRpcResponse {
     JsonRpcResponse {
+        memory: None,
         jsonrpc: "2.0".to_owned(),
         id,
         result: Some(result),
@@ -61,6 +66,7 @@ pub fn err_response(
     message: impl Into<String>,
 ) -> JsonRpcResponse {
     JsonRpcResponse {
+        memory: None,
         jsonrpc: "2.0".to_owned(),
         id,
         result: None,
