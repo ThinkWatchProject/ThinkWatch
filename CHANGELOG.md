@@ -11,8 +11,14 @@ target.
 
 ## [Unreleased]
 
+## [3.11.0] — 2026-11-03
+
+Execution and buffering now adapt automatically to available CPUs and memory,
+including container limits. CPU work expands with traffic and extra threads
+retire after ten idle seconds; no runtime configuration change is required.
+
 Secrets and privacy recognises far more: the built-in redaction catalog
-grows from 30 rules to 120 in 20 groups, and the API keys saved
+grows from 30 rules to 131 in 20 groups, and the API keys saved
 for the providers are recognised by value, whatever their format. The
 console shows the rules' names and descriptions as thinkwatch-core
 writes them, in both languages. A value recognised by mistake can be made
@@ -20,16 +26,32 @@ an exception without switching its rule off, and long conversations are
 no longer scanned from the start every turn. A provider can set the
 slowest generation its streams may keep up, and a stream that falls
 below it is cut so the client can try again. The thinkwatch-core crates
-move from v0.83.1 to v0.86.0.
+move from v0.83.1 to v0.89.0.
 
-No new setting. Two new provider columns
+No new runtime setting. Two new provider columns
 (`providers.min_speed_tokens_per_sec`, `providers.min_speed_window_secs`,
-added on startup) and one new metric (`gateway_provider_too_slow_total`).
+added on startup). New metrics cover minimum generation speed, buffering
+pressure and audit backlog memory.
 The redaction policy gains one optional field (`exceptions`), with
 endpoints of its own under `/api/admin/security/redact/exceptions`.
 
 ### Read before upgrading
 
+- **Buffering is admitted against a process-wide memory budget.** Request,
+  response, cache and retained streaming data use limits derived from the
+  container or machine's memory. Temporary pressure returns a retryable 429
+  with `Retry-After: 1`; an already-started stream receives an error event.
+  Large upstream responses and stream timelines are bounded, and new audit
+  entries are dropped with metrics if the separate audit byte budget fills.
+  See [automatic process resources](docs/operations/resources.md) for the
+  limits and monitoring. These allocation budgets are not a hard RSS cap.
+- **UUIDs and blockchain credentials gain built-in rules.** Core v0.88.0
+  added 11 rules, enabled by default, including UUIDs, wallet keys and
+  accounts, exchange credentials and recovery material. Monitor records
+  findings; installations with protection On replace matching message
+  text. UUIDs, hashes and public accounts do not independently trigger
+  credential-exfiltration blocking. Review any workflows that send order
+  or trace identifiers as message text.
 - **New credential rules ship on.** Under the On state of Secrets and
   privacy (`security.redact` mode `enforce`), values they find start
   being replaced with placeholders: among them credentials in request
@@ -120,6 +142,23 @@ endpoints of its own under `/api/admin/security/redact/exceptions`.
 
 ### Changed
 
+- **CPU execution grows with load.** The permanent I/O scheduler uses at
+  most eight workers by default. Parsing, redaction, inspection and
+  conversion share CPU admission with password hashing; sufficiently
+  provisioned 80-CPU machines can run 80 CPU jobs. Extra threads retire
+  after ten idle seconds. Argon2 also observes a memory-based concurrency
+  limit, retained until a running hash finishes even if its caller leaves.
+- **Buffers and audit retries retain admission until their final owner
+  releases them.** Chunked AI/MCP responses, cache reads, transformed
+  output and detached stream tails use the same buffering budget. MCP
+  discovery, provider/registry catalogs, OAuth endpoints, S3 reads and
+  audit-forwarder diagnostics also use bounded reads. Local pressure does
+  not count as an upstream failure. Audit queue and ClickHouse retry
+  batches share a separate byte limit and expose buffered-memory and
+  dropped-entry pressure through metrics.
+- **Release binaries use mimalloc.** Linux also applies a process-local
+  transparent-huge-page policy before runtime threads start. Host sysctls
+  and deployment resource settings need no changes.
 - **A redaction policy written through `PATCH /api/admin/settings` keeps
   the stored exceptions**, whatever it carries: they are changed only
   through their own endpoints, and the console writes the rest of the
@@ -2817,7 +2856,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.10.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.11.0...HEAD
+[3.11.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.11.0
 [3.10.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.10.0
 [3.9.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.1
 [3.9.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.0
