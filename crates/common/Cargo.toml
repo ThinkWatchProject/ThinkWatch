@@ -46,13 +46,13 @@ url = { workspace = true }
 # against any S3-compatible backend including RustFS / MinIO / AWS S3).
 aws-sigv4 = { workspace = true }
 aws-credential-types = { workspace = true }
-http_1x = { package = "http", version = "1" }
-async-trait = "0.1"
+http_1x = { package = "http", version = "1.5.0" }
+async-trait = "0.1.92"
 http-body-util = { workspace = true }
-http-body = "1"
-sysinfo = { version = "0.36", default-features = false, features = ["system"] }
+http-body = "1.1.0"
+sysinfo = { version = "0.40.3", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 async-stream = { workspace = true }
-tempfile = "3"
+tempfile = "3.27.0"
 tower = { workspace = true, features = ["util"] }
