@@ -73,10 +73,7 @@ pub async fn list_templates(
                     return false;
                 }
             }
-            if q.featured == Some(true) && !t.featured {
-                return false;
-            }
-            true
+            q.featured != Some(true) || t.featured
         })
         .map(|t| {
             let installed = installed_set.contains(&t.id);
