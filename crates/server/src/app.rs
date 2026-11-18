@@ -21,7 +21,6 @@ use think_watch_common::config::AppConfig;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::guard_policy::saved::SavedSecrets;
 use think_watch_gateway::cache::ResponseCache;
-use think_watch_gateway::model_mapping::ModelMapper;
 use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
 use think_watch_gateway::router::{ModelRouter, RouteEntry};
 use think_watch_mcp_gateway::proxy::McpProxy;
@@ -68,6 +67,7 @@ pub struct AppState {
     /// Gateway model router. Wrapped in `ArcSwap` so route changes
     /// (provider/model CRUD, sync) take effect without restart.
     pub gateway_router: Arc<arc_swap::ArcSwap<ModelRouter>>,
+    pub hosted_web: Arc<gateway_proxy::HostedWebRuntime>,
     /// Shared model-weight cache (per-model `input_weight` /
     /// `output_weight` pulled from the `models` table). Lives on
     /// AppState so model CRUD handlers can invalidate it after a
@@ -261,8 +261,8 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     let weight_cache = state.weight_cache.clone();
 
     let gateway_state = GatewayState {
+        hosted_web: state.hosted_web.clone(),
         router: state.gateway_router.clone(),
-        model_mapper: Arc::new(ModelMapper::new()),
         // Share the hot-swappable guards with the gateway state.
         guards: state.guards.clone(),
         cache: Arc::new(ResponseCache::new(
@@ -305,6 +305,10 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             post(gateway_proxy::proxy_responses).get(gateway_proxy::proxy_responses_ws),
         )
         .route("/v1/models", get(gateway_proxy::list_models_handler))
+        .route(
+            "/codex/models",
+            get(gateway_proxy::list_codex_models_handler),
+        )
         // Gemini: `{model}:generateContent` / `:streamGenerateContent`.
         // Its SDKs call v1beta; some clients call v1.
         .route(
@@ -313,6 +317,9 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         )
         .route("/v1beta/models/{target}", post(gateway_proxy::proxy_gemini))
         .route("/v1/models/{target}", post(gateway_proxy::proxy_gemini))
+        .layer(axum::middleware::from_fn(
+            think_watch_common::resources::http::admit,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::api_key_auth::require_api_key("ai_gateway"),
@@ -381,6 +388,9 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     let mcp_routes = Router::new()
         .route("/mcp", post(streamable_http::handle_post))
         .route("/mcp", delete(streamable_http::handle_delete))
+        .layer(axum::middleware::from_fn(
+            think_watch_common::resources::http::admit,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::api_key_auth::require_api_key("mcp_gateway"),
@@ -440,9 +450,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         .merge(ai_routes)
         .merge(key_routes)
         .merge(mcp_routes)
-        .layer(axum::middleware::from_fn(
-            think_watch_common::resources::http::admit,
-        ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
         // When the timeout below starts counting: a whole answer's retries
         // stop in time for its error to be written (see `gateway_proxy::retry`).
@@ -1001,6 +1008,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::admin::get_all_settings).patch(handlers::admin::update_settings),
         )
         .route(
+            "/api/admin/settings/web-tools/test",
+            post(handlers::admin::test_web_tool),
+        )
+        .route(
             "/api/admin/settings/category/{category}",
             get(handlers::admin::get_settings_by_category),
         )
@@ -1314,6 +1325,7 @@ async fn load_providers_into_router(
     use think_watch_gateway::router::{AffinityMode, ModelRoutingConfig};
     use think_watch_gateway::strategy::RoutingStrategy;
     for m in &model_rows {
+        router.register_model_name(&m.model_id);
         let cfg = ModelRoutingConfig {
             strategy: m
                 .routing_strategy

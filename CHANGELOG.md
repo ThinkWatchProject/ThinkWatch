@@ -11,6 +11,38 @@ target.
 
 ## [Unreleased]
 
+## [3.12.0] — 2026-11-18
+
+ThinkWatch adds hosted web tools and Codex model discovery to the enterprise
+gateway. Administrators manage both features in the console.
+
+### Added
+
+- Enable hosted web search, page reading, and find-in-page for selected API
+  keys. Choose search sources and their order, set domain rules, and test the
+  saved configuration with results, timings, and diagnostics.
+- Use the Codex connection guide to copy a gateway profile. The native model
+  catalog respects each key's model permissions and requests upstream
+  metadata for the client's Codex version.
+- Configure model aliases and per-provider capabilities. Alias names are
+  checked against the model catalog, and alias targets need an active route.
+
+### Changed
+
+- Each client turn consumes one request from the user's and API key's limits.
+  Hosted model rounds continue to account for actual model usage. Previous web
+  results remain usable after hosted execution is turned off.
+- Concurrent edits to hosted web settings and model discovery produce a
+  conflict message and preserve the console draft.
+- Request body admission queues uploads in arrival order and returns a
+  retryable `429` when admission expires. The gateway also adapts multi-turn
+  Chat reasoning history and negotiates upstream streaming for eligible
+  HTTP requests.
+- Shared ThinkWatch Core libraries move to `v0.98.1`, bringing typed
+  Chat/Mistral responses and improvements to secrets detection and streaming
+  restoration. Source builds require Rust 1.96 or newer, the
+  `wasm32-unknown-unknown` target, and Clang and LLVM tools.
+
 ## [3.11.0] — 2026-11-03
 
 Execution and buffering now adapt automatically to available CPUs and memory,
@@ -2856,7 +2888,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.11.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v3.12.0...HEAD
+[3.12.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.12.0
 [3.11.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.11.0
 [3.10.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.10.0
 [3.9.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v3.9.1

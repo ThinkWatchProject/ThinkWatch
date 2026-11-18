@@ -97,6 +97,7 @@ const DYNAMIC_ENUMS = {
   // Tags emitted by the Promise.all loader in src/routes/admin/settings.tsx.
   // Keep in lockstep with the `tag('<name>', ...)` calls there.
   'settingsPage.loadKey.${_}': ['serverInfo', 'auditConfig', 'settings', 'health', 'roles'],
+  'settings.hostedWeb.${_}': ['maxResults', 'readPages', 'pageChars', 'timeout', 'concurrency', 'interval', 'cache', 'maxCalls'],
   'mcpStore.category.${_}': [
     'developer', 'database', 'communication', 'cloud',
     'utility', 'knowledge', 'productivity',

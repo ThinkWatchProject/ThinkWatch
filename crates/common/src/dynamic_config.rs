@@ -2,7 +2,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Database-backed dynamic configuration with in-memory cache.
 ///
@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct DynamicConfig {
     cache: Arc<RwLock<HashMap<String, Value>>>,
+    reload_lock: Arc<Mutex<()>>,
     db: PgPool,
 }
 
@@ -29,12 +30,15 @@ impl DynamicConfig {
 
         Ok(Self {
             cache: Arc::new(RwLock::new(map)),
+            reload_lock: Arc::new(Mutex::new(())),
             db,
         })
     }
 
     /// Reload all settings from the database.
     pub async fn reload(&self) -> anyhow::Result<()> {
+        // Serialize snapshots so an older DB read cannot replace a newer one.
+        let _reload = self.reload_lock.lock().await;
         let rows: Vec<(String, Value)> = sqlx::query_as("SELECT key, value FROM system_settings")
             .fetch_all(&self.db)
             .await?;
@@ -44,18 +48,18 @@ impl DynamicConfig {
             map.insert(key, value);
         }
 
-        let mut cache = self.cache.write().await;
-        *cache = map;
+        *self.cache.write().await = map;
         Ok(())
     }
 
-    /// Update one or more settings in the database and refresh the cache.
-    /// Validates values before persisting.
-    pub async fn update(
+    /// Compare the value read by the editor and replace it in the same SQL
+    /// statement. A conflict rolls back the whole settings patch.
+    pub async fn update_checked(
         &self,
         updates: &HashMap<String, Value>,
+        expected: &HashMap<String, Value>,
         updated_by: Option<uuid::Uuid>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Result<(), String>> {
         // Validate values before persisting
         for (key, value) in updates {
             validate_setting(key, value)?;
@@ -63,22 +67,29 @@ impl DynamicConfig {
 
         let mut tx = self.db.begin().await?;
 
-        for (key, value) in updates {
-            sqlx::query(
+        let mut ordered: Vec<_> = updates.iter().collect();
+        ordered.sort_unstable_by_key(|(key, _)| *key);
+        for (key, value) in ordered {
+            let result = sqlx::query(
                 r#"UPDATE system_settings
                    SET value = $1, updated_by = $2, updated_at = now()
-                   WHERE key = $3"#,
+                   WHERE key = $3 AND ($4::jsonb IS NULL OR value = $4)"#,
             )
             .bind(value)
             .bind(updated_by)
             .bind(key)
+            .bind(expected.get(key))
             .execute(&mut *tx)
             .await?;
+            if expected.contains_key(key) && result.rows_affected() == 0 {
+                tx.rollback().await?;
+                return Ok(Err(key.clone()));
+            }
         }
 
         tx.commit().await?;
         self.reload().await?;
-        Ok(())
+        Ok(Ok(()))
     }
 
     // --- Typed getters ---

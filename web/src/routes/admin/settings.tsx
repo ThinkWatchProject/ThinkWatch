@@ -34,12 +34,25 @@ import { NumberField } from './settings/NumberField';
 import { useFieldAutosave } from './settings/useFieldAutosave';
 import { SaveIndicator } from './settings/SaveIndicator';
 import { OidcWizardCard } from './settings/oidc/OidcWizardCard';
+import { HostedWebSettings, type HostedWebConfig } from './settings/HostedWebSettings';
+import { ModelDiscoverySettings, type ModelDiscoveryConfig } from './settings/ModelDiscoverySettings';
 
 // One PATCH per field, keyed by the backend's dotted setting id. The
 // server treats the body as a merge so sending a one-key object is the
 // minimum-footprint way to commit an inline edit.
 async function patchOne(key: string, value: unknown): Promise<void> {
   await apiPatch('/api/admin/settings', { settings: { [key]: value } });
+}
+
+async function updateGatewaySetting(key: string, value: unknown, expected: unknown) {
+  await apiPatch('/api/admin/settings', { settings: { [key]: value }, expected: { [key]: expected } });
+}
+
+async function loadGatewaySetting<T>(key: string): Promise<T> {
+  const settings = await api<SettingEntry[]>('/api/admin/settings/category/gateway');
+  const current = settings.find((item) => item.key === key);
+  if (!current) throw new Error(key + ' is missing');
+  return current.value as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +119,8 @@ export function SettingsPage() {
   const [defaultAffinityTtlSecs, setDefaultAffinityTtlSecs] = useState(300);
   const [latencyStrategyK, setLatencyStrategyK] = useState(2.0);
   const [retryWaitSecs, setRetryWaitSecs] = useState(120);
+  const [modelDiscovery, setModelDiscovery] = useState<ModelDiscoveryConfig>();
+  const [hostedWeb, setHostedWeb] = useState<HostedWebConfig>();
   const [cbEnabled, setCbEnabled] = useState(true);
   const [cbErrorPct, setCbErrorPct] = useState(50);
   const [cbMinSamples, setCbMinSamples] = useState(10);
@@ -164,6 +179,8 @@ export function SettingsPage() {
     setDefaultAffinityTtlSecs(num(getSettingValue(data, 'gateway', 'default_affinity_ttl_secs'), 300));
     setLatencyStrategyK(Number(getSettingValue(data, 'gateway', 'latency_strategy_k')) || 2.0);
     setRetryWaitSecs(num(getSettingValue(data, 'gateway', 'retry_wait_secs'), 120));
+    setModelDiscovery(getSettingValue(data, 'gateway', 'model_discovery') as ModelDiscoveryConfig | undefined);
+    setHostedWeb(getSettingValue(data, 'gateway', 'web_tools') as HostedWebConfig | undefined);
     setCbEnabled(getSettingValue(data, 'gateway', 'cb_enabled') !== false);
     setCbErrorPct(num(getSettingValue(data, 'gateway', 'cb_error_pct'), 50));
     setCbMinSamples(num(getSettingValue(data, 'gateway', 'cb_min_samples'), 10));
@@ -677,6 +694,27 @@ export function SettingsPage() {
               </div>
             </CardContent>
           </Card>
+
+          {hostedWeb && (
+            <HostedWebSettings initial={hostedWeb} persist={async (value) => {
+              await updateGatewaySetting('gateway.web_tools', value, hostedWeb);
+              setHostedWeb(value);
+            }} loadLatest={async () => {
+              const latest = await loadGatewaySetting<HostedWebConfig>('gateway.web_tools');
+              setHostedWeb(latest);
+              return latest;
+            }} />
+          )}
+          {modelDiscovery && (
+            <ModelDiscoverySettings initial={modelDiscovery} persist={async (value) => {
+              await updateGatewaySetting('gateway.model_discovery', value, modelDiscovery);
+              setModelDiscovery(value);
+            }} loadLatest={async () => {
+              const latest = await loadGatewaySetting<ModelDiscoveryConfig>('gateway.model_discovery');
+              setModelDiscovery(latest);
+              return latest;
+            }} />
+          )}
 
           {/* Circuit breaker: trip routes whose recent error rate
               crosses the threshold so they stop receiving traffic

@@ -4,10 +4,12 @@
 
 use std::collections::BTreeSet;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 
-use super::{GatewayRequestIdentity, GatewayState};
+use super::{GatewayRequestIdentity, GatewayState, ModelDiscovery};
 use crate::model_mapping::ModelMapper;
 use crate::router::ModelRouter;
 
@@ -21,8 +23,14 @@ use crate::router::ModelRouter;
 /// let through for `gpt-4o` although no router name is `gpt-4o`, and only
 /// its allow-list names it. A listed model is one a request for it is let
 /// through for and routed, and a model the key may not use is not listed.
-fn callable_models(state: &GatewayState, identity: &GatewayRequestIdentity) -> Vec<String> {
-    callable_models_in(&state.router.load(), &state.model_mapper, identity)
+fn callable_models(
+    router: &ModelRouter,
+    cfg: &ModelDiscovery,
+    identity: &GatewayRequestIdentity,
+) -> Vec<String> {
+    let mut models = callable_models_in(router, &cfg.mapper(), identity);
+    cfg.apply_visibility(&mut models, router, identity);
+    models
 }
 
 fn callable_models_in(
@@ -53,17 +61,19 @@ pub async fn list_models_handler(
     State(state): State<GatewayState>,
     Extension(identity): Extension<GatewayRequestIdentity>,
 ) -> Json<serde_json::Value> {
-    let model_objects: Vec<serde_json::Value> = callable_models(&state, &identity)
-        .into_iter()
-        .map(|id| {
-            serde_json::json!({
-                "id": id,
-                "object": "model",
-                "created": 0,
-                "owned_by": "think-watch",
+    let cfg = ModelDiscovery::load(&state).await;
+    let model_objects: Vec<serde_json::Value> =
+        callable_models(&state.router.load(), &cfg, &identity)
+            .into_iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "think-watch",
+                })
             })
-        })
-        .collect();
+            .collect();
 
     Json(serde_json::json!({
         "object": "list",
@@ -79,7 +89,8 @@ pub async fn list_gemini_models_handler(
     State(state): State<GatewayState>,
     Extension(identity): Extension<GatewayRequestIdentity>,
 ) -> Json<serde_json::Value> {
-    let models: Vec<serde_json::Value> = callable_models(&state, &identity)
+    let cfg = ModelDiscovery::load(&state).await;
+    let models: Vec<serde_json::Value> = callable_models(&state.router.load(), &cfg, &identity)
         .into_iter()
         .map(|id| {
             serde_json::json!({
@@ -89,6 +100,57 @@ pub async fn list_gemini_models_handler(
         })
         .collect();
     Json(serde_json::json!({ "models": models }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CodexModelsQuery {
+    client_version: Option<String>,
+}
+
+/// The native Codex model picker uses the same model permission as inference.
+pub async fn list_codex_models_handler(
+    State(state): State<GatewayState>,
+    Extension(identity): Extension<GatewayRequestIdentity>,
+    Query(query): Query<CodexModelsQuery>,
+) -> Response {
+    if query.client_version.as_ref().is_some_and(|version| {
+        version.len() > 32
+            || version.split('.').count() != 3
+            || !version
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Expected client_version in major.minor.patch format",
+        )
+            .into_response();
+    }
+    let cfg = ModelDiscovery::load(&state).await;
+    let router = state.router.load_full();
+    let names = callable_models(&router, &cfg, &identity);
+    let catalog = super::model_discovery::codex_catalog(
+        &router,
+        &cfg,
+        &names,
+        &identity,
+        query.client_version.as_deref(),
+    )
+    .await;
+    let body = catalog.to_string();
+    if body.len() > 1024 * 1024 {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Model catalog exceeds one MiB",
+        )
+            .into_response();
+    }
+    let mut response = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -134,6 +196,19 @@ mod tests {
             allowed_models: allowed.map(|a| a.iter().map(|m| m.to_string()).collect()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn hiding_an_original_requires_the_same_access_as_its_alias() {
+        let cfg = ModelDiscovery::parse(
+            serde_json::json!({"aliases":{"code":{"target":"gpt-4o","hide_original":true}}}),
+        )
+        .unwrap();
+        let router = router();
+        let allowed = narrowed(Some(&["gpt-4o"]));
+        assert_eq!(callable_models(&router, &cfg, &allowed), ["code"]);
+        assert!(allowed.may_call(&cfg.resolve("gpt-4o")));
+        assert!(callable_models(&router, &cfg, &narrowed(Some(&["code"]))).is_empty());
     }
 
     #[test]

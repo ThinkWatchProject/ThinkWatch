@@ -52,10 +52,8 @@ pub struct ApiKey {
     /// generations on a single index lookup. Backed by
     /// `idx_api_keys_lineage_id`.
     ///
-    /// Server-internal: skipped from JSON responses so the frontend
-    /// stays unaware of rotation generations. Per-key history is
-    /// rolled up by the read handlers via PG-side
-    /// `id → lineage_id` resolution.
+    /// Excluded from the shared JSON representation. The key inventory
+    /// projects it explicitly for settings that must survive rotation.
     #[serde(skip_serializing)]
     pub lineage_id: Uuid,
     /// Optional cost-center / project tag for per-subject analytics

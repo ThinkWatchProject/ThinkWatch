@@ -25,7 +25,7 @@ use think_watch_common::lifecycle::stages::{
     check_access, check_budget, check_limits, run_post_invoke,
 };
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord, Raw};
-use think_watch_common::limits::{RequestLimits, usage};
+use think_watch_common::limits::{RateMetric, RequestLimits, usage};
 use tw_dialect::ir::Dialect;
 
 /// Pre-flight result threaded through to `ChatPostInvokeDeps` later
@@ -33,6 +33,12 @@ use tw_dialect::ir::Dialect;
 /// caller doesn't have to re-derive the rule/cap lists from identity.
 pub(super) struct Preflight {
     pub(super) limits: RequestLimits,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum AiRound {
+    Client,
+    HostedContinuation,
 }
 
 /// Run the three shared pre-flight stages — `check_budget` →
@@ -52,8 +58,24 @@ pub(super) async fn run_preflight_stages(
     identity: &GatewayRequestIdentity,
     trace_id: &str,
     model: &str,
+    round: AiRound,
 ) -> Result<Preflight, GatewayErrorResponse> {
     let limits = limits_for_ai_gateway(identity);
+    let continuing;
+    let rules = match round {
+        AiRound::Client => &limits.rules,
+        AiRound::HostedContinuation => {
+            // Each model round still checks token limits and the owner's
+            // remaining budget. The client request was admitted once.
+            continuing = limits
+                .rules
+                .iter()
+                .filter(|rule| rule.metric != RateMetric::Requests)
+                .cloned()
+                .collect::<Vec<_>>();
+            &continuing
+        }
+    };
     let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
 
     let raw = Raw::<ChatCompletionSurface>::new(
@@ -75,7 +97,7 @@ pub(super) async fn run_preflight_stages(
         .map_err(short_circuit_to_response)?;
     let _authorized = check_limits::<ChatCompletionSurface>(
         access_checked,
-        &limits.rules,
+        rules,
         limits.owner,
         &state.redis,
         fail_closed,
@@ -86,7 +108,8 @@ pub(super) async fn run_preflight_stages(
     // Past the rate limits, the request counts on its key and its owner,
     // as it has on every `requests` rule. Fail-open: the counts are for
     // reading.
-    if let Some(lineage) = limits.key_lineage
+    if matches!(round, AiRound::Client)
+        && let Some(lineage) = limits.key_lineage
         && let Err(e) =
             usage::record_request(&state.redis, limits.owner, lineage, chrono::Utc::now()).await
     {

@@ -12,7 +12,9 @@ COPY deploy/clickhouse/ deploy/clickhouse/
 
 # Determine musl target from the native build arch
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y musl-tools && \
+ENV TW_WASM_CLANG=/usr/bin/clang-15 TW_WASM_AR=/usr/bin/llvm-ar-15
+RUN apt-get update && apt-get install -y musl-tools clang-15 llvm-15 && \
+    rustup target add wasm32-unknown-unknown && \
     if [ "$TARGETARCH" = "arm64" ]; then \
         rustup target add aarch64-unknown-linux-musl; \
     else \

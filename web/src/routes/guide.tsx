@@ -209,6 +209,36 @@ claude`;
   );
 }
 
+function CodexTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
+  const code = `[features]
+api_key_model_discovery = true
+
+[model_providers.thinkwatch]
+name = "ThinkWatch"
+base_url = "${gatewayUrl}/v1"
+model_catalog_url = "${gatewayUrl}/codex/models"
+wire_api = "responses"
+env_key = "THINKWATCH_GATEWAY_KEY"
+requires_openai_auth = false
+supports_websockets = false
+
+[profiles.thinkwatch]
+model_provider = "thinkwatch"`;
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">{t('guide.codexDesc')}</p>
+      <Button asChild variant="outline" size="sm">
+        <Link to="/api-keys">{t('guide.cta.goToApiKeys')}</Link>
+      </Button>
+      <StepList steps={[t('guide.aiStep.createKey'), t('guide.codexEnv'), t('guide.codexConfig'), t('guide.codexLaunch')]} />
+      <CodeBlock code={code} />
+      <InfoBox>{t('guide.codexLocalCatalog')}</InfoBox>
+    </div>
+  );
+}
+
 function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
   const { t } = useTranslation();
   const code = `// In Cursor Settings > Models > OpenAI API Key
@@ -833,6 +863,7 @@ export function GuidePage() {
                 <TabsList className="flex-wrap">
                   <TabsTrigger value="lite">{t('guide.lite')}</TabsTrigger>
                   <TabsTrigger value="claude-code">{t('guide.claudeCode')}</TabsTrigger>
+                  <TabsTrigger value="codex">Codex</TabsTrigger>
                   <TabsTrigger value="cursor">{t('guide.cursor')}</TabsTrigger>
                   <TabsTrigger value="continue">{t('guide.continue')}</TabsTrigger>
                   <TabsTrigger value="cline">{t('guide.cline')}</TabsTrigger>
@@ -846,6 +877,9 @@ export function GuidePage() {
                 </TabsContent>
                 <TabsContent value="claude-code" className="mt-4">
                   <ClaudeCodeTab gatewayUrl={gatewayUrl} />
+                </TabsContent>
+                <TabsContent value="codex" className="mt-4">
+                  <CodexTab gatewayUrl={gatewayUrl} />
                 </TabsContent>
                 <TabsContent value="cursor" className="mt-4">
                   <CursorTab gatewayUrl={gatewayUrl} />

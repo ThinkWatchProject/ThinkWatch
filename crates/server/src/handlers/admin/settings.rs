@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use think_watch_common::dynamic_config::{self, SettingEntry};
@@ -238,9 +240,58 @@ pub async fn get_settings_by_category(
     Ok(Json(settings))
 }
 
+pub async fn test_web_tool(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(request): Json<tw_api::WebToolRequest>,
+) -> Result<Response, AppError> {
+    auth_user
+        .require_global_permission(&state.db, "settings:write")
+        .await?;
+    let value = sqlx::query_scalar("SELECT value FROM system_settings WHERE key = $1")
+        .bind(think_watch_gateway::proxy::HostedWebSettings::KEY)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Hosted web tools are not configured".into()))?;
+    let settings = think_watch_gateway::proxy::HostedWebSettings::parse(value)
+        .map_err(AppError::BadRequest)?;
+    let guards = state.guards.load_full();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        settings.diagnose(
+            &state.hosted_web,
+            &guards,
+            &state.audit,
+            auth_user.claims.sub,
+            request,
+        ),
+    )
+    .await;
+    let failed = |status, message: String| {
+        (
+            status,
+            Json(serde_json::json!({"error":{"message":message}})),
+        )
+            .into_response()
+    };
+    Ok(match result {
+        Ok(Ok(data)) => Json(data).into_response(),
+        Ok(Err(error)) => failed(
+            StatusCode::from_u16(error.status_code() as u16).unwrap_or(StatusCode::BAD_GATEWAY),
+            error.to_string(),
+        ),
+        Err(_) => failed(
+            StatusCode::GATEWAY_TIMEOUT,
+            "The diagnostic stopped after 25 seconds".into(),
+        ),
+    })
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateSettingsRequest {
     pub settings: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub expected: HashMap<String, serde_json::Value>,
 }
 
 /// PATCH /api/admin/settings — update one or more settings.
@@ -259,6 +310,7 @@ pub struct UpdateSettingsRequest {
         (status = 200, description = "Settings updated"),
         (status = 400, description = "Validation error"),
         (status = 403, description = "Forbidden"),
+        (status = 409, description = "A setting changed since it was loaded"),
     ),
     security(("BearerAuth" = []))
 )]
@@ -303,6 +355,24 @@ pub async fn update_settings(
     for (key, value) in &req.settings {
         validate_setting(key, value)?;
     }
+    use think_watch_gateway::proxy::{HostedWebSettings, ModelDiscovery};
+    for key in [HostedWebSettings::KEY, ModelDiscovery::KEY] {
+        if req.settings.contains_key(key) && !req.expected.contains_key(key) {
+            return Err(AppError::BadRequest(format!(
+                "Include the current value in expected for {key}"
+            )));
+        }
+    }
+    if let Some(value) = req.settings.get(ModelDiscovery::KEY) {
+        let cfg = ModelDiscovery::parse(value.clone()).map_err(AppError::BadRequest)?;
+        let existing = crate::services::model_repository::list_ids(&state.db)
+            .await?
+            .into_iter()
+            .map(|row| row.model_id)
+            .collect();
+        cfg.validate_aliases(&state.gateway_router.load(), &existing)
+            .map_err(AppError::BadRequest)?;
+    }
 
     // DB-level validation for settings that reference other entities
     if let Some(role_val) = req.settings.get("auth.default_role") {
@@ -316,9 +386,10 @@ pub async fn update_settings(
 
     state
         .dynamic_config
-        .update(&req.settings, Some(auth_user.claims.sub))
+        .update_checked(&req.settings, &req.expected, Some(auth_user.claims.sub))
         .await
-        .map_err(AppError::Internal)?;
+        .map_err(AppError::Internal)?
+        .map_err(|key| AppError::Conflict(format!("{key} changed since it was loaded")))?;
 
     // Hot-reload the request guards immediately on this instance (other
     // instances pick it up via the Redis Pub/Sub subscriber).
@@ -729,6 +800,14 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                     "cb_window_secs must be between 5 and 3600".into(),
                 ));
             }
+        }
+        think_watch_gateway::proxy::ModelDiscovery::KEY => {
+            think_watch_gateway::proxy::ModelDiscovery::parse(value.clone())
+                .map_err(AppError::BadRequest)?;
+        }
+        think_watch_gateway::proxy::HostedWebSettings::KEY => {
+            think_watch_gateway::proxy::HostedWebSettings::parse(value.clone())
+                .map_err(AppError::BadRequest)?;
         }
         "gateway.cb_open_secs" => {
             let v = value

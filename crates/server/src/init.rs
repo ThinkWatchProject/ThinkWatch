@@ -144,6 +144,7 @@ pub async fn init_state(
         )),
         http_client: Arc::new(arc_swap::ArcSwap::from_pointee(init_http_client)),
         gateway_router,
+        hosted_web: Default::default(),
         weight_cache,
         user_token_resolver,
         url_validator: think_watch_common::validation::production_url_validator(),

@@ -132,6 +132,7 @@ pub struct ModelRouter {
     /// deterministic candidate ordering (helps test stability and
     /// makes the decision log easier to scan).
     routes: HashMap<String, Vec<RouteEntry>>,
+    catalog_models: std::collections::HashSet<String>,
     /// Per-model routing overrides. Lookup falls through to global
     /// defaults (`gateway.default_*` in system_settings) when absent.
     configs: HashMap<String, ModelRoutingConfig>,
@@ -144,11 +145,27 @@ impl Default for ModelRouter {
 }
 
 impl ModelRouter {
+    pub fn has_model_name(&self, model: &str) -> bool {
+        self.catalog_models.contains(model) || self.routes.contains_key(model)
+    }
+
+    pub fn can_route_alias_target(&self, model: &str) -> bool {
+        self.route(model).is_some_and(|routes| {
+            self.routes.contains_key(model)
+                || routes.iter().all(|route| route.upstream_model.is_none())
+        })
+    }
+
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            catalog_models: Default::default(),
             configs: HashMap::new(),
         }
+    }
+
+    pub fn register_model_name(&mut self, model: &str) {
+        self.catalog_models.insert(model.to_owned());
     }
 
     /// Set per-model routing config (strategy / affinity overrides).

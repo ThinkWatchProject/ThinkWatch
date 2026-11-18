@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
 
 #[cfg(any(target_os = "linux", test))]
 mod cgroup;
@@ -119,6 +119,8 @@ pub async fn password_slot() -> (OwnedSemaphorePermit, OwnedSemaphorePermit) {
 pub struct ByteBudget {
     limit: usize,
     used: Mutex<usize>,
+    intake: AsyncMutex<()>,
+    released: Notify,
 }
 
 impl ByteBudget {
@@ -126,6 +128,8 @@ impl ByteBudget {
         Arc::new(Self {
             limit,
             used: Mutex::new(0),
+            intake: AsyncMutex::new(()),
+            released: Notify::new(),
         })
     }
 
@@ -165,11 +169,20 @@ impl Reservation {
             reservation: Arc::new(self),
         })
     }
+
+    fn shrink(&mut self, bytes: usize) {
+        let released = self.charged.saturating_sub(bytes);
+        if released != 0 {
+            self.charged -= released;
+            *self.budget.used.lock().unwrap_or_else(|e| e.into_inner()) -= released;
+            self.budget.released.notify_waiters();
+        }
+    }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        *self.budget.used.lock().unwrap_or_else(|e| e.into_inner()) -= self.charged;
+        self.shrink(0);
     }
 }
 
