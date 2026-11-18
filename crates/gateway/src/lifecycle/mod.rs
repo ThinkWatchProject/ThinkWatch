@@ -33,7 +33,7 @@ use think_watch_common::limits::RequestLimits;
 use tw_dialect::ir::Dialect;
 
 use crate::guards::Guards;
-use crate::proxy::generate::{Wire, priced, tokens};
+use crate::proxy::generate::{UpstreamReply, Wire, priced, tokens};
 use crate::proxy::min_speed::{CHECK_EVERY, MinSpeed, SpeedWatch};
 use crate::proxy::retry::{KEEP_ALIVE, KEEP_ALIVE_FRAME};
 use crate::proxy::shaper::{StreamShaper, rewrite_model};
@@ -171,7 +171,7 @@ pub(crate) struct ChatPostInvokeDeps {
 pub(crate) type OpenUpstream = Box<
     dyn FnMut() -> Pin<
             Box<
-                dyn std::future::Future<Output = Result<(reqwest::Response, Wire), GatewayError>>
+                dyn std::future::Future<Output = Result<(UpstreamReply, Wire), GatewayError>>
                     + Send,
             >,
         > + Send,
@@ -385,9 +385,16 @@ pub(crate) fn build_chat_pump(
             if let Ok(mut s) = sent.lock() {
                 s.effort = wire.effort;
             }
+            let (mut source, adapted_usage) = match upstream {
+                UpstreamReply::Http(response) => (response.bytes_stream().boxed(), None),
+                UpstreamReply::Adapted { body, usage, .. } => (
+                    futures::stream::once(std::future::ready(Ok(body))).boxed(), usage,
+                ),
+            };
             if let Ok(mut r) = readers.lock() {
                 *r = Readers {
                     sniffer: Some(tw_dialect::usage::Sniffer::new()),
+                    adapted_usage,
                     collector: Some(wire.collect.collector()),
                     errors: Some(ErrorWatch::new(wire.dialect)),
                     ledger: Some(wire.ledger.clone()),
@@ -410,7 +417,6 @@ pub(crate) fn build_chat_pump(
             let mut speed = min_speed.map(|m| SpeedWatch::new(m, wire.dialect));
             let mut judge = tokio::time::interval(CHECK_EVERY);
             judge.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut source = upstream.bytes_stream();
             loop {
                 let next = tokio::select! {
                     item = source.next() => Pulled::Item(item),
@@ -702,7 +708,9 @@ pub(crate) fn build_chat_pump(
                 let sniffer = r.sniffer.take();
                 (
                     sniffer.is_some(),
-                    sniffer.and_then(|s| s.finish()),
+                    r.adapted_usage
+                        .take()
+                        .or_else(|| sniffer.and_then(|s| s.finish())),
                     r.collector.take().and_then(|c| c.finish().ok()),
                     r.ledger.take(),
                 )
@@ -797,6 +805,7 @@ pub(crate) fn for_the_log(
 #[derive(Default)]
 struct Readers {
     sniffer: Option<tw_dialect::usage::Sniffer>,
+    adapted_usage: Option<tw_dialect::usage::Usage>,
     collector: Option<tw_dialect::convert::Collector>,
     /// `None` once it found an error.
     errors: Option<ErrorWatch>,

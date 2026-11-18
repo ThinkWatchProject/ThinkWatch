@@ -239,6 +239,14 @@ impl ListKeysParams {
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct ListedKey {
+    #[serde(flatten)]
+    key: ApiKey,
+    /// Settings refer to the stable key identity across rotations.
+    lineage_id: Uuid,
+}
+
 /// GET /api/keys
 ///
 /// Result set is the union of:
@@ -269,7 +277,7 @@ pub async fn list_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Query(params): Query<ListKeysParams>,
-) -> Result<Json<PaginatedResponse<ApiKey>>, AppError> {
+) -> Result<Json<PaginatedResponse<ListedKey>>, AppError> {
     auth_user.require_permission("api_keys:read")?;
     let per_page = params.per_page();
     let offset = params.offset();
@@ -301,7 +309,13 @@ pub async fn list_keys(
     };
 
     Ok(Json(PaginatedResponse {
-        data: keys,
+        data: keys
+            .into_iter()
+            .map(|key| ListedKey {
+                lineage_id: key.lineage_id,
+                key,
+            })
+            .collect(),
         total,
         page: params.page.unwrap_or(1).max(1),
         per_page,

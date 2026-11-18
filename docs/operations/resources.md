@@ -36,11 +36,14 @@ limit and use the same shared budget. MCP tool discovery, provider and registry
 catalogs, OAuth discovery, audit forwarder errors and S3 reads also use bounded
 reads, so administrative/background requests cannot bypass admission on ingress.
 
-Admission is incremental, including chunked responses. Readers reject growth
-before appending rather than waiting while holding partial bodies. Reservations
-follow shared buffers through transformations, slow clients, cancellation and
-detached stream audit work. Cache reads reserve before fetching and use bounded
-Redis reads even if a key changes between the size check and fetch.
+Request admission is FIFO. Known-length uploads reserve before reading and
+then continue concurrently. A single unknown-length upload can hold partial
+data while waiting for budget. Queue and budget waits are bounded at 30
+seconds, and an upload idle for 30 seconds returns 408. Reservations follow
+shared buffers through transformations, slow clients, cancellation and
+detached stream audit work. Upstream response reads still reject growth before
+appending when space is exhausted. Cache reads reserve before fetching and use
+bounded Redis reads even if a key changes between the size check and fetch.
 
 Memory pressure produces HTTP 429 with `Retry-After: 1` before streaming starts.
 Already-started streams terminate with an error event (MCP code `-32005`).

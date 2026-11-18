@@ -35,6 +35,24 @@ beforeEach(() => {
 })
 
 describe('GuidePage', () => {
+  it('shows the gateway Codex profile and the native catalog endpoint', async () => {
+    mockApi.mockResolvedValue({
+      public_protocol: 'https', public_host: 'gw.example.com', public_port: 443, gateway_port: 3000,
+    })
+    renderWithQueryClient(<GuidePage />)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('tab', { name: 'Codex' }))
+    await waitFor(() => {
+      const config = screen.getByText(/api_key_model_discovery = true/).textContent
+      expect(config).toContain('base_url = "https://gw.example.com/v1"')
+      expect(config).toContain('model_catalog_url = "https://gw.example.com/codex/models"')
+      expect(config).toContain('env_key = "THINKWATCH_GATEWAY_KEY"')
+      expect(config).toContain('[profiles.thinkwatch]')
+    })
+    expect(screen.getByText(/codex --profile thinkwatch/)).toBeInTheDocument()
+  })
+
   it('shows the configured gateway address', async () => {
     mockApi.mockResolvedValue({
       public_protocol: 'https',

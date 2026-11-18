@@ -22,7 +22,7 @@ pub use retention::{
 pub use security::{add_exception, get_security, list_exceptions, remove_exception, test_security};
 pub use settings::{
     AuditConfigResponse, SystemInfo, UpdateSettingsRequest, get_all_settings, get_audit_settings,
-    get_settings_by_category, get_system_settings, update_settings,
+    get_settings_by_category, get_system_settings, test_web_tool, update_settings,
 };
 pub use users::{
     CreateUserByAdminRequest, CreateUserByAdminResponse, ListUsersQuery, SuperAdminIds,

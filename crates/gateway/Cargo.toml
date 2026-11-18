@@ -8,6 +8,12 @@ tw-breaker = { workspace = true }
 tw-guard = { workspace = true }
 tw-dialect = { workspace = true }
 tw-bedrock = { workspace = true }
+tw-api = { workspace = true }
+tw-config = { workspace = true }
+tw-gateway = { workspace = true }
+tw-types = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 sqlx = { workspace = true }
@@ -30,7 +36,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 fred = { workspace = true }
 utoipa = { workspace = true }
-# sha2 removed — cache now uses xxhash; HMAC signing uses hmac crate in server
 regex = "1"
 rand = { workspace = true }
 metrics = { workspace = true }

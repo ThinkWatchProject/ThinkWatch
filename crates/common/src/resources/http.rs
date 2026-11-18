@@ -3,14 +3,45 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
+use tokio::time::{Instant, timeout, timeout_at};
 
-use super::{ByteBudget, policy};
+use super::{BODY_HEADROOM, ByteBudget, Reservation, policy};
+
+const BODY_WAIT: Duration = Duration::from_secs(30);
+
+async fn wait_for_bytes(budget: &ByteBudget, lease: &mut Reservation, bytes: usize) -> bool {
+    if bytes > budget.limit {
+        return false;
+    }
+    let deadline = Instant::now() + BODY_WAIT;
+    loop {
+        let released = budget.released.notified();
+        tokio::pin!(released);
+        released.as_mut().enable();
+        if lease.grow(bytes) {
+            return true;
+        }
+        if timeout_at(deadline, released).await.is_err() {
+            return false;
+        }
+    }
+}
+
+fn busy(budget: &ByteBudget) -> Response {
+    tracing::warn!(
+        used_bytes = budget.used(),
+        budget_bytes = budget.limit,
+        "Request body admission exhausted"
+    );
+    rejection(axum::http::StatusCode::TOO_MANY_REQUESTS)
+}
 
 /// Preserve Axum's JSON errors while moving large/concurrent decoding off I/O.
 pub struct ScheduledJson<T>(pub T);
@@ -59,14 +90,40 @@ async fn admit_with_budget(
     budget: &Arc<ByteBudget>,
     max: usize,
 ) -> Response {
+    if request.body().is_end_stream() {
+        return next.run(request).await;
+    }
     let (parts, body) = request.into_parts();
-    if body.size_hint().upper().is_some_and(|n| n > max as u64) {
+    let upper = body.size_hint().upper();
+    if upper.is_some_and(|n| n > max as u64) {
         return rejection(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
     }
+    // Known-size bodies reserve their entire allowance before reading, so
+    // only one partial, unknown-size body ever waits while holding memory.
+    let Ok(turn) = timeout(BODY_WAIT, budget.intake.lock()).await else {
+        return busy(budget);
+    };
+    let mut turn = Some(turn);
     let mut data = Vec::new();
     let mut lease = budget.reserve();
+    if let Some(upper) = upper {
+        if !wait_for_bytes(
+            budget,
+            &mut lease,
+            (upper as usize).saturating_mul(BODY_HEADROOM),
+        )
+        .await
+        {
+            return busy(budget);
+        }
+        drop(turn.take());
+    }
     let mut chunks = body.into_data_stream();
-    while let Some(chunk) = chunks.next().await {
+    loop {
+        let Ok(chunk) = timeout(BODY_WAIT, chunks.next()).await else {
+            return rejection(axum::http::StatusCode::REQUEST_TIMEOUT);
+        };
+        let Some(chunk) = chunk else { break };
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -86,11 +143,19 @@ async fn admit_with_budget(
         if size > max {
             return rejection(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
         }
-        if !lease.grow(size.saturating_mul(super::BODY_HEADROOM)) {
-            return rejection(axum::http::StatusCode::TOO_MANY_REQUESTS);
+        let charge = size.saturating_mul(BODY_HEADROOM);
+        let admitted = if turn.is_some() {
+            wait_for_bytes(budget, &mut lease, charge).await
+        } else {
+            lease.grow(charge)
+        };
+        if !admitted {
+            return busy(budget);
         }
         data.extend_from_slice(&chunk);
     }
+    drop(turn);
+    lease.shrink(data.len().saturating_mul(BODY_HEADROOM));
     let data = lease.wrap(data.into());
     let mut response = next
         .run(Request::from_parts(parts, Body::from(data.clone())))
@@ -109,6 +174,8 @@ fn rejection(status: axum::http::StatusCode) -> Response {
         "The gateway is buffering other requests. Retry shortly."
     } else if status == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
         "The request body exceeds the gateway buffering limit."
+    } else if status == axum::http::StatusCode::REQUEST_TIMEOUT {
+        "The request body stopped arriving. Send the request again."
     } else {
         "The request body could not be read."
     };
@@ -165,6 +232,32 @@ mod tests {
                     async move { admit_with_budget(request, next, &budget, max).await }
                 },
             ))
+    }
+
+    #[tokio::test]
+    async fn a_waiting_large_upload_precedes_later_small_uploads() {
+        let budget = ByteBudget::new(25 * BODY_HEADROOM);
+        let app = router(budget, 25);
+        let held = app
+            .clone()
+            .oneshot(Request::post("/").body(Body::from(vec![0; 20])).unwrap())
+            .await
+            .unwrap();
+        let upload = |size| {
+            app.clone()
+                .oneshot(Request::post("/").body(Body::from(vec![0; size])).unwrap())
+        };
+        let large = upload(24);
+        let small = upload(4);
+        tokio::pin!(large, small);
+        assert!(futures::poll!(&mut large).is_pending());
+        assert!(futures::poll!(&mut small).is_pending());
+        drop(held);
+        let large = large.await.unwrap();
+        assert_eq!(large.status(), 200);
+        assert!(futures::poll!(&mut small).is_pending());
+        drop(large);
+        assert_eq!(small.await.unwrap().status(), 200);
     }
 
     #[tokio::test]

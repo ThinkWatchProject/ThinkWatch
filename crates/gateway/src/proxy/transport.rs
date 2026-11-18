@@ -68,6 +68,9 @@ pub struct Upstream {
     /// The models this upstream refused the cache breakpoints a
     /// conversion adds for (see `proxy::cache_marks`).
     pub(crate) cache_marks: crate::proxy::cache_marks::Refused,
+    pub(crate) history: tw_gateway::history_memory::Cache,
+    pub(crate) response_modes: tw_gateway::stream_mode::Cache,
+    pub(crate) model_metadata: super::model_discovery::MetadataCache,
     /// The slowest generation a stream from this upstream may keep up
     /// (see `proxy::min_speed`). `None` ⇒ not measured.
     pub min_speed: Option<crate::proxy::min_speed::MinSpeed>,
@@ -82,6 +85,9 @@ impl Upstream {
             shape,
             label: label.to_string(),
             cache_marks: Default::default(),
+            history: Default::default(),
+            response_modes: Default::default(),
+            model_metadata: Default::default(),
             min_speed: None,
         }
     }
@@ -115,13 +121,50 @@ impl Upstream {
         extra: &[(String, String)],
         ctx: &CallCtx,
     ) -> Result<reqwest::Response, GatewayError> {
+        self.send_with_refusal(body, path, query, dialect, extra, ctx)
+            .await
+            .map_err(|refusal| refusal.error)
+    }
+
+    pub(crate) async fn send_with_refusal(
+        &self,
+        body: Vec<u8>,
+        path: &str,
+        query: Option<&str>,
+        dialect: tw_dialect::ir::Dialect,
+        extra: &[(String, String)],
+        ctx: &CallCtx,
+    ) -> Result<reqwest::Response, Refusal> {
         let resp = self
             .request(body, path, query, dialect, extra, ctx)
             .await?
             .send()
             .await
             .map_err(transport_error)?;
-        check_status(resp, &self.label).await
+        inspect_status(resp, &self.label).await
+    }
+
+    /// Core's negotiation keys use a resolved account identity. Pass only a
+    /// digest of configured headers and their request-specific substitutions.
+    pub(crate) fn negotiation_provider(
+        &self,
+        id: uuid::Uuid,
+        ctx: &CallCtx,
+    ) -> tw_config::Provider {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for (name, template) in &self.headers {
+            let value = crate::call_ctx::substitute_template(template, &ctx.attrs);
+            for field in [name.as_str(), value.as_str()] {
+                hash.update(field.len().to_le_bytes());
+                hash.update(field);
+            }
+        }
+        serde_json::from_value(serde_json::json!({
+            "name": format!("{id}:{}", hex::encode(hash.finalize())),
+            "base_url": self.base_url,
+        }))
+        .expect("Core provider identity has the required fields")
     }
 
     /// The request [`send`](Self::send) sends, built but not sent.
@@ -288,10 +331,40 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 /// and forwarding them verbatim turns the gateway into a leak. An auth
 /// error keeps its truncated body too, but not in the text the caller
 /// sees. The full body goes to the log.
+pub(crate) struct Refusal {
+    pub error: GatewayError,
+    pub repair: Option<Box<RepairEvidence>>,
+}
+
+pub(crate) struct RepairEvidence {
+    pub status: u16,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: bytes::Bytes,
+}
+
+impl From<GatewayError> for Refusal {
+    fn from(error: GatewayError) -> Self {
+        Self {
+            error,
+            repair: None,
+        }
+    }
+}
+
+#[cfg(test)]
 async fn check_status(
     resp: reqwest::Response,
     label: &str,
 ) -> Result<reqwest::Response, GatewayError> {
+    inspect_status(resp, label)
+        .await
+        .map_err(|refusal| refusal.error)
+}
+
+async fn inspect_status(
+    resp: reqwest::Response,
+    label: &str,
+) -> Result<reqwest::Response, Refusal> {
     let status = resp.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         // Echoed to the caller in whole seconds, as the upstream wrote it.
@@ -300,14 +373,16 @@ async fn check_status(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(crate::error::parse_retry_after_seconds);
-        return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
+        return Err(GatewayError::UpstreamRateLimited { retry_after_secs }.into());
     }
     if !status.is_success() {
         let retry_after = retry_after(resp.headers());
-        let body = think_watch_common::resources::read_response(resp, 64 * 1024)
-            .await
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_else(|error| error.to_string());
+        let headers = matches!(status.as_u16(), 400 | 422 | 501).then(|| resp.headers().clone());
+        let raw = think_watch_common::resources::read_response(resp, 64 * 1024).await;
+        let body = match &raw {
+            Ok(bytes) => String::from_utf8_lossy(bytes),
+            Err(error) => std::borrow::Cow::Owned(error.to_string()),
+        };
         tracing::warn!(provider = label, status = %status, body = %body, "upstream returned non-2xx");
         const CLIENT_MAX: usize = 512;
         let shown = if body.len() > CLIENT_MAX {
@@ -318,13 +393,18 @@ async fn check_status(
             }
             format!("{}…[truncated]", &body[..end])
         } else {
-            body
+            body.into_owned()
         };
-        return Err(status_error(
-            status.as_u16(),
-            retry_after,
-            format!("{label}: {shown}"),
-        ));
+        return Err(Refusal {
+            error: status_error(status.as_u16(), retry_after, format!("{label}: {shown}")),
+            repair: headers.zip(raw.ok()).map(|(headers, body)| {
+                Box::new(RepairEvidence {
+                    status: status.as_u16(),
+                    headers,
+                    body,
+                })
+            }),
+        });
     }
     Ok(resp)
 }

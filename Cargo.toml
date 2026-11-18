@@ -13,12 +13,12 @@ members = [
 version = "3.11.0"
 edition = "2024"
 # The MSRV: the newest `rust-version` among the locked dependencies
-# (sqlx 0.9 and the aws-smithy crates under aws-sigv4). Without it,
+# (including the Wasmtime runtime built by the shared Core gateway). Without it,
 # contributors on older toolchains get cryptic errors from deep in a
 # dependency instead of "you need rustc >= 1.94.1". The project tracks
 # the toolchain in rust-toolchain.toml (currently `stable`); the floor
 # lets CI / `cargo install` callers fail fast on incompatible versions.
-rust-version = "1.94.1"
+rust-version = "1.96.0"
 license = "BUSL-1.1"
 
 # Release profile tuned for the production server binary. `lto = true`
@@ -59,8 +59,9 @@ opt-level = 3
 # parsing (tw-dialect), redaction and tool-call inspection (tw-guard), the
 # circuit-breaker state machine (tw-breaker), and what only Amazon Bedrock
 # needs on the wire: SigV4 signing, eventstream unframing, its addresses and
-# its model catalog (tw-bedrock). Declared once, here, so a core release is a
-# one-line bump. Pinned to a tag: tracking a branch turns every core merge
+# its model catalog (tw-bedrock). The Core gateway library supplies response
+# negotiation and the bounded public web executor. Pin these to one tag:
+# tracking a branch turns every core merge
 # into a coin flip on this build.
 #
 # Code flows one way: from core into this tree, never back. Anything that
@@ -70,10 +71,14 @@ opt-level = 3
 # never re-exported through a local shim. And the reverse: something only
 # this side uses (the at-rest crypto, IMDSv2 credentials, the gateway error)
 # lives here, not in core.
-tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.89.0" }
-tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.89.0" }
-tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.89.0" }
-tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.89.0" }
+tw-bedrock = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-breaker = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-dialect = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-guard = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-api = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-config = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-gateway = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
+tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.98.1" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }

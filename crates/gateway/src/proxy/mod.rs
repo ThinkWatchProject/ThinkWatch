@@ -13,7 +13,6 @@ use crate::cache::ResponseCache;
 use crate::cost_tracker::CostTracker;
 use crate::error::GatewayError;
 use crate::health::HealthTracker;
-use crate::model_mapping::ModelMapper;
 use crate::router::ModelRouter;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::SurfaceConstraints;
@@ -29,6 +28,7 @@ mod headers;
 mod identity;
 mod log_ctx;
 pub mod min_speed;
+mod model_discovery;
 mod models;
 mod pipeline;
 mod protocol_relearn;
@@ -38,6 +38,7 @@ mod routing;
 pub(crate) mod sealed;
 pub mod shaper;
 pub mod transport;
+mod web_tools;
 
 // pub(crate) re-exports — `lifecycle` module reaches in for these.
 pub(crate) use accounting::post_flight_account;
@@ -53,8 +54,10 @@ pub use generate::{
     proxy_anthropic_messages, proxy_chat_completion, proxy_gemini, proxy_responses,
 };
 pub use identity::limits_for_ai_gateway;
-pub use models::{list_gemini_models_handler, list_models_handler};
+pub use model_discovery::ModelDiscovery;
+pub use models::{list_codex_models_handler, list_gemini_models_handler, list_models_handler};
 pub use responses_ws::proxy_responses_ws;
+pub use web_tools::{HostedWebRuntime, HostedWebSettings};
 
 /// How long the gateway port gives a handler to produce its response
 /// before answering 408 (the server's `TimeoutLayer`). A stream's body is
@@ -83,8 +86,8 @@ pub async fn stamp_arrival(
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
 pub struct GatewayState {
+    pub hosted_web: Arc<HostedWebRuntime>,
     pub router: Arc<ArcSwap<ModelRouter>>,
-    pub model_mapper: Arc<ModelMapper>,
     /// The request guards — outbound redaction, the content filter and
     /// tool-call inspection. Hot-swapped whole when an admin changes a
     /// policy; each request runs on the snapshot it took on arrival.

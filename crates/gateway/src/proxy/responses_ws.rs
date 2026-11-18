@@ -87,7 +87,7 @@ async fn serve(
     let mut queued: VecDeque<Message> = VecDeque::new();
     // The connection's most recent response.
     let mut last: Option<Last> = None;
-    loop {
+    'connection: loop {
         let message = match queued.pop_front() {
             Some(m) => m,
             None => match rx.next().await {
@@ -115,8 +115,21 @@ async fn serve(
                     RESPONSES,
                     "/v1/responses",
                     None,
-                )
-                .await;
+                );
+                // Hosted web turns can wait for a whole model answer before
+                // their first event. Keep reading the socket so a disconnect
+                // cancels that outbound work too.
+                tokio::pin!(answer);
+                let answer = loop {
+                    tokio::select! {
+                        result = &mut answer => break result,
+                        incoming = rx.next() => match incoming {
+                            Some(Ok(m @ (Message::Text(_) | Message::Binary(_)))) if queued.len() < 8 => queued.push_back(m),
+                            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {},
+                            _ => break 'connection,
+                        },
+                    }
+                };
                 match answer {
                     Ok(resp) => {
                         let (turn, completed) = relay(resp, &mut tx, &mut rx, &mut queued).await;
@@ -177,9 +190,13 @@ impl Last {
             // Output item ids refer to the upstream's store, which a
             // `store: false` turn never wrote to; sent back as input they
             // would be looked up and not found. `call_id` is what ties a
-            // tool result to its call, and stays.
+            // tool result to its call, and stays. Locally hosted web
+            // items keep their id so the gateway can restore their history.
+            let hosted = super::web_tools::is_hosted_responses_item(&item);
             if let Some(o) = item.as_object_mut() {
-                o.remove("id");
+                if !hosted {
+                    o.remove("id");
+                }
                 o.remove("status");
             }
             items.push(item);
@@ -348,6 +365,22 @@ mod tests {
         assert!(continue_from(&mut turn, Some(&last)).is_none());
         assert_eq!(turn["previous_response_id"], "resp_0");
         assert_eq!(turn["input"], "two");
+    }
+
+    #[test]
+    fn a_hosted_web_item_keeps_its_id_for_history_replay() {
+        let done = serde_json::json!({"id": "resp_1", "output": [
+            {"id":"ws_tw_example", "type":"web_search_call", "status":"completed",
+             "action":{"type":"search","query":"docs"}},
+        ]});
+        let last = Last::of(Vec::new(), &done).unwrap();
+        let mut next = create(serde_json::json!({"type":"response.create", "model":"m",
+            "previous_response_id":"resp_1", "input":"continue"}));
+        assert!(continue_from(&mut next, Some(&last)).is_some());
+        assert_eq!(next["input"][0]["id"], "ws_tw_example");
+        assert!(super::super::web_tools::is_hosted_responses_item(
+            &next["input"][0]
+        ));
     }
 
     #[test]

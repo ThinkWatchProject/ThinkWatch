@@ -21,6 +21,7 @@ think-watch-mcp-gateway = { workspace = true }
 tw-dialect = { workspace = true }
 tw-bedrock = { workspace = true }
 tw-guard = { workspace = true }
+tw-api = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }
 tower = { workspace = true }

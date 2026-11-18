@@ -43,6 +43,7 @@ use axum::response::IntoResponse;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use tw_dialect::convert::Session;
+use tw_dialect::history::{HistoryFormat, HistoryTarget};
 use tw_dialect::ir::{Dialect, Target};
 
 use super::body_capture::prepare_body_capture;
@@ -52,7 +53,9 @@ use super::headers::{
     request_id_header, resolve_conversation_id, resolve_session_id, resolve_trace_id,
 };
 use super::log_ctx::{LogCtx, emit_gateway_error_log, emit_gateway_log};
-use super::pipeline::{launch_stream_pump, run_buffered_post_invoke, run_preflight_stages};
+use super::pipeline::{
+    AiRound, launch_stream_pump, run_buffered_post_invoke, run_preflight_stages,
+};
 use super::retry::Budget;
 use super::routing::{
     Resend, build_selection_ctx, finalize_health, select_route_for_stream,
@@ -60,7 +63,7 @@ use super::routing::{
 };
 use super::sealed::Conversation;
 use super::shaper::{StreamShaper, rewrite_model};
-use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
+use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState, ModelDiscovery};
 use tw_dialect::params::WrittenEffort;
 use tw_dialect::think::EffortFix;
 
@@ -256,10 +259,13 @@ pub(crate) struct Outbound {
     /// The request's reasoning: the model's setting, applied to each hop
     /// as it is addressed, and what the caller asked (see `super::effort`).
     pub reasoning: effort::Asked,
+    pub adapt_response_mode: bool,
+    pub discovery: ModelDiscovery,
 }
 
 /// The request as it goes out to one upstream, and what it takes to read
 /// the answer back.
+#[derive(Clone)]
 pub(crate) struct Wire {
     pub body: Vec<u8>,
     pub path: String,
@@ -360,6 +366,38 @@ impl Wire {
             .await
     }
 
+    async fn send_with_refusal(
+        &self,
+        upstream: &super::transport::Upstream,
+        call_ctx: &CallCtx,
+    ) -> Result<reqwest::Response, super::transport::Refusal> {
+        upstream
+            .send_with_refusal(
+                self.body.clone(),
+                &self.path,
+                self.query.as_deref(),
+                self.dialect,
+                &self.headers,
+                call_ctx,
+            )
+            .await
+    }
+
+    fn omit_history(
+        &mut self,
+        outbound: &Outbound,
+        fields: &[tw_gateway::history_memory::HistoryField],
+    ) -> bool {
+        let Some(body) = tw_gateway::history_memory::omit(&self.body, fields) else {
+            return false;
+        };
+        (self.body, self.ledger) =
+            outbound
+                .redaction
+                .replace(body, &self.ledger, Shape::Generate(self.dialect));
+        true
+    }
+
     /// This hop as `upstream` takes it: without the added breakpoints
     /// when it refused them for `model` before.
     fn for_upstream(mut self, upstream: &super::transport::Upstream, model: &str) -> Wire {
@@ -443,11 +481,22 @@ impl Outbound {
     }
 
     /// Address the request to `protocol`, naming `model` upstream.
-    pub(crate) fn address(
+    #[cfg(test)]
+    fn address(
         &self,
         protocol: UpstreamProtocol,
         model: &str,
         official: bool,
+    ) -> Result<Wire, GatewayError> {
+        self.address_with_history(protocol, model, official, &HistoryTarget::default())
+    }
+
+    fn address_with_history(
+        &self,
+        protocol: UpstreamProtocol,
+        model: &str,
+        official: bool,
+        history: &HistoryTarget,
     ) -> Result<Wire, GatewayError> {
         let client = self.surface.dialect;
         // Output length when the caller set none and the upstream insists
@@ -520,6 +569,16 @@ impl Outbound {
             self.cap_output(client, &mut body, model, official);
             let collect = self.forwarded_session(&body, model, &target(client));
             let mut bytes = serde_json::to_vec(&body).unwrap_or_default();
+            if client == Dialect::Chat && history.format != HistoryFormat::Auto {
+                if let Ok(decoded) = decode(&body)
+                    && tw_dialect::history::incompatible(&decoded.request, history, true)
+                {
+                    return Err(incompatible_history());
+                }
+                if let Some(shaped) = tw_dialect::history::shape_chat(&bytes, history.format) {
+                    bytes = shaped;
+                }
+            }
             // Reasoning signatures a conversion wrote earlier in this
             // conversation (`tw1.`-prefixed) were not issued by this
             // upstream, and Anthropic refuses the whole request over
@@ -552,7 +611,10 @@ impl Outbound {
         decoded.request.model = model.to_string();
         let turned_off =
             off_converted && effort::turn_off_converted(&mut decoded.request, protocol.dialect());
-        let prepared = decoded.encode(&target(protocol.dialect()));
+        let prepared = decoded.encode_with_history(&target(protocol.dialect()), history);
+        if prepared.incompatible_history {
+            return Err(incompatible_history());
+        }
         if !prepared.dropped.is_empty() {
             tracing::info!(
                 from = client.slug(),
@@ -602,6 +664,21 @@ impl Outbound {
     }
 }
 
+fn incompatible_history() -> GatewayError {
+    GatewayError::TransformError(
+        "The selected upstream cannot replay this conversation's signed reasoning history.".into(),
+    )
+}
+
+pub(crate) enum UpstreamReply {
+    Http(reqwest::Response),
+    Adapted {
+        body: Bytes,
+        memory: Bytes,
+        usage: Option<tw_dialect::usage::Usage>,
+    },
+}
+
 /// Send to `entry`, and if the upstream rejects the dialect this route
 /// is configured for, try its alternates and remember whichever answers.
 ///
@@ -626,12 +703,22 @@ pub(crate) async fn send(
     db: &sqlx::PgPool,
     redis: &fred::clients::Client,
     model: &str,
-) -> Result<(reqwest::Response, Wire), GatewayError> {
+) -> Result<(UpstreamReply, Wire), GatewayError> {
+    use tw_gateway::{history_memory, stream_mode};
     let upstream = &entry.upstream;
     let official = upstream.is_official();
+    let mut provider = upstream.negotiation_provider(entry.provider_id, call_ctx);
+    if let Some(format) = outbound
+        .discovery
+        .profile(entry.provider_id, model)
+        .and_then(|spec| spec.reasoning_history)
+    {
+        provider.reasoning_history = format;
+    }
+    let history = tw_gateway::translate::history_target(&provider, model);
     let first = resources::cpu(usize::MAX, || {
         outbound
-            .address(entry.protocol, model, official)
+            .address_with_history(entry.protocol, model, official, &history)
             .map(|wire| wire.for_upstream(upstream, model))
     })
     .await?;
@@ -641,7 +728,7 @@ pub(crate) async fn send(
     } else {
         effort::Memory::default()
     };
-    let first = first.remembered(&memory);
+    let mut first = first.remembered(&memory);
     if first.remembered {
         tracing::info!(
             provider = %entry.provider_name,
@@ -652,16 +739,51 @@ pub(crate) async fn send(
     }
     // The format of the last request sent, to read its refusal in.
     let mut wire_dialect = first.dialect;
-    let mut last = match first.send_to(upstream, call_ctx).await {
-        Ok(resp) => return Ok((resp, first)),
-        Err(e) => e,
+    let now = history_memory::now_ms();
+    let history_key = (first.dialect == Dialect::Chat
+        && history_memory::automatic(&provider, model)
+        && history.format != HistoryFormat::ReasoningContent
+        && tw_dialect::convert::decode(
+            outbound.surface.dialect,
+            &outbound.body,
+            &outbound.path,
+            internal_query(outbound.surface.dialect),
+        )
+        .is_ok_and(|decoded| history_memory::unsigned(&decoded.request)))
+    .then(|| history_memory::Key::of(&provider, model, &first.path, &first.body))
+    .flatten();
+    let prior = history_key
+        .as_ref()
+        .map(|key| upstream.history.policy(key, now));
+    if let Some(prior) = &prior {
+        first.omit_history(outbound, &prior.fields);
+    }
+    let mode_key = outbound
+        .adapt_response_mode
+        .then(|| stream_mode::Key::of(&provider, model, first.dialect, &first.path, &first.body))
+        .flatten();
+    let learned = mode_key
+        .as_ref()
+        .and_then(|key| upstream.response_modes.lookup(key, now));
+    if let Some(mode) = learned.filter(|mode| *mode != outbound.stream)
+        && let Ok(Some(adapted)) =
+            send_alternate_mode(&first, outbound, upstream, call_ctx, mode).await
+    {
+        return Ok(adapted);
+    }
+    let refusal = match first.send_with_refusal(upstream, call_ctx).await {
+        Ok(resp) => return Ok((UpstreamReply::Http(resp), first)),
+        Err(refusal) => refusal,
     };
+    let mut last = refusal.error;
+    let mut evidence = refusal.repair;
     let mut wire = first;
 
     if wire.auto_cache
         && super::cache_marks::is_refusal(&last, &upstream.label)
         && wire.drop_added_marks()
     {
+        evidence = None;
         upstream.cache_marks.note(model);
         tracing::info!(
             provider = %entry.provider_name,
@@ -669,7 +791,7 @@ pub(crate) async fn send(
             "Upstream refused the cache breakpoints added on conversion — sending again without them"
         );
         match wire.send_to(upstream, call_ctx).await {
-            Ok(resp) => return Ok((resp, wire)),
+            Ok(resp) => return Ok((UpstreamReply::Http(resp), wire)),
             Err(e) => last = e,
         }
     }
@@ -685,6 +807,7 @@ pub(crate) async fn send(
         let pre = wire.pre.unwrap_or(sent);
         let remembered = wire.remembered;
         if wire.fix_effort(fix, pre, Reason::Rejected) {
+            evidence = None;
             tracing::info!(
                 provider = %entry.provider_name,
                 model,
@@ -705,7 +828,7 @@ pub(crate) async fn send(
                     tokio::spawn(async move {
                         effort::remember(&redis, provider_id, dialect, &model, pre, fix).await;
                     });
-                    return Ok((resp, wire));
+                    return Ok((UpstreamReply::Http(resp), wire));
                 }
                 Err(e) => {
                     if remembered {
@@ -720,6 +843,7 @@ pub(crate) async fn send(
     }
 
     if super::protocol_relearn::is_protocol_mismatch(&last) {
+        evidence = None;
         for protocol in &entry.alternates {
             tracing::info!(
                 provider = %entry.provider_name,
@@ -730,7 +854,7 @@ pub(crate) async fn send(
             );
             let wire = resources::cpu(usize::MAX, || {
                 outbound
-                    .address(*protocol, model, official)
+                    .address_with_history(*protocol, model, official, &history)
                     .map(|wire| wire.for_upstream(upstream, model))
             })
             .await?;
@@ -746,7 +870,7 @@ pub(crate) async fn send(
                     super::protocol_relearn::persist(db, entry.route_id, *protocol).await;
                     // What it refused was said in another format.
                     effort::forget_provider(redis, entry.provider_id).await;
-                    return Ok((resp, wire));
+                    return Ok((UpstreamReply::Http(resp), wire));
                 }
                 Err(e) => {
                     let keep_going = super::protocol_relearn::is_protocol_mismatch(&e);
@@ -758,6 +882,40 @@ pub(crate) async fn send(
             }
         }
     }
+    if let Some(evidence) = evidence {
+        let verdict =
+            tw_gateway::failure::classify(evidence.status, &evidence.headers, &evidence.body, now);
+        if let Some(key) = history_key
+            && matches!(verdict, tw_gateway::failure::Verdict::ClientError)
+            && let Some(mut fields) =
+                history_memory::refusal(evidence.status, &evidence.body, &wire.body)
+        {
+            let old_fields = prior
+                .as_ref()
+                .map_or(&[][..], |policy| policy.fields.as_slice());
+            if wire.omit_history(outbound, &fields)
+                && let Ok(resp) = wire.send_to(upstream, call_ctx).await
+            {
+                for &field in old_fields {
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                upstream
+                    .history
+                    .accepted(key, history_memory::Policy { fields }, now);
+                return Ok((UpstreamReply::Http(resp), wire));
+            }
+        } else if let Some(key) = mode_key
+            && learned.is_none_or(|mode| mode == outbound.stream)
+            && stream_mode::can_probe(evidence.status, &evidence.headers, &evidence.body, verdict)
+            && let Ok(Some(adapted)) =
+                send_alternate_mode(&wire, outbound, upstream, call_ctx, !outbound.stream).await
+        {
+            upstream.response_modes.accepted(key, !outbound.stream, now);
+            return Ok(adapted);
+        }
+    }
     // A refusal of the conversation's encrypted history, said plainly.
     Err(super::sealed::explain_refusal(
         wire_dialect,
@@ -767,16 +925,138 @@ pub(crate) async fn send(
     ))
 }
 
+async fn send_alternate_mode(
+    wire: &Wire,
+    outbound: &Outbound,
+    upstream: &super::transport::Upstream,
+    call_ctx: &CallCtx,
+    stream: bool,
+) -> Result<Option<(UpstreamReply, Wire)>, GatewayError> {
+    use futures::StreamExt;
+    use tw_gateway::stream_mode;
+    let mut wire = wire.clone();
+    let Some(body) = stream_mode::rewrite(
+        wire.dialect,
+        &mut wire.path,
+        &mut wire.query,
+        &wire.body,
+        stream,
+    ) else {
+        return Ok(None);
+    };
+    wire.body = body;
+    let resp = wire.send_to(upstream, call_ctx).await?;
+    let mut sniffer = tw_dialect::usage::Sniffer::new();
+    let (body, memory) = if stream {
+        let mut raw = resp.bytes_stream();
+        let mut lease = resources::body_budget().reserve();
+        let mut bytes = Vec::new();
+        let mut unframe =
+            (wire.dialect == Dialect::Bedrock).then(tw_bedrock::eventstream::Transcoder::new);
+        while let Some(chunk) = raw.next().await {
+            let chunk = chunk.map_err(super::transport::transport_error)?;
+            let chunk = if let Some(unframe) = &mut unframe {
+                Bytes::from(
+                    unframe
+                        .feed(&chunk)
+                        .map_err(|e| GatewayError::ProviderInvalidResponse(e.to_string()))?,
+                )
+            } else {
+                chunk
+            };
+            let size = bytes.len().saturating_add(chunk.len());
+            if size > resources::policy().max_body_bytes
+                || !lease.grow(size.saturating_mul(resources::BODY_HEADROOM))
+            {
+                return Ok(None);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let memory = lease.wrap(bytes.into());
+        let body = resources::cpu(memory.len(), || {
+            let mut complete = stream_mode::Completion::new(wire.dialect);
+            complete.feed(&memory);
+            if !complete.finish() {
+                return None;
+            }
+            sniffer.feed(&memory);
+            let mut collector = wire.collect.collector();
+            collector.process(&memory);
+            collector.finish().ok()
+        })
+        .await;
+        let Some(body) = body else { return Ok(None) };
+        (body, memory)
+    } else {
+        let memory = match resources::read_response(resp, resources::policy().max_body_bytes).await
+        {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        let body = resources::cpu(memory.len(), || {
+            if !stream_mode::whole_answer(wire.dialect, &memory) {
+                return None;
+            }
+            sniffer.feed(&memory);
+            wire.collect.stream_from_whole(&memory)
+        })
+        .await;
+        let Some(body) = body else { return Ok(None) };
+        wire.dialect = outbound.surface.dialect;
+        let model = outbound.body["model"].as_str().unwrap_or_default();
+        wire.collect = outbound.forwarded_session(
+            &outbound.body,
+            model,
+            &Target {
+                dialect: wire.dialect,
+                official: false,
+                default_max_tokens: 8192,
+            },
+        );
+        wire.convert = None;
+        (body, memory)
+    };
+    Ok(Some((
+        UpstreamReply::Adapted {
+            body: resources::retain(body.into(), memory.clone()),
+            memory,
+            usage: sniffer.finish(),
+        },
+        wire,
+    )))
+}
+
 /// Read a whole answer and put it in the caller's format.
 ///
 /// When the upstream reports no usage, the count is estimated from the
 /// request (`input_estimate`) and the answer.
 pub(crate) async fn read_whole(
-    resp: reqwest::Response,
+    resp: UpstreamReply,
     wire: &Wire,
     caller_model: &str,
     input_estimate: u64,
 ) -> Result<Completed, GatewayError> {
+    let resp = match resp {
+        UpstreamReply::Http(resp) => resp,
+        UpstreamReply::Adapted {
+            body,
+            memory,
+            usage,
+        } => {
+            let (usage, usage_estimated) =
+                crate::usage_estimate::complete(usage, true, input_estimate, Some(&body));
+            if usage_estimated {
+                metrics::counter!("gateway_usage_estimated_total").increment(1);
+            }
+            return Ok(Completed {
+                memory: Some(memory),
+                body: rewrite_model(&body, caller_model),
+                logged: None,
+                usage,
+                usage_estimated,
+            });
+        }
+    };
     let upstream = resources::read_response(resp, resources::policy().max_body_bytes)
         .await
         .map_err(|error| match error {
@@ -844,15 +1124,41 @@ pub(crate) async fn generate(
     path: &str,
     query: Option<&str>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
+    if matches!(surface.dialect, Dialect::Anthropic | Dialect::Responses)
+        && let Some(result) = (super::web_tools::HostedRequest {
+            state: &state,
+            headers: &headers,
+            identity: &identity,
+            cancel: cancel.clone(),
+            arrived,
+            body: &body,
+            surface,
+            path,
+            query,
+        })
+        .execute()
+        .await
+    {
+        return result.map_err(|e| e.in_dialect(surface.dialect));
+    }
     run(
-        state, headers, identity, cancel, arrived, body, surface, path, query,
+        state,
+        headers,
+        identity,
+        cancel,
+        arrived,
+        body,
+        surface,
+        path,
+        query,
+        AiRound::Client,
     )
     .await
     .map_err(|e| e.in_dialect(surface.dialect))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(
+pub(super) async fn run(
     state: GatewayState,
     headers: HeaderMap,
     identity: GatewayRequestIdentity,
@@ -862,6 +1168,7 @@ async fn run(
     surface: ClientSurface,
     path: &str,
     query: Option<&str>,
+    round: AiRound,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     let trace_id = resolve_trace_id(&headers);
     let session_id = resolve_session_id(&headers);
@@ -914,7 +1221,8 @@ async fn run(
         || query.is_some_and(|q| q.split('&').any(|kv| kv == GEMINI_SSE));
 
     // 1. Model aliases
-    let mapped_model = state.model_mapper.map(&model);
+    let discovery = ModelDiscovery::load(&state).await;
+    let mapped_model = discovery.resolve(&model);
     if let Some(c) = &cancel {
         c.model(&mapped_model);
     }
@@ -929,7 +1237,8 @@ async fn run(
 
     // 2. Budget, model access, rate limits — each stage writes its own
     //    audit row on short-circuit.
-    let preflight = run_preflight_stages(&state, &identity, &trace_id, &mapped_model).await?;
+    let preflight =
+        run_preflight_stages(&state, &identity, &trace_id, &mapped_model, round).await?;
 
     let mut metadata = RequestMetadata::extract(&headers, &raw);
     // One id for the request: the one its error rows and the guards'
@@ -1258,6 +1567,8 @@ async fn run(
         ledger: ledger.clone(),
         max_output_tokens,
         reasoning,
+        adapt_response_mode: arrived.is_some(),
+        discovery,
     };
     let snapshot = |route: &RouteEntry, sel_record| crate::lifecycle::ChatPostInvokeDeps {
         state: state.clone(),
@@ -1591,6 +1902,8 @@ mod tests {
             ledger,
             max_output_tokens: cap,
             reasoning: effort::Asked::default(),
+            adapt_response_mode: true,
+            discovery: ModelDiscovery::default(),
         }
     }
 
@@ -1606,6 +1919,101 @@ mod tests {
 
     fn sent(wire: &Wire) -> Value {
         serde_json::from_slice(&wire.body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn response_mode_trials_keep_client_framing_and_learn_only_completed_answers() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+            count.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let stream = body["stream"] == true;
+                let model = body["model"].as_str().unwrap_or_default();
+                if stream != (model == "stream-only") {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "error": {"message": "The requested stream mode is not supported"}
+                    }))).into_response();
+                }
+                if stream {
+                    let text = r#"data: {"id":"one","model":"stream-only","choices":[{"index":0,"delta":{"role":"assistant","content":"example"},"finish_reason":null}]}
+
+data: {"id":"one","model":"stream-only","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}
+
+data: [DONE]
+
+"#;
+                    return ([(header::CONTENT_TYPE, "text/event-stream")], text).into_response();
+                }
+                Json(serde_json::json!({"id":"one","model":model,
+                    "choices":[{"index":0,"message":{"role":"assistant","content":"example"},"finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+                })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let entry = RouteEntry {
+            upstream: Arc::new(crate::proxy::transport::Upstream::new(
+                &url,
+                vec![],
+                crate::proxy::transport::Shape::Standard,
+                "test",
+            )),
+            provider_id: uuid::Uuid::new_v4(),
+            route_id: uuid::Uuid::new_v4(),
+            provider_name: "test".into(),
+            upstream_model: None,
+            weight: 1,
+            label: None,
+            rpm_cap: None,
+            tpm_cap: None,
+            protocol: UpstreamProtocol::OpenAiChat,
+            alternates: vec![],
+        };
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let redis = fred::clients::Client::default();
+        for (model, client_stream, expected) in [
+            ("whole-only", true, 2),
+            ("stream-only", false, 4),
+            ("whole-only", true, 5),
+        ] {
+            let request = outbound(
+                CHAT,
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model":model,"stream":client_stream,"messages":[{"role":"user","content":"hello"}]
+                }),
+                None,
+            );
+            let (response, wire) = send(&entry, &request, &CallCtx::default(), &db, &redis, model)
+                .await
+                .unwrap();
+            if client_stream {
+                let UpstreamReply::Adapted { body, usage, .. } = response else {
+                    panic!("expected synthesized SSE")
+                };
+                let body = String::from_utf8_lossy(&body);
+                assert!(body.contains("example"));
+                assert!(body.contains("data: [DONE]"));
+                assert_eq!(usage.unwrap().output, 2);
+            } else {
+                let answer = read_whole(response, &wire, model, 0).await.unwrap();
+                let body: Value = serde_json::from_slice(&answer.body).unwrap();
+                assert_eq!(body["choices"][0]["message"]["content"], "example");
+                assert_eq!(answer.usage.output, 2);
+            }
+            let actual = attempts.load(Ordering::Relaxed);
+            assert_eq!(actual, expected);
+        }
+        server.abort();
     }
 
     #[test]

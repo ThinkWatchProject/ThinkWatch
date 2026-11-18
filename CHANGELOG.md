@@ -11,6 +11,15 @@ target.
 
 ## [Unreleased]
 
+- Upgrade shared Core libraries to `v0.98.1` for typed Chat/Mistral
+  responses and improved secrets detection and streaming restoration.
+- Queue request bodies fairly under the process buffer budget and preserve
+  retryable `429` responses when admission expires.
+- Adapt multi-turn Chat reasoning history and negotiate upstream streaming
+  support for eligible HTTP requests.
+- Add permission-scoped Codex discovery, model aliases and capability profiles,
+  and opt-in hosted search, page reading and find-in-page.
+
 ## [3.11.0] — 2026-11-03
 
 Execution and buffering now adapt automatically to available CPUs and memory,
