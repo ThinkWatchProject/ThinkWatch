@@ -136,7 +136,6 @@ pub struct McpProxy {
 
 impl McpProxy {
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Registry,
         pool: ConnectionPool,
