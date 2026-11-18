@@ -5055,7 +5055,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-auth"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5085,7 +5085,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-common"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5134,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-gateway"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5179,7 +5179,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-mcp-gateway"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5208,7 +5208,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-server"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5262,7 +5262,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-test-support"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "async-stream",
