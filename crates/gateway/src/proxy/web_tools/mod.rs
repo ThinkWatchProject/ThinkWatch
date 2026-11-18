@@ -147,7 +147,7 @@ impl Default for HostedWebRuntime {
 impl HostedWebRuntime {
     fn enter(&self, max: u32) -> Result<ToolSlot<'_>, GatewayError> {
         self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < max as usize).then_some(active + 1)
             })
             .map_err(|_| GatewayError::rate_limited("web_tools_concurrency", 1))?;
