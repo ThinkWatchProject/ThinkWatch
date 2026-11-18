@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.11.0"
+version = "3.12.0"
 edition = "2024"
 # The MSRV: the newest `rust-version` among the locked dependencies
 # (including the Wasmtime runtime built by the shared Core gateway). Without it,
