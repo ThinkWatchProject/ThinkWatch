@@ -21,7 +21,7 @@ reqwest = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
-bytes = "1"
+bytes = "1.12.2"
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -36,7 +36,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 fred = { workspace = true }
 utoipa = { workspace = true }
-regex = "1"
+regex = "1.13.2"
 rand = { workspace = true }
 metrics = { workspace = true }
 xxhash-rust = { workspace = true }
@@ -44,5 +44,5 @@ arc-swap = { workspace = true }
 rust_decimal = { workspace = true }
 
 [dev-dependencies]
-http_1x = { package = "http", version = "1" }
+http_1x = { package = "http", version = "1.5.0" }
 tokio = { workspace = true, features = ["test-util"] }
