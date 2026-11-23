@@ -111,19 +111,13 @@ export interface SecurityRuleView {
   custom: boolean;
   /** English name. A custom rule's name, in no particular language. */
   name: string;
-  /** Chinese name: every built-in rule has one; custom rules do not. */
-  name_zh?: string;
   /** Why the rule is worth a look (English). Absent where the name says it, and on custom rules. */
   why?: string;
-  /** The same, in Chinese. */
-  why_zh?: string;
   /**
    * What a built-in redaction rule finds, as a sentence (English); text in
    * backticks is code. Absent on the other guards and on custom rules.
    */
   about?: string;
-  /** The same, in Chinese. */
-  about_zh?: string;
   /**
    * Group: the `slug` of one of the guard's `kinds`. Custom rules: `custom`.
    */
@@ -144,12 +138,11 @@ export interface SecurityRuleView {
   replacement?: string | null;
 }
 
-/** A group of a guard's rule table, named in both languages. */
+/** A group of a guard's rule table, with its English name. */
 export interface SecurityKindView {
   /** What a rule's `kind` says. */
   slug: string;
   name: string;
-  name_zh: string;
 }
 
 export interface GuardDetail {

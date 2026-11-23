@@ -11,6 +11,19 @@ target.
 
 ## [Unreleased]
 
+## [4.0.0] — 2026-11-24
+
+The console now translates the built-in security rule catalog. The shared
+ThinkWatch Core libraries are updated to v0.100.0.
+
+### Changed
+
+- The console looks up built-in security rule names and descriptions by rule
+  ID and groups by slug. Custom rules retain the text provided by their authors.
+- The admin endpoint `GET /api/admin/security` now returns the English metadata
+  from Core. API consumers using `name_zh`, `why_zh`, or `about_zh` should
+  migrate to `name`, `why`, and `about` and localize by ID or slug.
+
 ## [3.12.0] — 2026-11-18
 
 ThinkWatch adds hosted web tools and Codex model discovery to the enterprise

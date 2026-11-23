@@ -835,9 +835,9 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "cookie"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "percent-encoding",
  "time",
@@ -953,9 +953,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-bforest"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01b3675b13214270fddbd257d5fbf4109be8b02d92fc636fe96e2829514a7235"
+checksum = "9528915fbc2c950702329e08c6d72aaff8ece9b7ecdbd225742825c09a445227"
 dependencies = [
  "cranelift-entity",
  "wasmtime-internal-core",
@@ -963,9 +963,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-bitset"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c1d67aa02b6e174bd2b165c113e94af9498fcc20e2892d0f4d5ab8c9618d09"
+checksum = "9dd69a6db85c1bcff989809e0e0b3b06506425f32b545c46aeafda5fe7775d6a"
 dependencies = [
  "serde",
  "serde_derive",
@@ -974,9 +974,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-codegen"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26fe6f3ec5344c32602c414e986dcbe699fa501a3e3e7b02f887d9d12b14ae42"
+checksum = "24c2db6c26cd96393cf785c4b51b900738963cc7422aa0045416a7641ae2f6cd"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64",
@@ -1005,9 +1005,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-codegen-meta"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96c5e6323d458486d95781defdb5016a1176fc911d8bc8e64b696adbda6e9044"
+checksum = "e284270142e7f1dcb73a992a62a8b3716b4062a65a52d8f2732c6ebf6f7f342f"
 dependencies = [
  "cranelift-assembler-x64-meta",
  "cranelift-codegen-shared",
@@ -1033,9 +1033,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-entity"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8c071188cb1c3b1803e23ae415a8d5f58d741d3a4b26a79b83dd61921112eac"
+checksum = "9ffb08ccd8a77fb31cdbbda2afa2333d8f85299b1bc0d1c194259ba66d160d74"
 dependencies = [
  "cranelift-bitset",
  "serde",
@@ -1045,9 +1045,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-frontend"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2b85ba0a55d7685117b275fe6f36c819d438862e4223d28f0b97902460ff0ac"
+checksum = "b447e4f2bb44b1188185a77f478e5a91b7723a40b3b58c3e2d5b26df2ed5a665"
 dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.1",
@@ -1058,15 +1058,15 @@ dependencies = [
 
 [[package]]
 name = "cranelift-isle"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20ed364edcaed769da7b2709d540f8f7d0ff257749ba193f475e22dba6a0178b"
+checksum = "2f0989e943f3a9d41989595826bba544df9fda64bcddd4df0c06fb2e26af3cb3"
 
 [[package]]
 name = "cranelift-native"
-version = "0.136.5"
+version = "0.136.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "418d98c3dce08f0d13526692bbd1888bff4c5f45207f5093d168b5a224fbc88c"
+checksum = "5fa10df59e776c42dae5b6ba5216ba5321707a2136abd2219e615c54b234fc1b"
 dependencies = [
  "cranelift-codegen",
  "libc",
@@ -1751,9 +1751,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1914,8 +1914,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
- "windows-result 0.3.4",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
 ]
 
 [[package]]
@@ -3553,9 +3553,9 @@ dependencies = [
 
 [[package]]
 name = "pulley-interpreter"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d74df9e20cba0f6dd07f01c3140535a6b23e40aecccfcacfb921621b41d0acb"
+checksum = "335e459f9c7809af04768799880504d014d07e8e2fc6ae682fe2a105d8ced33f"
 dependencies = [
  "cranelift-bitset",
  "log",
@@ -3565,9 +3565,9 @@ dependencies = [
 
 [[package]]
 name = "pulley-macros"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8415513bfa407c06de6f11dbe9437f2352e075a5520ff491a131166d3d90aed1"
+checksum = "dd492ac929a6ca0357362d9fa0a09e31290feac5914550ccfb539b21f89c4b9e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3611,7 +3611,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -3650,7 +3650,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -5029,7 +5029,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5055,7 +5055,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-auth"
-version = "3.12.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5085,7 +5085,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-common"
-version = "3.12.0"
+version = "4.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5134,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-gateway"
-version = "3.12.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5179,7 +5179,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-mcp-gateway"
-version = "3.12.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5208,7 +5208,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-server"
-version = "3.12.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5262,7 +5262,7 @@ dependencies = [
 
 [[package]]
 name = "think-watch-test-support"
-version = "3.12.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5754,8 +5754,8 @@ dependencies = [
 
 [[package]]
 name = "tw-api"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "serde",
  "serde_json",
@@ -5765,8 +5765,8 @@ dependencies = [
 
 [[package]]
 name = "tw-bedrock"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -5780,16 +5780,16 @@ dependencies = [
 
 [[package]]
 name = "tw-breaker"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-config"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "blake3",
  "icu_locale_core",
@@ -5816,8 +5816,8 @@ dependencies = [
 
 [[package]]
 name = "tw-dialect"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "memchr",
  "serde",
@@ -5826,8 +5826,8 @@ dependencies = [
 
 [[package]]
 name = "tw-engine"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "chrono",
  "serde",
@@ -5840,8 +5840,8 @@ dependencies = [
 
 [[package]]
 name = "tw-gateway"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -5891,8 +5891,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -5912,8 +5912,8 @@ dependencies = [
 
 [[package]]
 name = "tw-observe"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "tokio",
  "tracing",
@@ -5922,8 +5922,8 @@ dependencies = [
 
 [[package]]
 name = "tw-plugin"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "libc",
  "rand 0.10.3",
@@ -5939,8 +5939,8 @@ dependencies = [
 
 [[package]]
 name = "tw-pricing"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "arc-swap",
  "flate2",
@@ -5952,24 +5952,24 @@ dependencies = [
 
 [[package]]
 name = "tw-secret"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "tw-types"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "tw-watch"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "libc",
  "notify",
@@ -5979,8 +5979,8 @@ dependencies = [
 
 [[package]]
 name = "tw-yaml"
-version = "0.98.1"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.98.1#df1022c4d214d58c9774ce32a092854e345ea51e"
+version = "0.100.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.100.0#a0c209d33961103fddf9417a912d2422755eb411"
 dependencies = [
  "saphyr-parser",
  "thiserror 2.0.21",
@@ -6062,9 +6062,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -6310,9 +6310,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d45bf3b13781b9febb0eef42e1e145146c92ef891f345fd918e0e0fa1568c992"
+checksum = "f32390bdc8d7cdb6259a1b855178bfed88226b4004b209fd48fb30e0deb01cd3"
 dependencies = [
  "addr2line",
  "async-trait",
@@ -6349,9 +6349,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-environ"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "833f00f3dc6128159284c5b71e211f24c97d45e052230a14f767fd830a6fb8b0"
+checksum = "9c10f8ef1c9ee5e0f125c775fe56a4d07b8525db30a96e6358c61d93bd11dee4"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -6380,15 +6380,15 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-component-util"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b168d39f2d6b896d89fe096afa4ccdd7a8e927b01469b590af84f02fca3126a1"
+checksum = "011e31ca343d9ba0ec623153cd94131b6f03973ef1a0ab791161f642e4a16a93"
 
 [[package]]
 name = "wasmtime-internal-core"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ad86a65d12c6a9202584ceb658c9a20cf5b25c32eed61c9be5e5f863f88f0d9"
+checksum = "ab15e50a060b746493e6e95ef3ce4e6e7ebfdd7cc336a7dff0f0277e01b447ef"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
@@ -6397,9 +6397,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-cranelift"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a71f0fd1dd40e4e18d4a20cdba29ff8e0eb2c0f21b12c2eb5869e0fea789dd05"
+checksum = "dc3d27440a83fba26dd2784a997e13d9acb3606a75fb127c324929b52221c5c5"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",
@@ -6423,9 +6423,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-fiber"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa4dfa39e58735b24ce3d28bfc8c2b3041603cc8a941bb268395351beff90172"
+checksum = "6e54b28d0d453ca8932e4504065ae66a78f01fcb22b1a2ee287128d732fa9d6f"
 dependencies = [
  "cc",
  "libc",
@@ -6437,9 +6437,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-jit-debug"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2eb98d4486c7b0163447d77dea06f3cc87e5e5ba5fc93613f8ec42e27ea181d"
+checksum = "9293e75a3048b900f7b7c524702abca16d8a2332f970324eefc519f454cd5d69"
 dependencies = [
  "cc",
  "wasmtime-internal-versioned-export-macros",
@@ -6447,9 +6447,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "852cae234735d79db6c58fe0d04b32f4078ad01fdb3fd6d488ac366132ba9785"
+checksum = "b852e568831b913d410541bb37edc45a5002e472208fbdbaf844ed801dd4255f"
 dependencies = [
  "libc",
  "wasmtime-internal-core",
@@ -6458,9 +6458,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-unwinder"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9289378c82b9db7e7cf933d6bb441ad968536ac48f3f38c55b7cf9d3e8d87e1"
+checksum = "a1f7349c9834a542275ad757340079e6453fccb429efce581454d23f85af92c0"
 dependencies = [
  "cranelift-codegen",
  "log",
@@ -6470,9 +6470,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-versioned-export-macros"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc5c60c732d99dbcc5d670b71ba6ccf2b015cd16fc828990eaad2c4b8805ebdb"
+checksum = "30b3e0768a450d9dea3e16b83f2498f0b08db0e32bad695e35564eef017be3f1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6481,9 +6481,9 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-winch"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c236aa2967d9ed27babc3a76d478f6323cb5bf4c77d20102e282828226646458"
+checksum = "3386d498f0bf0ccb226a086ee84964b0e72ec63fc0d84b3a12e09dc49737fd96"
 dependencies = [
  "cranelift-codegen",
  "gimli",
@@ -6585,9 +6585,9 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "winch-codegen"
-version = "49.0.5"
+version = "49.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98e378f1851ec513f230e3aa1b77a3b4c2e0ebed8db0e551b0c51144f43c133d"
+checksum = "16ab4fd4d63582b1ca285b1c623dda445f23f1c8adcbef453808145bd00a5de6"
 dependencies = [
  "cranelift-assembler-x64",
  "cranelift-codegen",

@@ -156,7 +156,7 @@ export function GatewaySecurityPage() {
   function toggle(guard: Guard, rule: SecurityRuleView, enabled: boolean, undoable = true) {
     const d = current(guard);
     if (!d) return;
-    const name = viewName(i18n.language, rule);
+    const name = viewName(i18n.language, guard, rule);
     write(guard, withEnabled(d, rule, enabled), true).then(
       () =>
         toast.success(
@@ -199,7 +199,7 @@ export function GatewaySecurityPage() {
     if (!d) return;
     const before = d.rules.find((r) => r.custom === rule.custom && r.id === rule.id)?.action ?? 'record';
     if (before === action) return;
-    const name = viewName(i18n.language, rule);
+    const name = viewName(i18n.language, guard, rule);
     write(guard, withAction(d, rule, action), true).then(
       () =>
         toast.success(
@@ -230,7 +230,7 @@ export function GatewaySecurityPage() {
     if (!d) return;
     await write(guard, withAction(d, rule, action), false);
     setDialog(null);
-    toast.success(t('contentSecurity.toast.ruleSaved', { name: viewName(i18n.language, rule) }));
+    toast.success(t('contentSecurity.toast.ruleSaved', { name: viewName(i18n.language, guard, rule) }));
   }
 
   async function removeCustom(guard: Guard, rule: SecurityRuleView) {
@@ -257,7 +257,7 @@ export function GatewaySecurityPage() {
       guard,
       editing: null,
       seed: {
-        name: viewName(i18n.language, rule),
+        name: viewName(i18n.language, guard, rule),
         pattern: written.pattern,
         match: written.match,
         action: rule.action ?? null,
