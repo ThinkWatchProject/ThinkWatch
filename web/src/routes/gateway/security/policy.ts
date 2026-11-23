@@ -313,7 +313,7 @@ function literalsOf(m: Matcher): string[] {
  * rule's description, prefixes or field names — ignoring case. An empty
  * search matches every rule.
  */
-export function matchesSearch(r: SecurityRuleView, shownName: string, query: string): boolean {
+export function matchesSearch(r: SecurityRuleView, shownName: string, query: string, translations: readonly string[] = []): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   const pattern = patternOf(r)?.pattern ?? '';
@@ -321,9 +321,8 @@ export function matchesSearch(r: SecurityRuleView, shownName: string, query: str
     shownName,
     r.id,
     r.name,
-    r.name_zh ?? '',
     r.about ?? '',
-    r.about_zh ?? '',
+    ...translations,
     pattern,
     ...literalsOf(r.matcher),
   ].some((s) => s.toLowerCase().includes(q));

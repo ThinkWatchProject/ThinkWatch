@@ -244,8 +244,13 @@ function RuleTable({
   const lang = i18n.language;
   const content = guard === 'content';
   const groupKey = (r: SecurityRuleView) => (r.custom ? 'custom' : r.kind);
-  const groupTitle = (key: string) => kindName(lang, kinds, key);
-  const shown = rules.filter((r) => matchesSearch(r, viewName(lang, r), query));
+  const groupTitle = (key: string) => kindName(lang, guard, kinds, key);
+  const shown = rules.filter((r) =>
+    matchesSearch(r, viewName(lang, guard, r), query, [
+      viewName('zh', guard, r),
+      ruleAbout('zh', guard, r),
+    ]),
+  );
   const columns = content ? 6 : 5;
 
   return (
@@ -320,7 +325,7 @@ function MatchCell({ guard, r }: { guard: Guard; r: SecurityRuleView }) {
   const { i18n } = useTranslation();
   const m = r.matcher;
   // A built-in redaction rule says what it finds in its own words.
-  const about = ruleAbout(i18n.language, r);
+  const about = ruleAbout(i18n.language, guard, r);
   if (about) return <About text={about} />;
   if (guard === 'redact') return <MatcherText m={m} />;
   // Tool and content rules show the pattern itself (how it treats case is
@@ -353,7 +358,7 @@ function ActionCell({
   onAct: (action: RuleAction) => void;
 }) {
   const { t, i18n } = useTranslation();
-  const name = viewName(i18n.language, r);
+  const name = viewName(i18n.language, guard, r);
   const action = r.action ?? 'record';
   const scope = ruleScope(r);
   const label = (a: RuleAction) =>
@@ -403,10 +408,10 @@ function RuleRow({
   actions: RuleActions;
 }) {
   const { t, i18n } = useTranslation();
-  const name = viewName(i18n.language, r);
-  const why = ruleWhy(i18n.language, r);
+  const name = viewName(i18n.language, guard, r);
+  const why = ruleWhy(i18n.language, guard, r);
   const pattern = patternOf(r)?.pattern;
-  const about = ruleAbout(i18n.language, r).replaceAll('`', '');
+  const about = ruleAbout(i18n.language, guard, r).replaceAll('`', '');
   const open = () => actions.open(r);
   const onKeyDown = (e: KeyboardEvent<HTMLTableRowElement>) => {
     if (e.target !== e.currentTarget) return;

@@ -167,7 +167,7 @@ function EventRow({ e, detail }: { e: GuardEvent; detail: SecurityDetail | undef
   const d = e.detail ?? {};
   if (!guard) return null;
   const outcome = outcomeOf(t, e.action, d);
-  const rule = d.rule ? ruleName(i18n.language, detail?.[guard], d.rule, d.custom === true, d.rule_name) : '—';
+  const rule = d.rule ? ruleName(i18n.language, guard, detail?.[guard], d.rule, d.custom === true, d.rule_name) : '—';
   const sources = new Intl.ListFormat(i18n.language, { type: 'conjunction' }).format(sourcesOf(t, d));
   const when = new Date(e.created_at);
   return (

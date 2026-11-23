@@ -688,8 +688,8 @@ export function BuiltinRuleDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const trial = useTrial(guard, { sample, rule: rule.id, action });
-  const why = ruleWhy(lang, rule);
-  const about = ruleAbout(lang, rule);
+  const why = ruleWhy(lang, guard, rule);
+  const about = ruleAbout(lang, guard, rule);
   const changed = action !== initial;
 
   async function save() {
@@ -708,11 +708,11 @@ export function BuiltinRuleDialog({
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {viewName(lang, rule)}
+            {viewName(lang, guard, rule)}
             <Badge variant="secondary">{t('contentSecurity.builtinGroup')}</Badge>
           </DialogTitle>
           <DialogDescription>
-            {why || t('contentSecurity.dialog.category', { kind: kindName(lang, kinds, rule.kind) })}
+            {why || t('contentSecurity.dialog.category', { kind: kindName(lang, guard, kinds, rule.kind) })}
           </DialogDescription>
         </DialogHeader>
 
@@ -873,10 +873,10 @@ export function TestDialog({
                     {hits.map((h, i) => (
                       <TableRow key={`${h.rule}:${h.start}:${i}`}>
                         <TableCell className="truncate">
-                          {ruleName(lang, detail, h.rule, h.custom)}
+                          {ruleName(lang, guard, detail, h.rule, h.custom)}
                           {h.custom && (
                             <Badge variant="outline" className="ml-1.5">
-                              {kindName(lang, detail?.kinds, 'custom')}
+                              {kindName(lang, guard, detail?.kinds, 'custom')}
                             </Badge>
                           )}
                         </TableCell>
