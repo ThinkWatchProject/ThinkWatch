@@ -56,7 +56,7 @@ export function ExceptionsPanel({ detail, canWrite }: { detail: GuardDetail; can
   const max = query.data?.max ?? 500;
   const full = items.length >= max;
   const rule = (e: RedactException) =>
-    e.rule ? ruleName(i18n.language, detail, e.rule, false, e.rule) : t('contentSecurity.exceptions.noRule');
+    e.rule ? ruleName(i18n.language, 'redact', detail, e.rule, false, e.rule) : t('contentSecurity.exceptions.noRule');
 
   const addButton = (
     <Button

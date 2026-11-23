@@ -3,17 +3,34 @@ import type {
   Guard,
   GuardDetail,
   GuardMode,
+  Matcher,
   RuleAction,
   RuleScope,
   SecurityKindView,
   SecurityRuleView,
 } from '@/lib/security-types';
+import CATALOG from './guard.zh.json';
 
-// Names on the security page. A built-in rule's name, reason and
-// description, and each group's name, come with the rule view in both
-// languages (thinkwatch-core writes them once for both products); the
-// console keeps no table of its own. A custom rule's id is the name its
-// author gave it.
+// Built-in display text is translated by guard and ID. The view supplies
+// English fallbacks and custom rules keep their original names.
+type RuleCopy = { name: string; why?: string; about?: string };
+const catalog: Record<Guard, { rules: Record<string, RuleCopy>; kinds: Record<string, string> }> = CATALOG;
+
+function guardAboutZh(m: Matcher): string | undefined {
+  if (m.kind !== "prefix" && m.kind !== "prefixes") return undefined;
+  const prefixes = m.kind === "prefix" ? [{ ...m, tail: "any" }] : m.prefixes;
+  const groups = new Map<string, { prefixes: string[]; length: number; unit: string }>();
+  for (const p of prefixes) {
+    const key = `${p.min_tail}:${p.tail}`;
+    const unit = p.tail === "hex" ? "十六进制字符" : p.tail === "alnum" ? "字母或数字" : "字符";
+    const group = groups.get(key) ?? { prefixes: [], length: p.min_tail, unit };
+    group.prefixes.push(`\`${p.prefix}\``);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map(({ prefixes, length, unit }) =>
+    `${prefixes.join("、")} 开头，其后至少 ${length} 个${unit}`,
+  ).join("；") || undefined;
+}
 
 export function guardName(t: TFunction, guard: Guard): string {
   return t(`contentSecurity.guard.${guard}.name`);
@@ -29,20 +46,19 @@ export function scopeName(t: TFunction, scope: RuleScope): string {
   return t(`contentSecurity.scope.${scope}`);
 }
 
-/** Whether the console is in Chinese: rule text comes from the server in both languages. */
 function zh(lang: string): boolean {
   return lang.startsWith('zh');
 }
 
-/** The Chinese text in Chinese when there is one, else the English. */
-function pick(lang: string, en: string | undefined, cn: string | undefined): string {
-  return (zh(lang) && cn ? cn : en) ?? '';
+function ruleCopy(guard: Guard, id: string): RuleCopy | undefined {
+  const rules = catalog[guard].rules;
+  return Object.hasOwn(rules, id) ? rules[id] : undefined;
 }
 
 /** A rule's name as the view gives it. A custom rule's id is the name its author gave it. */
-export function viewName(lang: string, r: SecurityRuleView): string {
+export function viewName(lang: string, guard: Guard, r: SecurityRuleView): string {
   if (r.custom) return r.id;
-  return pick(lang, r.name, r.name_zh) || r.id;
+  return (zh(lang) ? ruleCopy(guard, r.id)?.name : undefined) ?? (r.name || r.id);
 }
 
 /**
@@ -52,6 +68,7 @@ export function viewName(lang: string, r: SecurityRuleView): string {
  */
 export function ruleName(
   lang: string,
+  guard: Guard,
   detail: GuardDetail | undefined,
   id: string,
   custom: boolean,
@@ -59,25 +76,27 @@ export function ruleName(
 ): string {
   if (custom) return id;
   const r = detail?.rules.find((r) => !r.custom && r.id === id);
-  return r ? viewName(lang, r) : (fallback ?? id);
+  return r ? viewName(lang, guard, r) : ((zh(lang) ? ruleCopy(guard, id)?.name : undefined) ?? fallback ?? id);
 }
 
 /** Why a built-in rule is worth a look. Empty for rules that carry no reason. */
-export function ruleWhy(lang: string, r: SecurityRuleView): string {
+export function ruleWhy(lang: string, guard: Guard, r: SecurityRuleView): string {
   if (r.custom) return '';
-  return pick(lang, r.why, r.why_zh);
+  return (zh(lang) ? ruleCopy(guard, r.id)?.why : undefined) ?? r.why ?? '';
 }
 
 /** What a built-in redaction rule finds, as a sentence; backticks mark code. Empty elsewhere. */
-export function ruleAbout(lang: string, r: SecurityRuleView): string {
+export function ruleAbout(lang: string, guard: Guard, r: SecurityRuleView): string {
   if (r.custom) return '';
-  return pick(lang, r.about, r.about_zh);
+  return (zh(lang) ? guardAboutZh(r.matcher) ?? ruleCopy(guard, r.id)?.about : undefined) ?? r.about ?? '';
 }
 
 /** A rule group's heading, from the guard's view. */
-export function kindName(lang: string, kinds: SecurityKindView[] | undefined, slug: string): string {
+export function kindName(lang: string, guard: Guard, kinds: SecurityKindView[] | undefined, slug: string): string {
+  const copy = catalog[guard].kinds;
+  if (zh(lang) && Object.hasOwn(copy, slug)) return copy[slug] ?? slug;
   const k = kinds?.find((k) => k.slug === slug);
-  return k ? pick(lang, k.name, k.name_zh) : slug;
+  return k?.name ?? slug;
 }
 
 export function actionName(t: TFunction, action: RuleAction): string {
